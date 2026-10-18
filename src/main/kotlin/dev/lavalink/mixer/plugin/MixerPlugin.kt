@@ -141,6 +141,24 @@ class MixerPlugin(
                     log.warn("mixer poll failed", e)
                 }
             }
+            retryAnalysis(mixer)
+        }
+    }
+
+    /** Preload-time analysis skipped on a busy sub player resumes once it frees up. */
+    private fun retryAnalysis(mixer: GuildMixer) {
+        val clone = try {
+            mixer.maybeRetryAnalysis()
+        } catch (e: Exception) {
+            log.warn("analysis retry check failed on guild {}", mixer.guildId, e)
+            return
+        } ?: return
+        analysisExecutor.execute {
+            try {
+                mixer.analyzeBlocking(clone)
+            } catch (e: Exception) {
+                log.warn("silence analysis retry failed on guild {}", mixer.guildId, e)
+            }
         }
     }
 

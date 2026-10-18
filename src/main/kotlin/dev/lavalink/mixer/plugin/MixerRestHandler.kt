@@ -83,6 +83,17 @@ data class MixerState(
     val tailConfirmMs: Long,
     /** [leadMs, trailMs] of the queued track when already analyzed, else null. */
     val nextTrimMs: List<Long>? = null,
+    /** Identifier of the queued next track (pending or ready), so clients can verify server-side ownership. */
+    val nextTrackIdentifier: String? = null,
+    val nextTrackTitle: String? = null,
+    /** Silence-analysis progress of the queued next track: idle | pending | analyzing | ready. */
+    val analysisState: String = "idle",
+    /** Identifier of the armed overlay/overlap sub track, while the secondary decoder is in use. */
+    val subTrackIdentifier: String? = null,
+    /** False once the heartbeat probe proved the mixer filter never entered the running track's chain. */
+    val mixerFilterActive: Boolean = true,
+    /** Milliseconds until an armed overlap hands off; null when no crossfade is running. */
+    val crossfadeHandoffInMs: Long? = null,
 )
 
 /**
@@ -132,6 +143,12 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
                 silenceThresholdDb = mixer.silenceThresholdDb,
                 tailConfirmMs = mixer.tailConfirmMs,
                 nextTrimMs = mixer.peekNextTrim()?.let { listOf(it.leadMs, it.trailMs) },
+                nextTrackIdentifier = mixer.nextTrackIdentifier(),
+                nextTrackTitle = mixer.nextTrackTitle(),
+                analysisState = mixer.analysisState(),
+                subTrackIdentifier = mixer.subTrackIdentifier(),
+                mixerFilterActive = mixer.mixerFilterActive(),
+                crossfadeHandoffInMs = mixer.crossfadeHandoffInMs(),
             )
         )
     }

@@ -21,6 +21,20 @@ info:
 
     All guildIds are strings (snowflakes exceed 2^53, JSON numbers would lose precision).
     All durations are milliseconds.
+
+    WEBSOCKET EVENTS (push, custom op):
+    The plugin pushes `{ "op": "mixer", ... }` frames to the Lavalink WebSocket
+    session owning the guild's player. Lavalink clients that switch on `op`
+    will not know these frames; consume them on the client's raw-message hook
+    (lavalink-client: `NodeManager.on("raw")`, filter `payload.op === "mixer"`)
+    and ignore the spurious "Unexpected op" error such clients may also emit.
+    - `{"op":"mixer","type":"overlapStart","guildId":"<id>","crossfadeMs":<ms>,
+       "handoffInMs":<ms>,"track":{"identifier":"...","title":"..."}}`
+       — an overlap (crossfade) armed; `track` is the incoming track.
+    - `{"op":"mixer","type":"overlapEnd","guildId":"<id>","reason":"handoff"|"aborted",
+       "detail":"<abort reason, when aborted>","track":{"identifier":"...","title":"..."}}`
+       — the overlap handed off to the incoming track, or was torn down
+       (client replace/stop, backward seek, sub failure, stale arm).
 servers:
   - url: http://localhost:2333
     description: Lavalink server (same host/port/auth as the v4 API)
@@ -90,6 +104,24 @@ components:
             - { type: integer, description: Leading silence in ms, skipped via seek }
             - { type: integer, description: Trailing silence in ms, ends the track early }
           description: Present only when the queued track finished silence analysis (ready). Null while still analyzing (pending) — hasNext is already true then.
+        nextTrackIdentifier:
+          type: [string, 'null']
+          description: Identifier of the queued next track (pending or ready), so clients can verify which track the server will start.
+        nextTrackTitle: { type: [string, 'null'] }
+        analysisState:
+          type: string
+          enum: [idle, pending, analyzing, ready]
+          description: Silence-analysis progress of the queued next track. pending = queued but scan deferred (sub player busy); analyzing = scan running; ready = trim available.
+        subTrackIdentifier:
+          type: [string, 'null']
+          description: Identifier of the armed overlay/overlap sub track, while the secondary decoder is in use.
+        mixerFilterActive:
+          type: boolean
+          description: False once the heartbeat probe proved the mixer filter never entered the running track's chain (filters op arrived after play).
+        crossfadeHandoffInMs:
+          type: [integer, 'null']
+          format: int64
+          description: Milliseconds until an armed overlap hands off; null when no crossfade is running.
     CrossfadeRequest:
       type: object
       required: [guildId, enabled]

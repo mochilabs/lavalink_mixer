@@ -72,13 +72,14 @@ class MixerPlugin(
         return future
     }
 
-    /** Loads [identifier] and starts it as a ducked overlay. Fails fast if the sub player is busy. */
-    fun announce(guildId: Long, identifier: String?, encodedTrack: String?, duck: Float?): CompletableFuture<AudioTrack> {
+    /**
+     * Queues a ducked overlay announcement; it starts automatically once the
+     * secondary player is free (no overlay, no overlap in flight). Successive
+     * announcements play back to back in enqueue order.
+     */
+    fun announce(guildId: Long, identifier: String?, encodedTrack: String?, duck: Float?): Pair<Long, Int> {
         val mixer = getOrCreate(guildId)
-        if (mixer.isSubBusy()) throw MixerBusyException("secondary player busy on guild $guildId")
-        return resolveTrack(guildId, identifier, encodedTrack).thenApply { track ->
-            mixer.startOverlay(track, duck ?: mixer.duckLevel)
-        }
+        return mixer.enqueueAnnouncement(identifier, encodedTrack, duck ?: mixer.duckLevel)
     }
 
     private fun resolveTrack(guildId: Long, identifier: String?, encodedTrack: String?): CompletableFuture<AudioTrack> {
@@ -142,6 +143,7 @@ class MixerPlugin(
                 }
             }
             retryAnalysis(mixer)
+            maybeStartAnnouncement(mixer)
         }
     }
 
@@ -158,6 +160,27 @@ class MixerPlugin(
                 mixer.analyzeBlocking(clone)
             } catch (e: Exception) {
                 log.warn("silence analysis retry failed on guild {}", mixer.guildId, e)
+            }
+        }
+    }
+
+    /**
+     * Starts the next queued announcement when the secondary player is free.
+     * The track is resolved at start time so queued TTS URLs stay fresh; a
+     * busy-sub race during resolution re-queues the item at the head.
+     */
+    private fun maybeStartAnnouncement(mixer: GuildMixer) {
+        val item = mixer.takeNextAnnouncement() ?: return
+        resolveTrack(mixer.guildId, item.identifier, item.encodedTrack).whenComplete { track, err ->
+            if (err != null || track == null) {
+                mixer.onAnnouncementFailed(item, err ?: IllegalArgumentException("announcement track resolved to nothing"))
+                return@whenComplete
+            }
+            try {
+                mixer.startOverlay(track, item.duckLevel, item.id)
+                mixer.onAnnouncementStarted(item)
+            } catch (e: Exception) {
+                mixer.requeueAnnouncement(item, e)
             }
         }
     }

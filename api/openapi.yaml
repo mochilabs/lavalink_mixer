@@ -15,8 +15,8 @@ info:
        POST /mixer/fade-in, POST /mixer/silence.
     3. Queue the next track BEFORE the current one ends:
        POST /mixer/queue/next. This is what makes transitions gapless.
-    4. For talk-over announcements: POST /mixer/announce (music ducks
-       automatically, restores on end).
+    4. For talk-over announcements: POST /mixer/announce — queued, played one at
+       a time with automatic ducking (music restores on end).
     5. Inspect with GET /mixer/state.
 
     All guildIds are strings (snowflakes exceed 2^53, JSON numbers would lose precision).
@@ -35,6 +35,11 @@ info:
        "detail":"<abort reason, when aborted>","track":{"identifier":"...","title":"..."}}`
        — the overlap handed off to the incoming track, or was torn down
        (client replace/stop, backward seek, sub failure, stale arm).
+    - `{"op":"mixer","type":"announceStart","guildId":"<id>","announcementId":<id>,
+       "track":{"identifier":"...","title":"..."}}`
+       — a queued announcement started talking over the music.
+    - `{"op":"mixer","type":"announceEnd","guildId":"<id>"}`
+       — the overlay ended (natural end, cancel, or sub failure).
 servers:
   - url: http://localhost:2333
     description: Lavalink server (same host/port/auth as the v4 API)
@@ -122,6 +127,9 @@ components:
           type: [integer, 'null']
           format: int64
           description: Milliseconds until an armed overlap hands off; null when no crossfade is running.
+        announcementsQueued:
+          type: integer
+          description: Announcements waiting for the secondary player, in queue order.
     CrossfadeRequest:
       type: object
       required: [guildId, enabled]
@@ -162,6 +170,21 @@ components:
           type: number
           format: float
           description: Music level while overlaying (0-1). Omit for guild default (0.2).
+    AnnounceQueuedResponse:
+      type: object
+      required: [guildId, id, position, queueLength]
+      properties:
+        guildId: { type: string }
+        id:
+          type: integer
+          format: int64
+          description: Announcement id; matches `announcementId` in announceStart/announceEnd events.
+        position:
+          type: integer
+          description: 1-based position among queued announcements at enqueue time.
+        queueLength:
+          type: integer
+          description: Total queued announcements after this enqueue (the active overlay is not counted).
     AnnounceCancelRequest:
       type: object
       required: [guildId]
@@ -315,38 +338,51 @@ paths:
   /mixer/announce:
     post:
       operationId: announce
-      summary: Overlay audio over the music with ducking (TTS use-case)
+      summary: Queue an audio overlay over the music with ducking (TTS use-case)
       description: |
-        Loads `identifier` on the hidden player and mixes it over the music
-        while ducking the music to `duckLevel`. Unducks automatically when the
-        overlay ends. Only one secondary source per guild: returns 409 while a
-        crossfade overlap or another overlay is active (or analysis is running).
+        Enqueues an announcement. When it reaches the head and the hidden
+        secondary player is free, the audio is mixed over the music while
+        ducking it to `duckLevel` (restored when the overlay ends). Successive
+        announcements play back to back in enqueue order; announcements wait
+        out crossfade overlaps instead of failing. The track is resolved at
+        start time, so queued items stay fresh. 409 is gone: everything queues.
+        Watch `announceStart`/`announceEnd` websocket events or
+        `announcementsQueued` in state to observe progress.
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: '#/components/schemas/AnnounceRequest' }
       responses:
-        '200':
-          description: Overlay playing
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/TrackInfo' }
         '202':
-          description: Still loading after 20s; starts in the background
+          description: Queued
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/AnnounceQueuedResponse' }
         '400':
-          description: No matches or load failed
+          description: No identifier or encodedTrack provided
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
-        '409':
-          description: Secondary player busy on this guild
+  /mixer/announce/queue:
+    delete:
+      operationId: clearAnnounceQueue
+      summary: Drop all queued (not active) announcements
+      description: The active overlay is not touched — use /mixer/announce/cancel for that.
+      parameters:
+        - name: guildId
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: How many queued announcements were dropped
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema:
+                type: object
+                properties:
+                  cleared: { type: integer }
   /mixer/announce/cancel:
     post:
       operationId: cancelAnnounce

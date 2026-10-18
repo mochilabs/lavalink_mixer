@@ -639,6 +639,78 @@ class GuildMixer(
     fun isXfadeActive(): Boolean = synchronized(lock) { xfadeActive }
     fun isSubBusy(): Boolean = synchronized(lock) { overlayActive || xfadeActive || analysisActive }
 
+    // ---- announcement queue ----
+    //
+    // TTS/announcements are talk-over overlays: they duck the music rather than
+    // becoming a track in the playback order. One overlay at a time is a hard
+    // limit (there is a single secondary decoder), so successive announcements
+    // wait here and play back to back as the secondary player frees up.
+
+    data class AnnouncementItem(
+        val id: Long,
+        val identifier: String?,
+        val encodedTrack: String?,
+        val duckLevel: Float,
+    )
+
+    private val announcementQueue = ArrayDeque<AnnouncementItem>()
+    private var announcementSeq: Long = 0L
+    /** A queued item is being resolved/started on the plugin's thread; prevents double starts. */
+    private var announcementResolving: Boolean = false
+
+    /** Queues an announcement; returns its id and 1-based position among queued announcements. */
+    fun enqueueAnnouncement(identifier: String?, encodedTrack: String?, duckLevel: Float): Pair<Long, Int> =
+        synchronized(lock) {
+            val item = AnnouncementItem(++announcementSeq, identifier, encodedTrack, duckLevel)
+            announcementQueue.addLast(item)
+            log.info("queued announcement {} on guild {} ({} waiting)", item.id, guildId, announcementQueue.size)
+            item.id to announcementQueue.size
+        }
+
+    /**
+     * Pops the next announcement when the secondary player is free to start
+     * one. The caller resolves the track and calls [startOverlay]; on failure
+     * or a busy-sub race it must hand the item back via [requeueAnnouncement]
+     * or [onAnnouncementFailed].
+     */
+    fun takeNextAnnouncement(): AnnouncementItem? = synchronized(lock) {
+        if (overlayActive || xfadeActive || announcementResolving) return null
+        val item = announcementQueue.removeFirstOrNull() ?: return null
+        announcementResolving = true
+        item
+    }
+
+    /** Puts an item back at the head after a busy race or transient failure. */
+    fun requeueAnnouncement(item: AnnouncementItem, cause: Throwable?) {
+        synchronized(lock) {
+            announcementQueue.addFirst(item)
+            announcementResolving = false
+        }
+        log.warn("announcement {} re-queued on guild {}: {}", item.id, guildId, cause?.toString() ?: "secondary player busy")
+    }
+
+    /** Drops an item whose track could not be resolved/started. */
+    fun onAnnouncementFailed(item: AnnouncementItem, cause: Throwable?) {
+        synchronized(lock) { announcementResolving = false }
+        log.warn("announcement {} on guild {} dropped: {}", item.id, guildId, cause?.toString() ?: "unknown")
+    }
+
+    fun onAnnouncementStarted(item: AnnouncementItem) {
+        synchronized(lock) { announcementResolving = false }
+    }
+
+    fun announcementQueueSize(): Int = synchronized(lock) { announcementQueue.size }
+
+    /** Removes all queued (not active) announcements; returns how many were dropped. */
+    fun clearAnnouncements(): Int = synchronized(lock) {
+        val size = announcementQueue.size
+        announcementQueue.clear()
+        if (size > 0) {
+            log.info("cleared {} queued announcement(s) on guild {}", size, guildId)
+        }
+        size
+    }
+
     /** Identifier of the preheated next track (pending or ready), so clients can verify which track the server will start. */
     fun nextTrackIdentifier(): String? = synchronized(lock) { (readyNextTrack ?: pendingNextTrack)?.let { idOf(it) } }
 
@@ -666,7 +738,7 @@ class GuildMixer(
         (xfadeHandoffMs - pos).coerceAtLeast(0)
     }
 
-    fun startOverlay(track: AudioTrack, duck: Float): AudioTrack {
+    fun startOverlay(track: AudioTrack, duck: Float, announcementId: Long? = null): AudioTrack {
         val sub = synchronized(lock) {
             if (overlayActive || xfadeActive) throw MixerBusyException("secondary player busy on guild $guildId")
             val s = ensureSubLocked()
@@ -688,6 +760,10 @@ class GuildMixer(
             throw e
         }
         log.info("overlay '{}' started on guild {}", track.info.title, guildId)
+        notifyMixerEvent("announceStart") {
+            if (announcementId != null) put("announcementId", announcementId)
+            putTrack(track)
+        }
         return track
     }
 
@@ -1040,6 +1116,7 @@ class GuildMixer(
 
     private fun finishOverlay() {
         log.info("overlay finished on guild {}", guildId)
+        notifyMixerEvent("announceEnd") {}
         val sub = synchronized(lock) {
             overlayActive = false
             subTrack = null

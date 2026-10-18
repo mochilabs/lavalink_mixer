@@ -45,6 +45,15 @@ data class AnnounceRequest(
 data class AnnounceCancelRequest(val guildId: String)
 
 @Serializable
+data class AnnounceQueuedResponse(
+    val guildId: String,
+    val id: Long,
+    /** 1-based position among queued announcements at enqueue time. */
+    val position: Int,
+    val queueLength: Int,
+)
+
+@Serializable
 data class SilenceRequest(
     val guildId: String,
     val enabled: Boolean,
@@ -94,6 +103,8 @@ data class MixerState(
     val mixerFilterActive: Boolean = true,
     /** Milliseconds until an armed overlap hands off; null when no crossfade is running. */
     val crossfadeHandoffInMs: Long? = null,
+    /** Announcements (TTS/overlay) waiting for the secondary player, in queue order. */
+    val announcementsQueued: Int = 0,
 )
 
 /**
@@ -149,6 +160,7 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
                 subTrackIdentifier = mixer.subTrackIdentifier(),
                 mixerFilterActive = mixer.mixerFilterActive(),
                 crossfadeHandoffInMs = mixer.crossfadeHandoffInMs(),
+                announcementsQueued = mixer.announcementQueueSize(),
             )
         )
     }
@@ -171,16 +183,24 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
     }
 
     @PostMapping("/mixer/announce")
-    fun announce(@RequestBody body: AnnounceRequest): ResponseEntity<TrackInfo> {
+    fun announce(@RequestBody body: AnnounceRequest): ResponseEntity<AnnounceQueuedResponse> {
         requireTrackRef(body.identifier, body.encodedTrack)
         val guildId = gid(body.guildId)
-        val future = try {
-            plugin.announce(guildId, body.identifier, body.encodedTrack, body.duckLevel)
-        } catch (e: MixerBusyException) {
-            throw ResponseStatusException(HttpStatus.CONFLICT, e.message, e)
-        }
-        val track = awaitFuture(future, body.identifier ?: "encoded track")
-        return ResponseEntity.ok(track.toInfo())
+        val (id, position) = plugin.announce(guildId, body.identifier, body.encodedTrack, body.duckLevel)
+        return ResponseEntity.accepted().body(
+            AnnounceQueuedResponse(
+                guildId = body.guildId,
+                id = id,
+                position = position,
+                queueLength = plugin.find(guildId)?.announcementQueueSize() ?: position,
+            )
+        )
+    }
+
+    @DeleteMapping("/mixer/announce/queue")
+    fun clearAnnounceQueue(@RequestParam guildId: Long): ResponseEntity<Map<String, Int>> {
+        val mixer = plugin.find(guildId) ?: throw notFound(guildId)
+        return ResponseEntity.ok(mapOf("cleared" to mixer.clearAnnouncements()))
     }
 
     @PostMapping("/mixer/announce/cancel")

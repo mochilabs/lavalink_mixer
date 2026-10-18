@@ -141,6 +141,61 @@ class CrossfadeMixIntegrationTest {
         }
     }
 
+    /**
+     * Production shape of the handoff abort users reported: the outgoing
+     * track ends exactly when the overlap reaches its handoff position, and
+     * the ~100ms poll does not run in between — the FINISH event itself
+     * drives the handoff. Lavaplayer nulls `playingTrack` *before*
+     * dispatching that event, so the guard used to read "armed track was
+     * replaced" and abort, throwing the overlapped track away and leaving
+     * the client to replay it from zero. The handoff must recognize its own
+     * track's natural finish and complete.
+     */
+    @Test
+    fun `a handoff driven by the track end event completes instead of aborting`() {
+        val manager = manager()
+        val outgoing = toneFile("mixer-finish-out", 440.0, 10)
+        val incoming = toneFile("mixer-finish-in", 880.0, 10)
+        try {
+            val config = MixerConfig().apply {
+                crossfadeEnabled = true
+                crossfadeMs = 3000
+                fadeInMs = 0
+                maskMs = 0
+                silenceSkipEnabled = false
+            }
+            val mixer = GuildMixer(1L, manager, config)
+            val player = manager.createPlayer()
+            player.setFilterFactory(PcmFilterFactory { _, _, output ->
+                mutableListOf(mixer.newFilter(output))
+            })
+            mixer.attachMain(iPlayer(1L, player))
+
+            val trackA = loadTrack(manager, outgoing)
+            val trackB = loadTrack(manager, incoming)
+            player.playTrack(trackA)
+            mixer.queueNext(CompletableFuture.completedFuture(trackB))
+
+            // Arm the overlap through the normal poll loop first...
+            pumpUntil(player, mixer) { mixer.isXfadeActive() }
+            assertTrue(mixer.isXfadeActive(), "the crossfade never armed: poll() never planned an overlap")
+
+            // ...then stop polling so the position-based handoff cannot fire
+            // before the track ends; only the end event can finish it.
+            val handedOff = pumpEndEventHandoff(player, mixer, trackA)
+
+            assertNotNull(handedOff, "the handoff aborted on the armed track's own end event: no track is playing")
+            assertTrue(handedOff !== trackA, "the outgoing track is still playing")
+            assertTrue(
+                handedOff.info.identifier == trackB.info.identifier,
+                "the overlapped track did not take over: '${handedOff.info.identifier}'",
+            )
+        } finally {
+            outgoing.delete()
+            incoming.delete()
+        }
+    }
+
     /** A hard cut is a single straddling window; a real crossfade is sustained. */
     private fun assertBlend(recorded: FloatArray) {
         val window = sampleRate / 4 // 250ms
@@ -303,6 +358,33 @@ class CrossfadeMixIntegrationTest {
         }
         assertTrue(frames >= targetFrames, "only decoded ${frames * 20}ms of ${targetMs}ms")
         player.stopTrack()
+    }
+
+    /**
+     * Pumps without poll() — the scheduler missing the handoff window — until
+     * the outgoing track's FINISH event drives the handoff. Returns the track
+     * playing afterwards, or null when the handoff aborted and the player
+     * idled.
+     */
+    private fun pumpEndEventHandoff(player: AudioPlayer, mixer: GuildMixer, outgoing: AudioTrack): AudioTrack? {
+        val frame = MutableAudioFrame().apply { setBuffer(ByteBuffer.allocate(StandardAudioDataFormats.DISCORD_PCM_S16_LE.maximumChunkSize())) }
+        val deadline = System.currentTimeMillis() + 60_000
+        val started = System.nanoTime()
+        var frames = 0L
+        while (System.currentTimeMillis() < deadline) {
+            val playing = player.playingTrack
+            if (playing == null) return null
+            if (playing !== outgoing) return playing
+            if (player.provide(frame)) {
+                frames++
+                mixer.drain()
+                pace(started, frames)
+            } else {
+                mixer.drain()
+                Thread.sleep(1)
+            }
+        }
+        return null
     }
 
     private fun manager(): DefaultAudioPlayerManager {

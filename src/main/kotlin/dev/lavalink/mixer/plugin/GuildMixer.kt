@@ -97,6 +97,17 @@ class GuildMixer(
     private var lastMainTrack: AudioTrack? = null
     private var lastPosition: Long = 0L
 
+    /**
+     * Lavaplayer nulls `audioPlayer.playingTrack` *before* dispatching the
+     * FINISHED/LOAD_FAILED end event, so the handoff guard cannot see the
+     * ended track through the player anymore. Recorded under [lock] in
+     * [mainListener]'s onTrackEnd; [doHandoff] accepts it as the armed track
+     * for [LAST_ENDED_MAIN_GRACE_MS] — a handoff driven by that very end event
+     * is a natural finish, not a replace.
+     */
+    private var lastEndedMain: AudioTrack? = null
+    private var lastEndedMainAt: Long = 0L
+
     /** Ticks once per mixer-filter chunk; see [checkFilterHeartbeatLocked]. */
     private val filterRunCount = AtomicLong(0L)
 
@@ -196,7 +207,14 @@ class GuildMixer(
         override fun onTrackEnd(player: AudioPlayer, track: AudioTrack, endReason: AudioTrackEndReason) {
             if (endReason != AudioTrackEndReason.FINISHED && endReason != AudioTrackEndReason.LOAD_FAILED) return
             // Decide under lock, act outside it (play/seek may block on source I/O).
-            val handoff = synchronized(lock) { xfadeActive }
+            val handoff = synchronized(lock) {
+                // The player has already null'ed playingTrack by now (lavaplayer
+                // clears it before dispatching this event); remember the ended
+                // instance so doHandoff can tell a natural finish from a replace.
+                lastEndedMain = track
+                lastEndedMainAt = System.currentTimeMillis()
+                xfadeActive
+            }
             if (handoff) {
                 doHandoff()
             } else {
@@ -987,7 +1005,19 @@ class GuildMixer(
     )
 
     private fun doHandoff() {
-        if (synchronized(lock) { xfadeActive && xfadeMainTrack != null && main?.audioPlayer?.playingTrack !== xfadeMainTrack }) {
+        val handoffAllowed = synchronized(lock) {
+            val armed = xfadeMainTrack ?: return@synchronized true
+            val playing = main?.audioPlayer?.playingTrack
+            // Lavaplayer nulls playingTrack before dispatching FINISHED/LOAD_FAILED,
+            // so a handoff driven by onTrackEnd legitimately sees no playing track;
+            // lastEndedMain keeps that just-ended instance recognizable for a short
+            // window. Anything else means the overlap was armed on a track that was
+            // really replaced — never hand off into it.
+            val endedRecently = lastEndedMain === armed &&
+                System.currentTimeMillis() - lastEndedMainAt <= LAST_ENDED_MAIN_GRACE_MS
+            playing === armed || endedRecently
+        }
+        if (!handoffAllowed) {
             // Callers decide under the lock and act after releasing it, so a
             // client replace can slip in between; never hand off into a track
             // the overlap was not armed on.
@@ -1485,6 +1515,12 @@ class GuildMixer(
         private const val ANALYSIS_PUMP_BURST = 8
         private const val ANALYSIS_PUMP_SLEEP_MS = 10L
         private const val ANALYSIS_IDLE_SLEEP_MS = 20L
+
+        /**
+         * How long a FINISHED/LOAD_FAILED main track counts as "the armed track,
+         * just ended" for the handoff guard; see [lastEndedMain].
+         */
+        private const val LAST_ENDED_MAIN_GRACE_MS = 10_000L
 
         fun msToSamples(ms: Long): Int = ((ms.coerceAtLeast(0) * SAMPLE_RATE) / 1000).toInt().coerceAtLeast(1)
     }

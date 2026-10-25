@@ -14,7 +14,7 @@ Built against `dev.arbjerg.lavalink:plugin-api:4.2.2` + `dev.arbjerg:lavaplayer:
 
 1. Build and install:
    ```bash
-   ./gradlew jar   # -> build/libs/mixer-1.0.0.jar
+   ./gradlew jar   # -> build/libs/lavalink_mixer-<version>.jar
    ```
    Copy the jar into the server's `plugins/` dir (or declare
    `dev.lavalink.mixer:mixer:1.0.0` in `application.yml`) and restart Lavalink.

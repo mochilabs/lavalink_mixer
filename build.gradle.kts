@@ -8,7 +8,21 @@ plugins {
 }
 
 group = "dev.lavalink.mixer"
-version = "1.0.0"
+
+// Version follows the release tag. GitHub Releases pass it via `-Pversion=`
+// (release.yml); local/dev builds without a tag fall back to a snapshot so
+// the jar is never mislabeled with a stale version. A leading `v` is stripped
+// so `v1.2.3` produces `lavalink_mixer-1.2.3.jar`.
+val taggedVersion: String? = (
+    providers.environmentVariable("MIXER_VERSION").orNull
+        ?: (project.findProperty("version") as? String)?.takeIf { it != "unspecified" }
+    )?.removePrefix("v")?.takeIf { it.isNotEmpty() }
+version = taggedVersion
+    ?: runCatching {
+        val git = providers.exec { commandLine("git", "describe", "--tags", "--exact-match") }.standardOutput.asText.get().trim()
+        git.removePrefix("v").takeIf { it.isNotEmpty() }
+    }.getOrNull()
+    ?: "0.0.0-SNAPSHOT"
 
 repositories {
     mavenCentral()

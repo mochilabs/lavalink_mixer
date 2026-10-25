@@ -21,9 +21,25 @@ class MixerEvents(private val plugin: MixerPlugin) : PluginEventHandler() {
 
     override fun onDestroyPlayer(context: ISocketContext, player: IPlayer) {
         val mixer = plugin.find(player.guildId)
+        if (mixer == null) {
+            log.info("player destroyed for guild {} (mixer already gone)", player.guildId)
+            return
+        }
+        // Two players for one guild coexist briefly across socket sessions
+        // (a resuming session racing a fresh restore). Tearing the mixer down
+        // here would kill the survivor's crossfade state, and the surviving
+        // player's chain would lose its GuildMixer entirely. Only the mixer
+        // whose main (attached) player is being destroyed goes with it.
+        if (!mixer.isMain(player)) {
+            log.info(
+                "player destroyed for guild {} but mixer {} is attached to a different player; mixer kept",
+                player.guildId, MixerFilterExtension.describe(mixer),
+            )
+            return
+        }
         log.info(
             "player destroyed for guild {} (mixer {})",
-            player.guildId, mixer?.let { MixerFilterExtension.describe(it) } ?: "already gone",
+            player.guildId, MixerFilterExtension.describe(mixer),
         )
         plugin.remove(player.guildId)
     }

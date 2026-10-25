@@ -36,7 +36,7 @@ class NormalizationBaselineTest {
         // normGainForLocked is private; use currentTrackGain via onTrackStart
         m.normalizeForTest(0.5f, 1f)
         m.gainsForTest(1f, 0f)
-        val gains = m.advance(1)
+        val gains = m.advance(1, 1L)
         assertEquals(0.5f, gains.main, 1e-6f)
     }
 
@@ -46,9 +46,9 @@ class NormalizationBaselineTest {
         m.normBaselineForTest(0.8f)
         m.normalizeForTest(mainGain = 1f, subGain = 0.6f)
         m.beginXfadeForTest(48_000)
-        m.advance(48_000) // complete fade
+        m.advance(48_000, 1L) // complete fade
         // At handoff: sub becomes main at subNormGain
-        val gains = m.advance(1)
+        val gains = m.advance(1, 1L)
         assertEquals(0f, gains.main, 1e-6f)
         assertEquals(0.6f, gains.sub, 1e-6f)
         // Handoff done
@@ -57,7 +57,7 @@ class NormalizationBaselineTest {
         m.clearXfadeForTest()
         // After clear, mainNormGain should be 0.6 (from handoff), subNormGain reset
         m.gainsForTest(0.6f, 0f)
-        val gainsAfter = m.advance(1)
+        val gainsAfter = m.advance(1, 1L)
         assertEquals(0.6f, gainsAfter.main, 1e-6f)
     }
 
@@ -67,7 +67,7 @@ class NormalizationBaselineTest {
         m.normBaselineForTest(0.8f)
         // Track in cache with gain 0.7 → effective = 0.8 × 0.7 = 0.56
         m.normalizeForTest(mainGain = 0.56f, subGain = 0f)
-        val gains = m.advance(1)
+        val gains = m.advance(1, 1L)
         assertEquals(0.56f, gains.main, 1e-6f)
     }
 
@@ -96,7 +96,7 @@ class NormalizationBaselineTest {
         m.scheduleBaselineAnalysis(proxyTrack("id"))
         // mainNormGain is unchanged (no re-analysis)
         m.gainsForTest(0.5f, 0f)
-        val gains = m.advance(1)
+        val gains = m.advance(1, 1L)
         assertEquals(0.5f, gains.main, 1e-6f)
     }
 

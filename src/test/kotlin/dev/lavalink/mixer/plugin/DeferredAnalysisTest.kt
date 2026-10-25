@@ -38,7 +38,7 @@ class DeferredAnalysisTest {
                 silenceSkipEnabled = true
                 silenceHeadScanMs = 1500
                 silenceTailScanMs = 2000
-            })
+            }, java.util.concurrent.Executor { it.run() })
             val track = loadTrack(manager, file)
             mixer.queueNext(CompletableFuture.completedFuture(track))
 

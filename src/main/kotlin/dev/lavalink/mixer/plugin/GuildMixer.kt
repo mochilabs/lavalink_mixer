@@ -14,6 +14,7 @@ import kotlinx.serialization.json.put
 import org.slf4j.LoggerFactory
 import java.nio.ByteBuffer
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.PI
 import kotlin.math.cos
@@ -60,6 +61,7 @@ class GuildMixer(
     val guildId: Long,
     private val playerManager: AudioPlayerManager,
     config: MixerConfig,
+    private val analysisExecutor: Executor,
 ) {
     private val lock = Any()
 
@@ -1658,28 +1660,30 @@ class GuildMixer(
             ensureSubLocked()
             siphonFactory
         } ?: return
-        val clone = try {
-            track.makeClone()
-        } catch (e: Exception) {
-            synchronized(lock) { analysisActive = false }
-            return
-        }
-        try {
-            val loudness = measureLoudnessBlocking(clone, factory)
-            if (loudness != null) {
-                synchronized(lock) {
-                    // The FIRST track's measured RMS anchors every queued
-                    // track: subsequent tracks are pulled to this loudness.
-                    normGainBaseline = loudness
-                    normCache[track.identifier] = loudness
-                    while (normCache.size > 200) normCache.remove(normCache.keys.first())
-                }
-                log.info("normalization baseline guild {}: rms={}", guildId, loudness)
+        analysisExecutor.execute {
+            val clone = try {
+                track.makeClone()
+            } catch (e: Exception) {
+                synchronized(lock) { analysisActive = false }
+                return@execute
             }
-        } catch (e: Exception) {
-            log.warn("baseline loudness scan failed on guild {}", guildId, e)
-        } finally {
-            synchronized(lock) { analysisActive = false }
+            try {
+                val loudness = measureLoudnessBlocking(clone, factory)
+                if (loudness != null) {
+                    synchronized(lock) {
+                        // The FIRST track's measured RMS anchors every queued
+                        // track: subsequent tracks are pulled to this loudness.
+                        normGainBaseline = loudness
+                        normCache[track.identifier] = loudness
+                        while (normCache.size > 200) normCache.remove(normCache.keys.first())
+                    }
+                    log.info("normalization baseline guild {}: rms={}", guildId, loudness)
+                }
+            } catch (e: Exception) {
+                log.warn("baseline loudness scan failed on guild {}", guildId, e)
+            } finally {
+                synchronized(lock) { analysisActive = false }
+            }
         }
     }
 

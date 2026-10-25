@@ -139,7 +139,7 @@ class ChainDiagnosticTest {
         val manager = manager()
         val file = wav()
         try {
-            val mixer = GuildMixer(1L, manager, MixerConfig())
+            val mixer = GuildMixer(1L, manager, MixerConfig(), java.util.concurrent.Executor { it.run() })
             val player = manager.createPlayer()
             player.setFilterFactory(PcmFilterFactory { _, _, output ->
                 mutableListOf<AudioFilter>(mixer.newFilter(output))

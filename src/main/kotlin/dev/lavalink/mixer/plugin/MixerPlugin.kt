@@ -42,7 +42,7 @@ class MixerPlugin(
     }
 
     fun getOrCreate(guildId: Long): GuildMixer =
-        guilds.computeIfAbsent(guildId) { GuildMixer(it, playerManager, config) }
+        guilds.computeIfAbsent(guildId) { GuildMixer(it, playerManager, config, analysisExecutor) }
 
     fun find(guildId: Long): GuildMixer? = guilds[guildId]
 

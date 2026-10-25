@@ -77,9 +77,15 @@ class MixerPlugin(
      * secondary player is free (no overlay, no overlap in flight). Successive
      * announcements play back to back in enqueue order.
      */
-    fun announce(guildId: Long, identifier: String?, encodedTrack: String?, duck: Float?): Pair<Long, Int> {
+    fun announce(
+        guildId: Long,
+        identifier: String?,
+        encodedTrack: String?,
+        duck: Float?,
+        mode: GuildMixer.AnnounceMode = GuildMixer.AnnounceMode.SEQUENTIAL,
+    ): Pair<Long, Int> {
         val mixer = getOrCreate(guildId)
-        return mixer.enqueueAnnouncement(identifier, encodedTrack, duck ?: mixer.duckLevel)
+        return mixer.enqueueAnnouncement(identifier, encodedTrack, duck ?: mixer.duckLevel, mode)
     }
 
     private fun resolveTrack(guildId: Long, identifier: String?, encodedTrack: String?): CompletableFuture<AudioTrack> {
@@ -177,7 +183,7 @@ class MixerPlugin(
                 return@whenComplete
             }
             try {
-                mixer.startOverlay(track, item.duckLevel, item.id)
+                mixer.startOverlay(track, item.duckLevel, item.id, item.mode)
                 mixer.onAnnouncementStarted(item)
             } catch (e: Exception) {
                 mixer.requeueAnnouncement(item, e)

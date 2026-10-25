@@ -39,15 +39,18 @@ class MixerFilterTest {
     }
 
     @Test
-    fun `output clamps to unit range`() {
+    fun `output stays in unit range`() {
         val m = mixer()
         m.gainsForTest(1f, 1f)
         m.siphon.push(arrayOf(floatArrayOf(0.8f), floatArrayOf(-0.8f)), 0, 1)
         val filter = MixerFilter(m, null)
         val input = arrayOf(floatArrayOf(0.8f), floatArrayOf(-0.8f))
         filter.process(input, 0, 1)
-        assertEquals(1f, input[0][0])
-        assertEquals(-1f, input[1][0])
+        // Sum = 1.6 — above the 0.9 knee, compressed toward full scale:
+        // x=(1.6-0.9)/0.1=7.0, 0.9+0.1·(7/8)=0.9875 instead of flat-topping.
+        assertEquals(0.9875f, input[0][0], 1e-3f)
+        assertEquals(-0.9875f, input[1][0], 1e-3f)
+        assertTrue(kotlin.math.abs(input[0][0]) <= 1f)
     }
 
     @Test

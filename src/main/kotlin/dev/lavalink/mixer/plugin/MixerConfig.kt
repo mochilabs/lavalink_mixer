@@ -31,4 +31,7 @@ class MixerConfig {
 
     /** Parallel silence analyses (per-guild decoders are independent). Read at startup. */
     var analysisThreads: Int = 2
+
+    /** Upper bound on simultaneous parallel (`mode=parallel`) TTS overlays per guild. */
+    var maxParallelOverlays: Int = 4
 }

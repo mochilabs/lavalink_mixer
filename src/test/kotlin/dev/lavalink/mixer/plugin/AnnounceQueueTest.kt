@@ -108,6 +108,59 @@ class AnnounceQueueTest {
         assertTrue(otherId > id)
     }
 
+    @Test
+    fun `parallel announcements start despite a busy sequential slot and mix into output`() {
+        val manager = manager()
+        val fileA = toneFile("mixer-par-a", 440.0, 1)
+        val fileB = toneFile("mixer-par-b", 660.0, 1)
+        try {
+            val plugin = MixerPlugin(manager, MixerConfig())
+            val guildId = 51L
+            val socket = RecordingSocket()
+            val player = manager.createPlayer()
+            plugin.getOrCreate(guildId).attachMain(iPlayer(guildId, player, socket.context))
+
+            // Two parallel announcements: both may start concurrently.
+            plugin.announce(guildId, fileA.absolutePath, null, 0.2f, GuildMixer.AnnounceMode.PARALLEL)
+            plugin.announce(guildId, fileB.absolutePath, null, 0.2f, GuildMixer.AnnounceMode.PARALLEL)
+
+            val mixer = plugin.find(guildId)!!
+            try {
+                // Both parallel overlays started (two announceStart events).
+                assertTrue(
+                    waitUntil(5_000) { socket.messagesOfType("announceStart").size == 2 },
+                    "parallel announcements did not both start " +
+                        "(starts=${socket.messagesOfType("announceStart").size})",
+                )
+                assertEquals(2, mixer.parallelOverlayCountForTest(), "both parallel slots should be active")
+            } finally {
+                plugin.destroy()
+            }
+        } finally {
+            fileA.delete()
+            fileB.delete()
+        }
+    }
+
+    @Test
+    fun `parallel mode respects the max overlay limit`() {
+        val mixer = GuildMixer(52L, manager(), MixerConfig().apply { maxParallelOverlays = 2 })
+        mixer.enqueueAnnouncement("a", null, 0.2f, GuildMixer.AnnounceMode.PARALLEL)
+        mixer.enqueueAnnouncement("b", null, 0.2f, GuildMixer.AnnounceMode.PARALLEL)
+        mixer.enqueueAnnouncement("c", null, 0.2f, GuildMixer.AnnounceMode.PARALLEL)
+
+        // Two parallel slots fit; the third waits (announcementResolving gates a single pop at a time).
+        val first = mixer.takeNextAnnouncement()
+        assertEquals(GuildMixer.AnnounceMode.PARALLEL, first?.mode)
+        mixer.onAnnouncementStarted(first!!)
+        val second = mixer.takeNextAnnouncement()
+        assertEquals(GuildMixer.AnnounceMode.PARALLEL, second?.mode)
+        mixer.onAnnouncementStarted(second!!)
+        // Once the two slots are "active" (simulated), the third cannot pop.
+        mixer.armParallelForTest(2)
+        assertNull(mixer.takeNextAnnouncement(), "a third parallel overlay exceeded the limit")
+    }
+
     // ---- harness ----
 
     private class RecordingSocket {

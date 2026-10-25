@@ -18,8 +18,17 @@ data class NormalizationGain(
     companion object {
         const val DEFAULT_TARGET_RMS: Float = 0.1f
         const val MIN_GAIN: Float = 0.25f
-        const val MAX_GAIN: Float = 4.0f
-        const val MAX_BOOST_DB: Float = 12f
+        /**
+         * Attenuation-only ceiling. Quiet tracks are pulled *down* to the
+         * baseline, never boosted above it: a boost multiplies into the
+         * crossfade's equal-power sum (main+sub ≈ 1.41x at the midpoint) and
+         * any headroom the mix still had, so one loud-boosted track turned
+         * every overlap into hard-clipped square waves. A track quieter than
+         * the baseline stays quieter — matching the "anchor to the first
+         * track" contract without ever exceeding the peak level you already
+         * had before the crossfade.
+         */
+        const val MAX_GAIN: Float = 1.0f
 
         fun fromRms(measuredRms: Float, targetRms: Float = DEFAULT_TARGET_RMS): NormalizationGain {
             // A track whose whole analysis window was silent gets no boost.

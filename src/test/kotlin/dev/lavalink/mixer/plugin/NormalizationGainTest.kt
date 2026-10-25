@@ -30,7 +30,7 @@ class NormalizationGainTest {
 
     @Test
     fun `fromRms returns unity for silent track`() {
-        val gain = NormalizationGain.fromRms(0f)
+        val gain = NormalizationGain.fromRms(0f, targetRms = 0.1f)
         assertEquals(1f, gain.gain, 1e-6f)
     }
 

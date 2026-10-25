@@ -17,7 +17,6 @@ class MixerConfig {
     // Volume normalization is opt-in: every preloaded track is decoded once
     // more for loudness analysis, which costs CPU/bandwidth.
     var normalizationEnabled: Boolean = false
-    var normalizationTargetRms: Float = NormalizationGain.DEFAULT_TARGET_RMS
 
     // Silence skipping is opt-in: every preloaded track is decoded once more
     // for analysis, which costs CPU/bandwidth.

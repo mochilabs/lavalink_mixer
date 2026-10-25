@@ -16,7 +16,6 @@ data class NormalizationGain(
     val measuredRms: Float,
 ) {
     companion object {
-        const val DEFAULT_TARGET_RMS: Float = 0.1f
         const val MIN_GAIN: Float = 0.25f
         /**
          * Attenuation-only ceiling. Quiet tracks are pulled *down* to the
@@ -30,7 +29,7 @@ data class NormalizationGain(
          */
         const val MAX_GAIN: Float = 1.0f
 
-        fun fromRms(measuredRms: Float, targetRms: Float = DEFAULT_TARGET_RMS): NormalizationGain {
+        fun fromRms(measuredRms: Float, targetRms: Float): NormalizationGain {
             // A track whose whole analysis window was silent gets no boost.
             if (measuredRms <= 1e-9f) return NormalizationGain(1f, measuredRms)
             val target = targetRms.coerceAtLeast(1e-9f)

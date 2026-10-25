@@ -7,6 +7,8 @@ on:
 jobs:
   build:
     uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ github.event.release.tag_name }}
 
   release:
     needs: build

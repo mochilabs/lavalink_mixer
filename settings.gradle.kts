@@ -1,1 +1,1 @@
-rootProject.name = "mixer"
+rootProject.name = "lavalink_mixer"

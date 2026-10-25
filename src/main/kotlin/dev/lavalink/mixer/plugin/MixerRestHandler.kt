@@ -16,6 +16,7 @@ import org.springframework.web.server.ResponseStatusException
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
+import kotlin.math.log10
 
 @Serializable
 data class QueueRequest(
@@ -54,6 +55,9 @@ data class AnnounceQueuedResponse(
 )
 
 @Serializable
+data class NormalizationRequest(val guildId: String, val enabled: Boolean, val targetRms: Float? = null)
+
+@Serializable
 data class SilenceRequest(
     val guildId: String,
     val enabled: Boolean,
@@ -87,6 +91,8 @@ data class MixerState(
     val crossfadeMs: Long,
     val fadeInMs: Long,
     val duckLevel: Float,
+    val normalizationEnabled: Boolean = false,
+    val normalizationTargetRms: Float = NormalizationGain.DEFAULT_TARGET_RMS,
     val silenceEnabled: Boolean,
     val silenceThresholdDb: Float,
     val tailConfirmMs: Long,
@@ -105,6 +111,14 @@ data class MixerState(
     val crossfadeHandoffInMs: Long? = null,
     /** Announcements (TTS/overlay) waiting for the secondary player, in queue order. */
     val announcementsQueued: Int = 0,
+    /** Applied gain of the currently playing main track (1 while unknown/disabled). */
+    val currentTrackGain: Float = 1f,
+    /** [currentTrackGain] in dB (negative = attenuated). */
+    val currentTrackGainDb: Float = 0f,
+    /** Analyzed gain of the queued next track; null while analysis is pending. */
+    val nextTrackGain: Float? = null,
+    /** [nextTrackGain] in dB. */
+    val nextTrackGainDb: Float? = null,
 )
 
 /**
@@ -150,6 +164,8 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
                 crossfadeMs = mixer.crossfadeMs,
                 fadeInMs = mixer.fadeInMs,
                 duckLevel = mixer.duckLevel,
+                normalizationEnabled = mixer.normalizationEnabled,
+                normalizationTargetRms = mixer.normalizationTargetRms,
                 silenceEnabled = mixer.silenceSkipEnabled,
                 silenceThresholdDb = mixer.silenceThresholdDb,
                 tailConfirmMs = mixer.tailConfirmMs,
@@ -161,9 +177,16 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
                 mixerFilterActive = mixer.mixerFilterActive(),
                 crossfadeHandoffInMs = mixer.crossfadeHandoffInMs(),
                 announcementsQueued = mixer.announcementQueueSize(),
+                currentTrackGain = mixer.currentTrackGain(),
+                currentTrackGainDb = gainToDb(mixer.currentTrackGain()),
+                nextTrackGain = mixer.nextTrackGain(),
+                nextTrackGainDb = mixer.nextTrackGain()?.let { gainToDb(it) },
             )
         )
     }
+
+    /** Linear gain → dB (e.g. gain 0.5 = -6.0dB). */
+    private fun gainToDb(gain: Float): Float = 20f * log10(gain)
 
     @PostMapping("/mixer/crossfade")
     fun crossfade(@RequestBody body: CrossfadeRequest): ResponseEntity<MixerState> {
@@ -209,6 +232,15 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
         val mixer = plugin.find(guildId) ?: throw notFound(guildId)
         return if (mixer.cancelOverlay()) ResponseEntity.noContent().build()
         else throw ResponseStatusException(HttpStatus.NOT_FOUND, "No active overlay on guild $guildId")
+    }
+
+    @PostMapping("/mixer/normalization")
+    fun normalization(@RequestBody body: NormalizationRequest): ResponseEntity<MixerState> {
+        val guildId = gid(body.guildId)
+        val mixer = plugin.getOrCreate(guildId)
+        mixer.normalizationEnabled = body.enabled
+        body.targetRms?.let { mixer.normalizationTargetRms = it.coerceIn(1e-4f, 1f) }
+        return stateById(body.guildId, guildId)
     }
 
     @PostMapping("/mixer/silence")

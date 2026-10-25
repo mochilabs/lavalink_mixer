@@ -55,6 +55,9 @@ class GuildMixer(
     @Volatile var duckFadeMs: Long = config.duckFadeMs
     @Volatile var maskMs: Long = config.maskMs
 
+    @Volatile var normalizationEnabled: Boolean = config.normalizationEnabled
+    @Volatile var normalizationTargetRms: Float = config.normalizationTargetRms
+
     @Volatile var silenceSkipEnabled: Boolean = config.silenceSkipEnabled
     @Volatile var silenceThresholdDb: Float = config.silenceThresholdDb
     @Volatile var silenceMinSoundMs: Long = config.silenceMinSoundMs
@@ -65,6 +68,21 @@ class GuildMixer(
     /** Set by poll(): realtime tail watch armed (cheap per-chunk check reads this). */
     @Volatile var tailWatch: Boolean = false
 
+    // ---- volume normalization ----
+
+    /** Track id → measured RMS (first track anchors the baseline). */
+    private val normCache = LinkedHashMap<String, Float>()
+    /** Normalization gain for the currently playing main track; read lock-free by the voice thread. */
+    @Volatile private var mainNormGain: Float = 1f
+    /** Normalization gain for the armed sub (crossfade) track; 1 while no overlap is armed. */
+    @Volatile private var subNormGain: Float = 1f
+    /**
+     * Gain that anchors every track to the first track's loudness.
+     * Zero until the first track's background analysis completes; after
+     * that every queued track's gain is computed as `fromRms(trackRms, baselineRms)`.
+     */
+    @Volatile private var normGainBaseline: Float = 0f
+
     private val tailCutter = TailCutDecider()
 
     private var pendingNextTrack: AudioTrack? = null
@@ -73,7 +91,7 @@ class GuildMixer(
 
     private var subPlayer: AudioPlayer? = null
     private var siphonFactory: SiphonFactory? = null
-    @Volatile private var analysisActive: Boolean = false
+    private var analysisActive: Boolean = false
     /** Throttle for analysis deferred because the sub player was busy at preload time. */
     @Volatile private var analysisRetryAtMs: Long = 0L
     /** Consecutive analysis failures for [analysisFailureId]; retries give up after 3. */
@@ -171,7 +189,29 @@ class GuildMixer(
                         fadeInMs,
                     )
                 }
-            } ?: return
+            }
+            if (snap == null) {
+                // Masked handoff start: doHandoff already armed mainNormGain
+                // for this track; do not reset it.
+                return
+            }
+            // Track-level normalization gain: the first track anchors the
+            // session by playing at unity until its background loudness scan
+            // finishes; every subsequent track is pulled to that baseline.
+            mainNormGain = if (normalizationEnabled) {
+                synchronized(lock) { normGainForLocked(track) }
+            } else 1f
+            // First track played directly: schedule a background loudness scan
+            // outside the lock (sub plays block on source I/O) so the next
+            // track starts at the anchored gain.
+            val needsBaselineAnalysis = if (normalizationEnabled) {
+                synchronized(lock) {
+                    normGainBaseline == 0f && subPlayer == null && !analysisActive
+                }
+            } else false
+            if (needsBaselineAnalysis) {
+                scheduleBaselineAnalysis(track)
+            }
             if (snap.xfade) {
                 // The overlap's own handoff start is masked above, so an
                 // unmasked start while armed means the client replaced or
@@ -336,7 +376,7 @@ class GuildMixer(
             mainGain.advance(samples)
             subGain.advance(samples)
         }
-        return Gains(mainGain.current, subGain.current)
+        return Gains(mainGain.current * mainNormGain, subGain.current * subNormGain)
     }
 
     fun takeSub(samples: Int, channels: Int, out: Array<FloatArray>) = siphon.take(samples, channels, out)
@@ -396,6 +436,26 @@ class GuildMixer(
         subGain.setNow(sub)
     }
 
+    /** Test seam: pin the normalization gains without a decoder. */
+    internal fun normalizeForTest(mainGain: Float, subGain: Float = 1f) {
+        mainNormGain = mainGain
+        subNormGain = subGain
+    }
+
+    /** Test seam: read the sub normalization gain without a decoder. */
+    internal fun subNormGainForTest(): Float = subNormGain
+
+    /**
+     * Test seam: seed the first-track baseline and optionally the track's
+     * measured RMS so [normGainForLocked] can compute a real gain.
+     */
+    internal fun normBaselineForTest(rms: Float, trackId: String? = null, trackRms: Float? = null) {
+        normGainBaseline = rms
+        if (trackId != null && trackRms != null) {
+            synchronized(lock) { normCache[trackId] = trackRms }
+        }
+    }
+
     /** Test seam: arm a fake overlap so [advance]/[noteSubOutput] can be driven without players. */
     internal fun beginXfadeForTest(totalSamples: Int) {
         xfadeTotal = totalSamples.coerceAtLeast(1)
@@ -408,6 +468,17 @@ class GuildMixer(
 
     internal fun endXfadeForTest() {
         xfadeActive = false
+    }
+
+    /** Test seam: fully reset overlap state without touching sub listeners. */
+    internal fun clearXfadeForTest() {
+        synchronized(lock) {
+            xfadeActive = false
+            xfadeHandoffMs = -1L
+            xfadeStartSample = -1L
+            xfadeEndSample = -1L
+            xfadeMainTrack = null
+        }
     }
 
     /** Test seam: arm the handoff state as if [mainTrack]'s overlap were running, without driving players. */
@@ -729,6 +800,15 @@ class GuildMixer(
         size
     }
 
+    /** Normalization gain of the currently playing main track (1 while unknown/disabled). */
+    fun currentTrackGain(): Float = mainNormGain
+
+    /** Analyzed gain of the queued next track; null while analysis is pending. */
+    fun nextTrackGain(): Float? = synchronized(lock) {
+        val next = readyNextTrack ?: pendingNextTrack ?: return null
+        normGainForLocked(next).takeIf { it != 1f }
+    }
+
     /** Identifier of the preheated next track (pending or ready), so clients can verify which track the server will start. */
     fun nextTrackIdentifier(): String? = synchronized(lock) { (readyNextTrack ?: pendingNextTrack)?.let { idOf(it) } }
 
@@ -765,6 +845,9 @@ class GuildMixer(
             overlayActive = true
             subStartMs = System.currentTimeMillis()
             siphon.clear()
+            // Overlays are announcements: they use their original level, not
+            // the outgoing crossfade track's normalization gain.
+            subNormGain = 1f
             mainGain.rampTo(duck.coerceIn(0f, 1f), msToSamples(duckFadeMs))
             subGain.setNow(0f)
             subGain.rampTo(1f, msToSamples(150))
@@ -924,6 +1007,8 @@ class GuildMixer(
             xfadeLeft = xfadeTotal
             xfadeStartSample = plan.startMs * SAMPLE_RATE / 1000
             xfadeEndSample = plan.handoffMs * SAMPLE_RATE / 1000
+            // Sub-track normalization gain: applied on top of the sin curve.
+            subNormGain = if (normalizationEnabled) normGainForLocked(next) else 1f
             val startSample = xfadeStartSample
             if (chainPos.get() > startSample) {
                 log.warn(
@@ -1076,6 +1161,10 @@ class GuildMixer(
         subGain.setNow(0f)
         mainGain.setNow(0f)
         mainGain.rampTo(1f, msToSamples(maskMs).coerceAtLeast(1))
+        // Handoff carries the sub track's normalization gain over to the
+        // main slot so the incoming track keeps its level through the mask.
+        mainNormGain = subNormGain
+        subNormGain = 1f
         tailCutter.reset()
         // Arm the mask BEFORE play(): Lavaplayer dispatches TrackStart
         // synchronously from playTrack(), so a flag set afterwards is too late.
@@ -1127,6 +1216,7 @@ class GuildMixer(
             xfadeMainTrack = null
             val armed = subTrack
             subTrack = null
+            subNormGain = 1f
             siphon.clear()
             mainGain.rampTo(1f, msToSamples(duckFadeMs))
             subGain.setNow(0f)
@@ -1150,6 +1240,7 @@ class GuildMixer(
         val sub = synchronized(lock) {
             overlayActive = false
             subTrack = null
+            subNormGain = 1f
             siphon.clear()
             mainGain.rampTo(1f, msToSamples(duckFadeMs))
             subGain.setNow(0f)
@@ -1216,25 +1307,41 @@ class GuildMixer(
     private fun leadForLocked(track: AudioTrack): Long = trimForLocked(track).leadMs
     private fun trailForLocked(track: AudioTrack): Long = trimForLocked(track).trailMs
 
+    /**
+     * Effective gain for a track: pulled to the first track's loudness.
+     * The baseline stores the FIRST track's measured RMS; each queued
+     * track is then normalized to that same loudness as `fromRms(trackRms, baselineRms)`.
+     */
+    private fun normGainForLocked(track: AudioTrack): Float {
+        val id = idOf(track) ?: return 1f
+        val baseline = normGainBaseline
+        // No baseline yet (first track still measuring): the first track
+        // itself plays at unity; subsequent tracks wait for the anchor.
+        return when {
+            baseline <= 0f -> 1f
+            else -> NormalizationGain.fromRms(
+                normCache[id] ?: 0f,
+                baseline,
+            ).gain
+        }
+    }
+
     fun peekNextTrim(): TrimPoints? = synchronized(lock) {
         val next = readyNextTrack ?: pendingNextTrack ?: return null
         trimForLocked(next).takeIf { it != TrimPoints.NONE }
     }
 
-    /** Moves pending → ready once its trim is known (or no trim needed). */
+    /** Moves pending → ready once its trim and gain are known (or no analysis needed). */
     private fun promoteIfPendingLocked() {
         val pending = pendingNextTrack ?: return
-        if (!silenceSkipEnabled) {
-            pendingNextTrack = null
-            readyNextTrack = pending
-            return
-        }
         val id = idOf(pending) ?: run {
             pendingNextTrack = null
             readyNextTrack = pending
             return
         }
-        if (trimCache.containsKey(id)) {
+        val silenceDone = !silenceSkipEnabled || trimCache.containsKey(id)
+        val normDone = !normalizationEnabled || normCache.containsKey(id)
+        if (silenceDone && normDone) {
             pendingNextTrack = null
             readyNextTrack = pending
         }
@@ -1256,21 +1363,62 @@ class GuildMixer(
     }
 
     /**
-     * Deferred silence analysis. Preload-time scanning is skipped while the
-     * secondary player is busy (overlay, overlap, another scan), which used
-     * to strand the slot in pending until the end-of-file fallback fired -
-     * an untrimmed advance with no crossfade. The mixer loop calls this
-     * every tick; once the sub is free it returns a fresh clone to scan, or
-     * null to wait. The end-of-file fallback still covers tracks whose
-     * analysis keeps failing.
+     * Deferred analysis (silence + normalization). Preload-time scanning is
+     * skipped while the secondary player is busy (overlay, overlap, another
+     * scan), which used to strand the slot in pending until the end-of-file
+     * fallback fired - an untrimmed advance with no crossfade. The mixer loop
+     * calls this every tick; once the sub is free it returns a fresh clone to
+     * scan, or null to wait. The end-of-file fallback still covers tracks
+     * whose analysis keeps failing.
      */
+    /**
+     * Schedules a background loudness scan of the currently playing first
+     * track so its RMS can become [normGainBaseline] before the next track
+     * starts. The scan reuses the secondary player (hidden, no voice) and
+     * therefore must wait until no crossfade/overlay occupies it.
+     */
+    internal fun scheduleBaselineAnalysis(track: AudioTrack) {
+        val factory = synchronized(lock) {
+            if (normGainBaseline != 0f || subPlayer != null || analysisActive) return
+            analysisActive = true
+            analysisBroken = false
+            ensureSubLocked()
+            siphonFactory
+        } ?: return
+        val clone = try {
+            track.makeClone()
+        } catch (e: Exception) {
+            synchronized(lock) { analysisActive = false }
+            return
+        }
+        try {
+            val loudness = measureLoudnessBlocking(clone, factory)
+            if (loudness != null) {
+                synchronized(lock) {
+                    // The FIRST track's measured RMS anchors every queued
+                    // track: subsequent tracks are pulled to this loudness.
+                    normGainBaseline = loudness
+                    normCache[track.identifier] = loudness
+                    while (normCache.size > 200) normCache.remove(normCache.keys.first())
+                }
+                log.info("normalization baseline guild {}: rms={}", guildId, loudness)
+            }
+        } catch (e: Exception) {
+            log.warn("baseline loudness scan failed on guild {}", guildId, e)
+        } finally {
+            synchronized(lock) { analysisActive = false }
+        }
+    }
+
     fun maybeRetryAnalysis(): AudioTrack? {
         val now = System.currentTimeMillis()
         return synchronized(lock) {
-            if (!silenceSkipEnabled || overlayActive || xfadeActive || analysisActive) return null
             val pending = pendingNextTrack ?: return null
             val id = idOf(pending) ?: return null
-            if (trimCache.containsKey(id)) return null
+            val needSilence = silenceSkipEnabled && !trimCache.containsKey(id)
+            val needNorm = normalizationEnabled && !normCache.containsKey(id)
+            if (!needSilence && !needNorm) return null
+            if (overlayActive || xfadeActive || analysisActive) return null
             if (analysisFailureId == id && analysisFailures >= 3) return null
             if (now - analysisRetryAtMs < 250) return null
             analysisRetryAtMs = now
@@ -1287,11 +1435,15 @@ class GuildMixer(
     /**
      * Decodes [track] (a clone; the original is untouched) on the secondary
      * player and measures leading/trailing silence into [trimCache].
+     * When [normalizationEnabled], also accumulates loudness for the whole
+     * track and stores the computed gain in [normCache].
      * Runs on the shared analysis thread; safe to call from a future callback.
      * Skipped while the sub player is otherwise in use.
      */
     fun analyzeBlocking(track: AudioTrack) {
-        if (!silenceSkipEnabled) {
+        val doSilence = silenceSkipEnabled
+        val doNorm = normalizationEnabled
+        if (!doSilence && !doNorm) {
             synchronized(lock) { promoteIfPendingLocked() }
             return
         }
@@ -1300,13 +1452,15 @@ class GuildMixer(
             return
         }
         synchronized(lock) {
-            if (trimCache.containsKey(identifier)) {
+            val hasSilence = !doSilence || trimCache.containsKey(identifier)
+            val hasNorm = !doNorm || normCache.containsKey(identifier)
+            if (hasSilence && hasNorm) {
                 promoteIfPendingLocked()
                 return
             }
             if (overlayActive || xfadeActive || analysisActive) {
                 log.debug(
-                    "silence analysis deferred on guild {}: sub player busy (overlay={} xfade={}); will retry",
+                    "analysis deferred on guild {}: sub player busy (overlay={} xfade={}); will retry",
                     guildId, overlayActive, xfadeActive,
                 )
                 return
@@ -1328,16 +1482,47 @@ class GuildMixer(
                 false
             }
             val scanCap = maxOf(silenceHeadScanMs, silenceTailScanMs)
-            // Short tracks: a single decode from the start yields both ends.
-            val (lead, tail) = if (duration in 1..minOf(scanCap, 30000)) {
-                analyzeSinglePass(track, factory, duration)
-            } else {
-                val head = scanHead(track, factory)
-                val t = if (seekable && duration > 0 && duration < Long.MAX_VALUE / 2) {
-                    scanTail(track, factory, duration)
-                } else 0L
-                head to t
+            val hasSilence = doSilence && !trimCache.containsKey(identifier)
+            val hasNorm = doNorm && !normCache.containsKey(identifier)
+
+            var lead = 0L
+            var tail = 0L
+            if (hasSilence || hasNorm) {
+                // Short tracks: a single decode from the start yields both ends
+                // and loudness.
+                if (duration in 1..minOf(scanCap, 30000)) {
+                    val result = analyzeSinglePass(track, factory, duration, measureLoudness = hasNorm)
+                    lead = result.leadMs
+                    tail = result.trailMs
+                    if (hasNorm && result.loudnessRms != null) {
+                        synchronized(lock) {
+                            normCache[identifier] = result.loudnessRms
+                            while (normCache.size > 200) normCache.remove(normCache.keys.first())
+                        }
+                        log.info("normalization guild {}: rms={}", guildId, result.loudnessRms)
+                    }
+                } else {
+                    if (hasSilence) {
+                        lead = scanHead(track, factory)
+                        if (seekable && duration > 0 && duration < Long.MAX_VALUE / 2) {
+                            tail = scanTail(track, factory, duration)
+                        }
+                    }
+                    if (hasNorm) {
+                        // Loudness on a separate full-track decode so the
+                        // silence scans' seeks/early stops never skew the RMS.
+                        val loudness = measureLoudnessBlocking(track, factory)
+                        if (loudness != null) {
+                            synchronized(lock) {
+                                normCache[identifier] = loudness
+                                while (normCache.size > 200) normCache.remove(normCache.keys.first())
+                            }
+                            log.info("normalization guild {}: rms={}", guildId, loudness)
+                        }
+                    }
+                }
             }
+
             val guardedLead = if (duration > 0 && lead >= duration - 500) 0 else lead.coerceAtLeast(0)
             if (analysisBroken) {
                 // The sub decoder died mid-scan; partial PCM would poison the
@@ -1347,15 +1532,19 @@ class GuildMixer(
                 return
             }
             synchronized(lock) {
-                trimCache[identifier] = TrimPoints(guardedLead, tail.coerceAtLeast(0))
-                while (trimCache.size > 200) trimCache.remove(trimCache.keys.first())
+                if (hasSilence) {
+                    trimCache[identifier] = TrimPoints(guardedLead, tail.coerceAtLeast(0))
+                    while (trimCache.size > 200) trimCache.remove(trimCache.keys.first())
+                }
                 if (analysisFailureId == identifier) {
                     analysisFailures = 0
                     analysisFailureId = null
                 }
                 promoteIfPendingLocked()
             }
-            log.info("silence analysis guild {}: lead={}ms trail={}ms", guildId, guardedLead, tail)
+            if (hasSilence) {
+                log.info("silence analysis guild {}: lead={}ms trail={}ms", guildId, guardedLead, tail)
+            }
         } catch (e: Exception) {
             log.warn("silence analysis failed on guild {}", guildId, e)
             synchronized(lock) { noteAnalysisFailureLocked(identifier) }
@@ -1431,9 +1620,20 @@ class GuildMixer(
         return (collectedMs - lastEnd).coerceAtLeast(0)
     }
 
-    private fun analyzeSinglePass(track: AudioTrack, factory: SiphonFactory, duration: Long): Pair<Long, Long> {
+    private data class SinglePassResult(
+        val leadMs: Long,
+        val trailMs: Long,
+        val loudnessRms: Float?,
+    )
+
+    private fun analyzeSinglePass(
+        track: AudioTrack,
+        factory: SiphonFactory,
+        duration: Long,
+        measureLoudness: Boolean = false,
+    ): SinglePassResult {
         val collected = collectFrom(track, factory, 0, msToSamples(duration + 1000))
-        if (collected.isEmpty()) return 0L to 0L
+        if (collected.isEmpty()) return SinglePassResult(0L, 0L, if (measureLoudness) 0f else null)
         var total = 0L
         for (f in collected) total += f[0].size
         val totalMs = total * 1000 / 48000
@@ -1443,7 +1643,56 @@ class GuildMixer(
         val lastEnd = SilenceAnalyzer.findLastSound(collected, threshold, minSound)
         val lead = if (first < 0) 0 else first
         val trail = if (lastEnd < 0) totalMs else (totalMs - lastEnd).coerceAtLeast(0)
-        return lead to trail
+        val loudness = if (measureLoudness) {
+            val meter = LoudnessMeter()
+            meter.feed(collected)
+            meter.finish()
+        } else null
+        return SinglePassResult(lead, trail, loudness)
+    }
+
+    /** Streams the whole track through a tap and returns its RMS, or null on failure. */
+    private fun measureLoudnessBlocking(track: AudioTrack, factory: SiphonFactory): Float? {
+        val tap = SiphonQueue(maxFrames = 512)
+        factory.addTap(tap)
+        try {
+            val sub = synchronized(lock) { subPlayer } ?: return null
+            val clone = track.makeClone()
+            sub.playTrack(clone)
+            val meter = LoudnessMeter()
+            val pumpFrame = newProvideFrame()
+            // Full-track loudness needs to cover the whole decode; a fixed
+            // 45s cap would truncate a 3-minute track's RMS to its opening.
+            val durationMs = try {
+                clone.duration
+            } catch (e: Exception) {
+                -1L
+            }
+            val extraMs = 5_000L
+            val capMs = if (durationMs in 1..(10 * 60_000L)) durationMs else 45_000L
+            val deadline = System.currentTimeMillis() + capMs + extraMs
+            while (System.currentTimeMillis() < deadline && !analysisBroken) {
+                if (sub.playingTrack !== clone && tap.pendingFrames == 0) break
+                if (tap.pendingFrames == 0) {
+                    pumpSub(sub, pumpFrame)
+                    continue
+                }
+                while (tap.pendingFrames > 0) {
+                    val chunk = Array(2) { FloatArray(1920) }
+                    val took = tap.take(1920, 2, chunk)
+                    if (took <= 0) break
+                    meter.feed(chunk, 0, took)
+                }
+            }
+            try {
+                sub.stopTrack()
+            } catch (e: Exception) {
+                log.warn("loudness scan stop failed on guild {}", guildId, e)
+            }
+            return meter.finish()
+        } finally {
+            factory.removeTap(tap)
+        }
     }
 
     /**

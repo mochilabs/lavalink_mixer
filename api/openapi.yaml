@@ -100,6 +100,8 @@ components:
         crossfadeMs: { type: integer, format: int64 }
         fadeInMs: { type: integer, format: int64 }
         duckLevel: { type: number, format: float }
+        normalizationEnabled: { type: boolean, description: Volume normalization on/off }
+        normalizationTargetRms: { type: number, format: float, description: Reserved (baseline is the first track's measured RMS); kept for config compatibility }
         silenceEnabled: { type: boolean }
         silenceThresholdDb: { type: number, format: float }
         tailConfirmMs: { type: integer, format: int64, description: Sustained realtime silence before an early cut }
@@ -130,6 +132,22 @@ components:
         announcementsQueued:
           type: integer
           description: Announcements waiting for the secondary player, in queue order.
+        currentTrackGain:
+          type: number
+          format: float
+          description: Applied gain of the currently playing main track (1 while unknown/disabled).
+        currentTrackGainDb:
+          type: number
+          format: float
+          description: currentTrackGain in dB (negative = attenuated, 0 = unity).
+        nextTrackGain:
+          type: [number, 'null']
+          format: float
+          description: Analyzed gain of the queued next track; null while analysis is pending.
+        nextTrackGainDb:
+          type: [number, 'null']
+          format: float
+          description: nextTrackGain in dB.
     CrossfadeRequest:
       type: object
       required: [guildId, enabled]
@@ -226,6 +244,25 @@ components:
           description: |
             Sustained realtime silence before an early cut, no extra decode needed.
             Range 300-10000, default 1000 (streams demand at least 3000).
+    NormalizationRequest:
+      type: object
+      required: [guildId, enabled]
+      properties:
+        guildId:
+          type: string
+          description: Guild snowflake as a string (JSON numbers lose precision past 2^53)
+        enabled:
+          type: boolean
+          description: |
+            Opt-in. The first track anchors the session; every track queued
+            afterwards is pulled to its loudness. Costs one extra decode per
+            track, so this defaults to false.
+        targetRms:
+          type: number
+          format: float
+          description: |
+            Reserved; the baseline is now the first track's measured RMS.
+            Range 1e-4 to 1, default 0.1. Gains are clamped to [0.25, 4.0] linear.
 paths:
   /mixer/queue/next:
     post:
@@ -399,6 +436,28 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+  /mixer/normalization:
+    post:
+      operationId: setNormalization
+      summary: Configure volume normalization
+      description: |
+        The first track anchors the session: its loudness is measured in a
+        background scan that starts with the track, and every track queued
+        afterwards is pulled to that loudness (gains clamped to [0.25, 4.0]).
+        The first track itself plays at unity gain. During a crossfade both
+        tracks are scaled by their own gain on top of the equal-power curve.
+        Costs one extra decode per track; defaults off.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NormalizationRequest' }
+      responses:
+        '200':
+          description: Updated state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MixerState' }
   /mixer/silence:
     post:
       operationId: setSilenceSkipping

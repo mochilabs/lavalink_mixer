@@ -24,7 +24,8 @@ import kotlin.math.abs
  * track when the old one ends". Resolving costs one ConcurrentHashMap read
  * per 20ms chunk.
  *
- * output = main * mainGain + sub * subGain, clamped to [-1, 1].
+ * output = main * mainGain + sub * subGain, soft-limited into [-1, 1] (see
+ * [softLimit]).
  * Gains are advanced once per process() call (per chunk, not per sample);
  * with ~20ms chunks that is ~50 gain steps/second, free of zipper noise
  * for ramps >= 80ms. When idle (main=1, sub=0) chunks pass through
@@ -84,9 +85,10 @@ class MixerFilter(
         }
 
         val gains = mixer.advance(length)
-        if (gains.main >= 0.999f && gains.sub <= 0.001f) return // idle passthrough
+        val parallels = mixer.advanceParallelOverlays(length)
+        if (gains.main >= 0.999f && gains.sub <= 0.001f && parallels.isEmpty()) return // idle passthrough
 
-        if (gains.sub <= 0.001f) {
+        if (gains.sub <= 0.001f && parallels.isEmpty()) {
             // Main-only (fade-in/mask/duck release): scale in place, no sub buffer.
             if (gains.main < 0.999f) {
                 for (c in input.indices) {
@@ -105,13 +107,29 @@ class MixerFilter(
         mixer.noteSubOutput(subSamples)
         if (subSamples < length) mixer.noteUnderrun(length - subSamples, length)
 
+        // Sum each parallel overlay's siphon at its fade-ramp gain.
+        val parallel = if (parallels.isEmpty()) null else Array(input.size) { FloatArray(length) }
+        if (parallel != null) {
+            val buf = Array(input.size) { FloatArray(length) }
+            for (slot in parallels) {
+                slot.siphon.take(length, input.size, buf)
+                val g = slot.ramp.current
+                for (c in input.indices) {
+                    val pc = parallel[c]
+                    val bc = buf[c]
+                    for (i in 0 until length) pc[i] += bc[i] * g
+                }
+            }
+        }
+
         for (c in input.indices) {
             val channel = input[c]
             val subChannel = sub[c]
             val end = offset + length
             for (i in offset until end) {
-                val mixed = channel[i] * gains.main + subChannel[i - offset] * gains.sub
-                channel[i] = mixed.coerceIn(-1f, 1f)
+                var sum = channel[i] * gains.main + subChannel[i - offset] * gains.sub
+                if (parallel != null) sum += parallel[c][i]
+                channel[i] = softLimit(sum)
             }
         }
     }
@@ -133,8 +151,34 @@ class MixerFilter(
 
     override fun close() = Unit
 
+    /**
+     * Soft-knee limiter for the crossfade sum. The equal-power curve
+     * (cos/sin) keeps perceived loudness flat through the overlap, but two
+     * correlated full-scale sources sum to ~1.414x at the midpoint — the
+     * old hard clamp flattened that into a square wave (the clipping).
+     *
+     * The curve is identity up to [SOFT_LIMIT_THRESHOLD] so normal audio is
+     * untouched; only the excursion past the threshold is compressed, smoothly
+     * and monotonically toward ±1 with no discontinuity. The knee starts just
+     * below full scale because a limiter that is exactly unity AT 1.0 has no
+     * headroom left — it would either hard-clip or drop over-limit samples to
+     * silence. Starting at 0.9 compresses only the top 10% of the range by a
+     * hair (0.9 stays 0.9, full scale is pulled to ~0.95, a 1.414 sum to
+     * ~0.98) — inaudible, and only ever active during an overlap.
+     */
+    private fun softLimit(sample: Float): Float {
+        val a = abs(sample)
+        if (a <= SOFT_LIMIT_THRESHOLD) return sample
+        val x = (a - SOFT_LIMIT_THRESHOLD) / (1f - SOFT_LIMIT_THRESHOLD)
+        val limited = SOFT_LIMIT_THRESHOLD + (1f - SOFT_LIMIT_THRESHOLD) * (x / (1f + x))
+        return if (sample >= 0f) limited else -limited
+    }
+
     companion object {
         private val log = LoggerFactory.getLogger(MixerFilter::class.java)
+
+        /** Knee start; audio below this passes through bit-identically. */
+        private const val SOFT_LIMIT_THRESHOLD: Float = 0.9f
 
         @Volatile
         private var lastWarn: Long = 0L

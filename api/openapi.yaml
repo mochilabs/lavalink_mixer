@@ -188,6 +188,16 @@ components:
           type: number
           format: float
           description: Music level while overlaying (0-1). Omit for guild default (0.2).
+        mode:
+          type: string
+          enum: [sequential, parallel]
+          default: sequential
+          description: |
+            `sequential` (default) queues behind the current overlay and plays
+            back to back on the single secondary player. `parallel` plays
+            concurrently on its own player, up to `maxParallelOverlays`
+            (default 4), mixed over the music independently of the crossfade.
+            Parallel overlays still duck the music (single duck level).
     AnnounceQueuedResponse:
       type: object
       required: [guildId, id, position, queueLength]

@@ -6,21 +6,20 @@ import kotlin.test.assertTrue
 
 class NormalizationGainTest {
     @Test
-    fun `fromRms computes linear gain to target`() {
-        val gain = NormalizationGain.fromRms(0.05f, targetRms = 0.1f)
-        assertEquals(2f, gain.gain, 1e-6f)
-    }
-
-    @Test
-    fun `fromRms attenuates loud tracks`() {
-        val gain = NormalizationGain.fromRms(0.2f, targetRms = 0.1f)
-        assertEquals(0.5f, gain.gain, 1e-6f)
-    }
-
-    @Test
-    fun `fromRms clamps to MAX_GAIN`() {
+    fun `fromRms never boosts above unity`() {
+        // A track much quieter than the baseline used to be boosted to
+        // MAX_GAIN (4x): that boost then multiplied into the crossfade's
+        // equal-power sum and hard-clipped. Attenuation-only now: the
+        // quietest track can at most play at the baseline loudness.
         val gain = NormalizationGain.fromRms(0.001f, targetRms = 0.1f)
         assertEquals(NormalizationGain.MAX_GAIN, gain.gain, 1e-6f)
+        assertEquals(1f, NormalizationGain.MAX_GAIN, 1e-6f)
+    }
+
+    @Test
+    fun `fromRms computes linear gain to target when attenuating`() {
+        val gain = NormalizationGain.fromRms(0.2f, targetRms = 0.1f)
+        assertEquals(0.5f, gain.gain, 1e-6f)
     }
 
     @Test

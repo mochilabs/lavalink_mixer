@@ -151,6 +151,28 @@ class GuildMixer(
     /** Ticks once per mixer-filter chunk; see [checkFilterHeartbeatLocked]. */
     private val filterRunCount = AtomicLong(0L)
 
+    // ---- voice-thread feed arbitration ----
+
+    /**
+     * Two Lavaplayer players can exist for one guild across two socket
+     * sessions (a resuming session racing a fresh restore): both filter
+     * chains then resolve to this mixer and, unchecked, every ~20ms chunk
+     * advances [chainPos] twice — the counter ran ahead of real playback at
+     * exactly 2x and armed crossfades half a song early, while both chains
+     * drained the shared sub siphon into "crossfade sub starvation".
+     *
+     * Only the elected filter may mutate mixer state (chainPos, ramps,
+     * siphons); a rival chain passes audio through untouched. Election
+     * transfers when the incumbent retires ([MixerFilter.close], which
+     * Lavaplayer calls on hot-swap and track end) or goes silent for
+     * [feederStaleMs].
+     */
+    private val electedFeeder = AtomicLong(0L)
+    private val electedSeenAtMs = AtomicLong(0L)
+    private val rivalWarnAtMs = AtomicLong(0L)
+    /** Test seam; production budget is ~50 voice-thread chunks of silence. */
+    @Volatile var feederStaleMs: Long = 1000L
+
     /**
      * Decode-side position of the main track: exactly what [MixerFilter] has
      * already mixed. [track.position] is the *output* position and trails this
@@ -382,13 +404,21 @@ class GuildMixer(
         }
     }
 
+    /** Whether this mixer's main (newest attached) player is [player]. */
+    fun isMain(player: IPlayer): Boolean = main === player
+
     fun newFilter(downstream: com.sedmelluq.discord.lavaplayer.filter.FloatPcmAudioFilter? = null): MixerFilter =
         MixerFilter(this, downstream)
 
     // ---- voice-thread entry points ----
 
     /** Advances ramps by [samples] and returns the gains to mix with. */
-    fun advance(samples: Int): Gains {
+    fun advance(samples: Int, feederId: Long): Gains {
+        if (!claimFeeder(feederId)) {
+            // Rival chain: snapshot only — mutating ramps/chainPos here would
+            // double every fade and run the chain counter at 2x.
+            return Gains(mainGain.current * mainNormGain, subGain.current * subNormGain)
+        }
         val endOfChunk = chainPos.addAndGet(samples.toLong())
         // Lock-free on purpose: this runs on the voice thread for every ~20ms
         // chunk, and blocking here stalls main-track output until Lavaplayer
@@ -420,13 +450,59 @@ class GuildMixer(
 
     fun takeSub(samples: Int, channels: Int, out: Array<FloatArray>) = siphon.take(samples, channels, out)
 
+    /** Whether [feederId] currently owns the feed; settle [claimFeeder] (via [advance]) before reading. */
+    fun isFeeder(feederId: Long): Boolean = electedFeeder.get() == feederId
+
+    /** Called by [MixerFilter.close] when Lavaplayer tears its chain down (hot-swap, track end). */
+    fun retireFeeder(feederId: Long) {
+        electedFeeder.compareAndSet(feederId, 0L)
+    }
+
+    private fun claimFeeder(feederId: Long): Boolean {
+        while (true) {
+            val elected = electedFeeder.get()
+            if (elected == feederId) {
+                electedSeenAtMs.set(System.currentTimeMillis())
+                return true
+            }
+            if (elected != 0L) {
+                val silentMs = System.currentTimeMillis() - electedSeenAtMs.get()
+                if (silentMs < feederStaleMs) {
+                    warnRivalFeeder(feederId, elected, silentMs)
+                    return false
+                }
+                log.info(
+                    "mixer feeder takeover on guild {}: incumbent filter #{} silent for {}ms, filter #{} takes over",
+                    guildId, elected, silentMs, feederId,
+                )
+            }
+            if (electedFeeder.compareAndSet(elected, feederId)) {
+                electedSeenAtMs.set(System.currentTimeMillis())
+                return true
+            }
+        }
+    }
+
+    private fun warnRivalFeeder(feederId: Long, elected: Long, silentMs: Long) {
+        val now = System.currentTimeMillis()
+        val last = rivalWarnAtMs.get()
+        if (now - last < 60_000 || !rivalWarnAtMs.compareAndSet(last, now)) return
+        log.warn(
+            "second mixer filter (#{} on guild {}) is feeding a mixer owned by filter #{} — two players exist " +
+                "for this guild (stale session vs fresh restore?). Only the incumbent advances the chain; " +
+                "check for duplicate session players.",
+            feederId, guildId, elected,
+        )
+    }
+
     /**
      * Advances the per-slot fade ramps and returns the currently active
      * parallel overlays (player + siphon + ramp) for the mixer to sum in.
      * Called on the voice thread each chunk; slots are read lock-free via
      * volatile/immutable handles, and only the ramp advances here.
      */
-    fun advanceParallelOverlays(samples: Int): List<OverlaySlot> {
+    fun advanceParallelOverlays(samples: Int, feederId: Long): List<OverlaySlot> {
+        if (!isFeeder(feederId)) return emptyList()
         val active = synchronized(lock) { parallelOverlays.values.filter { it.active } }
         for (slot in active) slot.ramp.advance(samples)
         return active
@@ -451,6 +527,8 @@ class GuildMixer(
     fun syncChainPos(positionMs: Long) {
         if (positionMs >= 0) chainPos.set(positionMs * SAMPLE_RATE / 1000)
     }
+
+    internal fun chainPosSamples(): Long = chainPos.get()
 
     /**
      * Throttled voice-thread warning: an overlap is fading in but the

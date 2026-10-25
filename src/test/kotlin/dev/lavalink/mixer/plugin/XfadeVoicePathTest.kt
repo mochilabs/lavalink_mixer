@@ -33,17 +33,17 @@ class XfadeVoicePathTest {
         val total = 48_000
         m.beginXfadeForTest(total)
 
-        var gains = m.advance(24_000)
+        var gains = m.advance(24_000, 1L)
         val t = 0.5f
         assertEquals(cos(t * PI.toFloat() / 2f), gains.main, 1e-5f)
         assertEquals(sin(t * PI.toFloat() / 2f), gains.sub, 1e-5f)
 
-        gains = m.advance(24_000)
+        gains = m.advance(24_000, 1L)
         assertEquals(0f, gains.main, 1e-5f)
         assertEquals(1f, gains.sub, 1e-5f)
 
         // Overshooting clamps instead of wrapping.
-        gains = m.advance(1_000)
+        gains = m.advance(1_000, 1L)
         assertEquals(0f, gains.main, 1e-5f)
         assertEquals(1f, gains.sub, 1e-5f)
     }
@@ -78,7 +78,7 @@ class XfadeVoicePathTest {
                 try {
                     repeat(5_000) { n ->
                         if ((n + i) % 997 == 0) m.beginXfadeForTest(48_000)
-                        val g = m.advance(96)
+                        val g = m.advance(96, 1L)
                         // cos(pi/2) is -4.37e-8 in float; downstream clamps to [-1, 1].
                         check(g.main in -1e-6f..1.000001f && g.sub in -1e-6f..1.000001f) {
                             "gains out of range: $g"

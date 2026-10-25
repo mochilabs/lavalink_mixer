@@ -27,7 +27,7 @@ class NormalizationIntegrationTest {
         val m = mixer()
         m.normalizeForTest(mainGain = 0.5f)
         m.gainsForTest(1f, 0f)
-        val gains = m.advance(1)
+        val gains = m.advance(1, 1L)
         // norm gain 0.5 × fade gain 1.0 = 0.5
         assertEquals(0.5f, gains.main, 1e-6f)
         assertEquals(0f, gains.sub, 1e-6f)
@@ -62,7 +62,7 @@ class NormalizationIntegrationTest {
         val m = mixer()
         m.normalizeForTest(0.25f, 0.75f)
         m.gainsForTest(1f, 1f)
-        val gains = m.advance(1)
+        val gains = m.advance(1, 1L)
         // main: fade 1.0 × norm 0.25 = 0.25; sub: fade 1.0 × norm 0.75 = 0.75
         assertEquals(0.25f, gains.main, 1e-6f)
         assertEquals(0.75f, gains.sub, 1e-6f)

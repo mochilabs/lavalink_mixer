@@ -43,6 +43,13 @@ class MixerFilter(
 
     constructor(mixer: GuildMixer, downstream: FloatPcmAudioFilter?) : this(mixer.guildId, { mixer }, downstream)
 
+    /**
+     * Identity for GuildMixer's feed arbitration: two chains can resolve to
+     * one mixer when two players exist for the guild (stale session vs fresh
+     * restore), and only one of them may advance mixer state.
+     */
+    private val feederId: Long = FILTER_SEQ.incrementAndGet()
+
     override fun process(input: Array<FloatArray>, offset: Int, length: Int) {
         if (length <= 0) return
         val mixer = mixerProvider()
@@ -70,6 +77,13 @@ class MixerFilter(
     }
 
     private fun mixInto(mixer: GuildMixer, input: Array<FloatArray>, offset: Int, length: Int) {
+        // Runs the feed election first; [isFeeder] below reads the settled state.
+        val gains = mixer.advance(length, feederId)
+        // A rival chain (a second player exists for this guild) must neither
+        // drain the shared sub siphons nor count into tail watch — it feeds
+        // dead audio anyway, so leave its chunk untouched.
+        if (!mixer.isFeeder(feederId)) return
+
         // Realtime tail watch runs on the raw main input, before gains.
         mixer.realtimeTailAmp()?.let { thresholdAmp ->
             var peak = 0f
@@ -84,8 +98,7 @@ class MixerFilter(
             mixer.noteChunk(peak, length, thresholdAmp)
         }
 
-        val gains = mixer.advance(length)
-        val parallels = mixer.advanceParallelOverlays(length)
+        val parallels = mixer.advanceParallelOverlays(length, feederId)
         if (gains.main >= 0.999f && gains.sub <= 0.001f && parallels.isEmpty()) return // idle passthrough
 
         if (gains.sub <= 0.001f && parallels.isEmpty()) {
@@ -149,7 +162,11 @@ class MixerFilter(
 
     override fun flush() = Unit
 
-    override fun close() = Unit
+    override fun close() {
+        // Lavaplayer closes a chain on hot-swap and track end: release the
+        // feed so a replacement filter takes over without a silence gap.
+        mixerProvider()?.retireFeeder(feederId)
+    }
 
     /**
      * Soft-knee limiter for the crossfade sum. The equal-power curve
@@ -176,6 +193,8 @@ class MixerFilter(
 
     companion object {
         private val log = LoggerFactory.getLogger(MixerFilter::class.java)
+
+        private val FILTER_SEQ = java.util.concurrent.atomic.AtomicLong(0L)
 
         /** Knee start; audio below this passes through bit-identically. */
         private const val SOFT_LIMIT_THRESHOLD: Float = 0.9f

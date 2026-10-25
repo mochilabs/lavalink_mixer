@@ -92,7 +92,7 @@ class CrossfadeMixIntegrationTest {
                 maskMs = 0
                 silenceSkipEnabled = false
             }
-            val mixer = GuildMixer(1L, manager, config)
+            val mixer = GuildMixer(1L, manager, config, java.util.concurrent.Executor { it.run() })
             val player = manager.createPlayer()
             val sink = RecordingSink()
             player.setFilterFactory(PcmFilterFactory { _, _, output ->
@@ -164,7 +164,7 @@ class CrossfadeMixIntegrationTest {
                 maskMs = 0
                 silenceSkipEnabled = false
             }
-            val mixer = GuildMixer(1L, manager, config)
+            val mixer = GuildMixer(1L, manager, config, java.util.concurrent.Executor { it.run() })
             val player = manager.createPlayer()
             player.setFilterFactory(PcmFilterFactory { _, _, output ->
                 mutableListOf(mixer.newFilter(output))
@@ -242,7 +242,7 @@ class CrossfadeMixIntegrationTest {
         val manager = manager()
         val file = toneFile("mixer-no-filter", 440.0, 4)
         try {
-            val mixer = GuildMixer(9L, manager, MixerConfig().apply { fadeInMs = 0 })
+            val mixer = GuildMixer(9L, manager, MixerConfig().apply { fadeInMs = 0 }, java.util.concurrent.Executor { it.run() })
             val player = manager.createPlayer()
             // Deliberately no setFilterFactory: this is the late-filters client.
             mixer.attachMain(iPlayer(9L, player))
@@ -276,7 +276,7 @@ class CrossfadeMixIntegrationTest {
                 silenceSkipEnabled = true
                 silenceHeadScanMs = 3000
                 silenceTailScanMs = 4000
-            })
+            }, java.util.concurrent.Executor { it.run() })
             val track = loadTrack(manager, file)
             val started = System.currentTimeMillis()
             mixer.analyzeBlocking(track)

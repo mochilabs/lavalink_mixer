@@ -80,7 +80,7 @@ class StaleXfadeAbortTest {
                 maskMs = 0
                 silenceSkipEnabled = false
             }
-            val mixer = GuildMixer(21L, manager, config)
+            val mixer = GuildMixer(21L, manager, config, java.util.concurrent.Executor { it.run() })
             val player = manager.createPlayer()
             player.setFilterFactory(PcmFilterFactory { _, _, output ->
                 mutableListOf(mixer.newFilter(output))
@@ -135,7 +135,7 @@ class StaleXfadeAbortTest {
         val fileA = toneFile("mixer-guard-a", 440.0, 10)
         val fileC = toneFile("mixer-guard-c", 520.0, 10)
         try {
-            val mixer = GuildMixer(22L, manager, MixerConfig().apply { fadeInMs = 0; silenceSkipEnabled = false })
+            val mixer = GuildMixer(22L, manager, MixerConfig().apply { fadeInMs = 0; silenceSkipEnabled = false }, java.util.concurrent.Executor { it.run() })
             val player = manager.createPlayer()
             player.setFilterFactory(PcmFilterFactory { _, _, output ->
                 mutableListOf(mixer.newFilter(output))

@@ -79,7 +79,7 @@ class AnnounceQueueTest {
 
     @Test
     fun `a busy secondary player holds announcements instead of dropping them`() {
-        val mixer = GuildMixer(42L, manager(), MixerConfig())
+        val mixer = GuildMixer(42L, manager(), MixerConfig(), java.util.concurrent.Executor { it.run() })
         val (id, position) = mixer.enqueueAnnouncement("x", null, 0.2f)
         assertEquals(1, position)
         assertEquals(1, mixer.announcementQueueSize())
@@ -144,7 +144,7 @@ class AnnounceQueueTest {
 
     @Test
     fun `parallel mode respects the max overlay limit`() {
-        val mixer = GuildMixer(52L, manager(), MixerConfig().apply { maxParallelOverlays = 2 })
+        val mixer = GuildMixer(52L, manager(), MixerConfig().apply { maxParallelOverlays = 2 }, java.util.concurrent.Executor { it.run() })
         mixer.enqueueAnnouncement("a", null, 0.2f, GuildMixer.AnnounceMode.PARALLEL)
         mixer.enqueueAnnouncement("b", null, 0.2f, GuildMixer.AnnounceMode.PARALLEL)
         mixer.enqueueAnnouncement("c", null, 0.2f, GuildMixer.AnnounceMode.PARALLEL)

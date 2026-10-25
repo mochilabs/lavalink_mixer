@@ -42,7 +42,7 @@ class FirstTrackIntegrationTest {
         try {
             writeSineWav(wav, seconds = 3)
 
-            val mixer = GuildMixer(1L, manager, MixerConfig())
+            val mixer = GuildMixer(1L, manager, MixerConfig(), java.util.concurrent.Executor { it.run() })
             val player = manager.createPlayer()
 
             // Mirror Lavalink's wiring: the mixer is the terminal plugin

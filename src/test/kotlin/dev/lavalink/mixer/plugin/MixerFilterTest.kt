@@ -14,7 +14,7 @@ class MixerFilterTest {
             javaClass.classLoader,
             arrayOf(AudioPlayerManager::class.java),
         ) { _, _, _ -> throw UnsupportedOperationException("not needed") } as AudioPlayerManager
-        return GuildMixer(123L, manager, MixerConfig())
+        return GuildMixer(123L, manager, MixerConfig(), java.util.concurrent.Executor { it.run() })
     }
 
     @Test

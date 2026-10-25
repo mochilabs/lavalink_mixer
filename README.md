@@ -48,7 +48,6 @@ mixer:
   duckFadeMs: 300
   maskMs: 80
   normalizationEnabled: false
-  normalizationTargetRms: 0.1
   silenceSkipEnabled: false
   silenceThresholdDb: -60
   silenceMinSoundMs: 120
@@ -90,7 +89,7 @@ audible source must be mixed **before encoding**. The plugin:
 | POST | `/mixer/announce` | `{guildId, identifier?, encodedTrack?, duckLevel?, mode?}` | Queue an overlay (TTS clip URL etc.); `mode: "sequential"` (default) plays back to back on the single secondary player, `mode: "parallel"` plays concurrently (up to `maxParallelOverlays`) — music ducked either way. Returns 202 `{id, position, queueLength}` |
 | DELETE | `/mixer/announce/queue?guildId=` | – | Drop all queued (not active) announcements |
 | POST | `/mixer/announce/cancel` | `{guildId}` | Stop overlay, restore music |
-| POST | `/mixer/normalization` | `{guildId, enabled, targetRms?}` | Volume normalization on/off (see below) |
+| POST | `/mixer/normalization` | `{guildId, enabled}` | Volume normalization on/off (see below) |
 | POST | `/mixer/silence` | `{guildId, enabled, thresholdDb?, minSoundMs?, headScanMs?, tailScanMs?, tailConfirmMs?}` | Leading/trailing silence skipping (see below) |
 
 `identifier` is anything the server's source managers can load (track

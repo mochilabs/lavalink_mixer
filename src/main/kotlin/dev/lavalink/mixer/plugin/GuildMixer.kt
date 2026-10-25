@@ -75,7 +75,6 @@ class GuildMixer(
     @Volatile var maxParallelOverlays: Int = config.maxParallelOverlays.coerceIn(1, 16)
 
     @Volatile var normalizationEnabled: Boolean = config.normalizationEnabled
-    @Volatile var normalizationTargetRms: Float = config.normalizationTargetRms
 
     @Volatile var silenceSkipEnabled: Boolean = config.silenceSkipEnabled
     @Volatile var silenceThresholdDb: Float = config.silenceThresholdDb

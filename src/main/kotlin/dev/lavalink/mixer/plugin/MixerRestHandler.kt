@@ -57,7 +57,7 @@ data class AnnounceQueuedResponse(
 )
 
 @Serializable
-data class NormalizationRequest(val guildId: String, val enabled: Boolean, val targetRms: Float? = null)
+data class NormalizationRequest(val guildId: String, val enabled: Boolean)
 
 @Serializable
 data class SilenceRequest(
@@ -94,7 +94,6 @@ data class MixerState(
     val fadeInMs: Long,
     val duckLevel: Float,
     val normalizationEnabled: Boolean = false,
-    val normalizationTargetRms: Float = NormalizationGain.DEFAULT_TARGET_RMS,
     val silenceEnabled: Boolean,
     val silenceThresholdDb: Float,
     val tailConfirmMs: Long,
@@ -167,7 +166,6 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
                 fadeInMs = mixer.fadeInMs,
                 duckLevel = mixer.duckLevel,
                 normalizationEnabled = mixer.normalizationEnabled,
-                normalizationTargetRms = mixer.normalizationTargetRms,
                 silenceEnabled = mixer.silenceSkipEnabled,
                 silenceThresholdDb = mixer.silenceThresholdDb,
                 tailConfirmMs = mixer.tailConfirmMs,
@@ -246,7 +244,6 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
         val guildId = gid(body.guildId)
         val mixer = plugin.getOrCreate(guildId)
         mixer.normalizationEnabled = body.enabled
-        body.targetRms?.let { mixer.normalizationTargetRms = it.coerceIn(1e-4f, 1f) }
         return stateById(body.guildId, guildId)
     }
 

@@ -14,6 +14,11 @@ class MixerConfig {
     var duckFadeMs: Long = 300
     var maskMs: Long = 80
 
+    // Volume normalization is opt-in: every preloaded track is decoded once
+    // more for loudness analysis, which costs CPU/bandwidth.
+    var normalizationEnabled: Boolean = false
+    var normalizationTargetRms: Float = NormalizationGain.DEFAULT_TARGET_RMS
+
     // Silence skipping is opt-in: every preloaded track is decoded once more
     // for analysis, which costs CPU/bandwidth.
     var silenceSkipEnabled: Boolean = false

@@ -17,6 +17,8 @@ class MixerConfig {
     // Volume normalization is opt-in: every preloaded track is decoded once
     // more for loudness analysis, which costs CPU/bandwidth.
     var normalizationEnabled: Boolean = false
+    /** Target loudness in LUFS for EBU R128 normalization (default -14.0 LUFS, YouTube/Spotify standard). */
+    var targetLufs: Float = -14.0f
 
     // Silence skipping is opt-in: every preloaded track is decoded once more
     // for analysis, which costs CPU/bandwidth.

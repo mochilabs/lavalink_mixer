@@ -27,7 +27,7 @@ sealed class GateResult {
     object Ok : GateResult()
     object Duplicate : GateResult()
     data class Stale(val lastKnown: Long) : GateResult()
-    object PreResetArrival : GateResult()
+    data class PreResetArrival(val windowOpenAt: Long, val lastKnownEpoch: Long) : GateResult()
     object PayloadMismatch : GateResult()
     object InProgress : GateResult()
 }
@@ -36,7 +36,7 @@ sealed class ArmResult {
     data class Success(val state: PlaybackState, val epoch: Long) : ArmResult()
     object Duplicate : ArmResult()
     data class Stale(val lastKnown: Long) : ArmResult()
-    object PreResetArrival : ArmResult()
+    data class PreResetArrival(val windowOpenAt: Long, val lastKnownEpoch: Long) : ArmResult()
     object PayloadMismatch : ArmResult()
 }
 
@@ -44,14 +44,14 @@ sealed class InvalidateResult {
     data class Success(val state: PlaybackState, val epoch: Long, val refiredNeedNext: Boolean) : InvalidateResult()
     object Duplicate : InvalidateResult()
     data class Stale(val lastKnown: Long) : InvalidateResult()
-    object PreResetArrival : InvalidateResult()
+    data class PreResetArrival(val windowOpenAt: Long, val lastKnownEpoch: Long) : InvalidateResult()
 }
 
 sealed class OverrideResult {
     data class Success(val state: PlaybackState, val epoch: Long) : OverrideResult()
     object Duplicate : OverrideResult()
     data class Stale(val lastKnown: Long) : OverrideResult()
-    object PreResetArrival : OverrideResult()
+    data class PreResetArrival(val windowOpenAt: Long, val lastKnownEpoch: Long) : OverrideResult()
     object PayloadMismatch : OverrideResult()
     data class BadRequest(val message: String) : OverrideResult()
 }
@@ -286,6 +286,11 @@ class GuildMixer(
             // so the voice thread never stalls behind us.
             val snap = synchronized(lock) {
                 tailCutter.reset()
+                // The client-side play() is the ground truth for "audio is
+                // flowing"; recover the state machine if it lagged behind.
+                if (playbackState == PlaybackState.IDLE || playbackState == PlaybackState.NO_NEXT) {
+                    playbackState = PlaybackState.PLAYING
+                }
                 if (masking) {
                     masking = false
                     null
@@ -366,7 +371,18 @@ class GuildMixer(
                 doHandoff()
             } else {
                 val hasNext = synchronized(lock) { readyNextTrack != null || pendingNextTrack != null }
-                if (hasNext) advanceNext()
+                if (hasNext) {
+                    advanceNext()
+                } else {
+                    // Nothing queued to advance: only go IDLE when the player
+                    // really has no track left (client may already have
+                    // started the replacement, which TrackStart will report).
+                    synchronized(lock) {
+                        if (main?.audioPlayer?.playingTrack == null) {
+                            playbackState = PlaybackState.IDLE
+                        }
+                    }
+                }
             }
         }
 
@@ -1432,6 +1448,9 @@ class GuildMixer(
             if (!xfadeActive) return
             val sub = subTrack
             xfadeActive = false
+            // The handoff is a transition into the incoming track, not an end
+            // of playback: the state must reflect audio that keeps flowing.
+            playbackState = PlaybackState.PLAYING
             xfadeHandoffMs = -1L
             xfadeStartSample = -1L
             xfadeEndSample = -1L
@@ -1602,8 +1621,16 @@ class GuildMixer(
             val n = readyNextTrack ?: pendingNextTrack ?: return
             readyNextTrack = null
             pendingNextTrack = null
+            // Consuming the slot is a transition, not an end: PLAYING even if
+            // play() below fails (the failure path logs and never re-arms).
+            playbackState = PlaybackState.PLAYING
             lastMainTrack = null
             tailCutter.reset()
+            // Inherit the analyzed normalization gain immediately before play
+            // so the gapless transition doesn't reset the gain to 1.0f mid-stream.
+            if (normalizationEnabled) {
+                mainNormGain = normGainForLocked(n)
+            }
             n
         }
         seekPastLead(next)
@@ -1975,7 +2002,7 @@ class GuildMixer(
         measureLoudness: Boolean = false,
     ): SinglePassResult {
         val collected = collectFrom(track, factory, 0, msToSamples(duration + 1000))
-        if (collected.isEmpty()) return SinglePassResult(0L, 0L, if (measureLoudness) 0f else null)
+        if (collected.isEmpty()) return SinglePassResult(0L, 0L, null)
         var total = 0L
         for (f in collected) total += f[0].size
         val totalMs = total * 1000 / 48000
@@ -2115,7 +2142,7 @@ class GuildMixer(
             return if (prev == fp) GateResult.Duplicate else GateResult.PayloadMismatch
         }
         val now = System.currentTimeMillis()
-        if (now < windowOpenAt) return GateResult.PreResetArrival
+        if (now < windowOpenAt) return GateResult.PreResetArrival(windowOpenAt, lastKnownEpoch)
         if (epoch < lastKnownEpoch) return GateResult.Stale(lastKnownEpoch)
         recentRequestIds[idemKey] = fp
         lastKnownEpoch = epoch
@@ -2127,7 +2154,7 @@ class GuildMixer(
         when (val g = checkAndRecordLocked(epoch, idemKey, fp)) {
             is GateResult.Duplicate -> return ArmResult.Duplicate
             is GateResult.Stale -> return ArmResult.Stale(g.lastKnown)
-            is GateResult.PreResetArrival -> return ArmResult.PreResetArrival
+            is GateResult.PreResetArrival -> return ArmResult.PreResetArrival(g.windowOpenAt, g.lastKnownEpoch)
             is GateResult.PayloadMismatch -> return ArmResult.PayloadMismatch
             else -> {}
         }
@@ -2152,40 +2179,68 @@ class GuildMixer(
         pendingNextTrack = track
         promoteIfPendingLocked()
 
-        ArmResult.Success(playbackState, epoch)
-    }
-
-    fun invalidate(epoch: Long, idemKey: String): InvalidateResult = synchronized(lock) {
-        when (val g = checkAndRecordLocked(epoch, idemKey, "invalidate")) {
-            is GateResult.Duplicate -> return InvalidateResult.Duplicate
-            is GateResult.Stale -> return InvalidateResult.Stale(g.lastKnown)
-            is GateResult.PreResetArrival -> return InvalidateResult.PreResetArrival
-            else -> {}
-        }
-
-        clearNext()
-        armedTrack = null
-        if (playbackState == PlaybackState.ARMED || playbackState == PlaybackState.NO_NEXT) {
-            playbackState = PlaybackState.PLAYING
-        }
-
-        var refired = false
-        if (playbackState == PlaybackState.PLAYING) {
-            val playing = main?.audioPlayer?.playingTrack
-            if (playing != null) {
-                val pos = safePosition(playing)
-                val dur = playing.duration
-                val tWindow = crossfadeMs + 7000L
-                if (dur > 0 && (dur - pos <= tWindow || dur <= tWindow)) {
-                    refired = true
-                    actionQueue.execute {
-                        Thread.sleep(50)
-                        sendNeedNext(dur - pos, playing)
-                    }
+        // Arm leaves the track pending when silence or normalization analysis
+        // is still needed: schedule a background scan on the analysis executor
+        // so the pending slot can be promoted to ready as soon as the scan
+        // finishes, instead of waiting for the slow mixer-loop retry.
+        val cloneForAnalysis = if (pendingNextTrack != null) {
+            runCatching { track.makeClone() }.getOrNull()
+        } else null
+        if (cloneForAnalysis != null) {
+            analysisExecutor.execute {
+                try {
+                    analyzeBlocking(cloneForAnalysis)
+                } catch (e: Exception) {
+                    log.warn("silence analysis failed on guild {}", guildId, e)
                 }
             }
         }
-        InvalidateResult.Success(playbackState, epoch, refired)
+
+        ArmResult.Success(playbackState, epoch)
+    }
+
+    fun invalidate(epoch: Long, idemKey: String): InvalidateResult {
+        var abortNeeded = false
+        var refired = false
+        synchronized(lock) {
+            when (val g = checkAndRecordLocked(epoch, idemKey, "invalidate")) {
+                is GateResult.Duplicate -> return InvalidateResult.Duplicate
+                is GateResult.Stale -> return InvalidateResult.Stale(g.lastKnown)
+                is GateResult.PreResetArrival -> return InvalidateResult.PreResetArrival(g.windowOpenAt, g.lastKnownEpoch)
+                else -> {}
+            }
+
+            clearNext()
+            armedTrack = null
+            if (playbackState == PlaybackState.ARMED || playbackState == PlaybackState.NO_NEXT) {
+                playbackState = PlaybackState.PLAYING
+            }
+
+            if (playbackState == PlaybackState.PLAYING) {
+                val playing = main?.audioPlayer?.playingTrack
+                if (playing != null) {
+                    val pos = safePosition(playing)
+                    val dur = playing.duration
+                    val tWindow = crossfadeMs + 7000L
+                    if (dur > 0 && (dur - pos <= tWindow || dur <= tWindow)) {
+                        refired = true
+                        // Record the refire under lock so the mixer loop's
+                        // checkJitWindow() never sends a duplicate
+                        // MixerNeedNextTrackEvent for the same advanceSeq.
+                        needNextFiredAtSeq = advanceSeq
+                        actionQueue.execute {
+                            Thread.sleep(50)
+                            sendNeedNext(dur - pos, playing)
+                        }
+                    }
+                }
+            }
+            // Teardown runs outside the lock (abortXfade re-acquires it); the
+            // client explicitly invalidated, so an armed overlap is stale.
+            abortNeeded = xfadeActive
+        }
+        if (abortNeeded) abortXfade("invalidated by client")
+        return InvalidateResult.Success(playbackState, epoch, refired)
     }
 
     fun override(epoch: Long, idemKey: String, action: String, newTrack: AudioTrack?): OverrideResult {
@@ -2197,11 +2252,13 @@ class GuildMixer(
         }
 
         val fp = "override|$action|${newTrack?.let { encodeTrackBase64(it) } ?: ""}"
+        var abortNeeded = false
+        var cancelOverlayNeeded = false
         synchronized(lock) {
             when (val g = checkAndRecordLocked(epoch, idemKey, fp)) {
                 is GateResult.Duplicate -> return OverrideResult.Duplicate
                 is GateResult.Stale -> return OverrideResult.Stale(g.lastKnown)
-                is GateResult.PreResetArrival -> return OverrideResult.PreResetArrival
+                is GateResult.PreResetArrival -> return OverrideResult.PreResetArrival(g.windowOpenAt, g.lastKnownEpoch)
                 is GateResult.PayloadMismatch -> return OverrideResult.PayloadMismatch
                 else -> {}
             }
@@ -2214,7 +2271,22 @@ class GuildMixer(
                 "STOP" -> playbackState = PlaybackState.IDLE
                 "PLAY_NOW" -> playbackState = PlaybackState.PLAYING
             }
+            // Teardown runs outside the lock (abortXfade re-acquires it): an
+            // armed overlap lives in the outgoing track's coordinates and a
+            // stale handoff would clobber the incoming track.
+            abortNeeded = xfadeActive
+            if (action == "STOP" && overlayActive) cancelOverlayNeeded = true
         }
+
+        if (abortNeeded) {
+            abortXfade("overridden by client ($action)")
+            if (action == "STOP" && !cancelOverlayNeeded) {
+                // An aborted overlap is already unwound by abortXfade; for a
+                // STOP with no other secondary user, restore unity cleanly.
+                synchronized(lock) { mainGain.rampTo(1f, msToSamples(duckFadeMs)) }
+            }
+        }
+        if (cancelOverlayNeeded) cancelOverlay()
 
         // Execute audio mutation outside lock on actionQueue
         actionQueue.execute {
@@ -2248,24 +2320,35 @@ class GuildMixer(
         return OverrideResult.Success(playbackState, epoch)
     }
 
-    fun reset(epoch: Long, idemKey: String, windowOpenGraceMs: Long = 1500L): ResetResult = synchronized(lock) {
-        if (epoch < lastKnownEpoch) {
-            log.warn("reset epoch {} < lastKnown {} on guild {}; keeping {}", epoch, lastKnownEpoch, guildId, lastKnownEpoch)
+    fun reset(epoch: Long, idemKey: String, windowOpenGraceMs: Long = 1500L): ResetResult {
+        val abortNeeded = synchronized(lock) {
+            if (epoch < lastKnownEpoch) {
+                log.warn("reset epoch {} < lastKnown {} on guild {}; keeping {}", epoch, lastKnownEpoch, guildId, lastKnownEpoch)
+            }
+            lastKnownEpoch = maxOf(lastKnownEpoch, epoch)
+            recentRequestIds.clear()
+            windowOpenAt = if (windowOpenGraceMs > 0) System.currentTimeMillis() + windowOpenGraceMs else 0L
+            clearNext()
+            armedTrack = null
+            armedHandoffId = null
+            advanceSeq++
+
+            val isPlaying = main?.audioPlayer?.playingTrack != null
+            playbackState = if (isPlaying) PlaybackState.PLAYING else PlaybackState.IDLE
+
+            // Teardown runs outside the lock (abortXfade re-acquires it); the
+            // protocol restart forbids any armed overlap surviving it.
+            xfadeActive
         }
-        lastKnownEpoch = maxOf(lastKnownEpoch, epoch)
-        recentRequestIds.clear()
-        windowOpenAt = if (windowOpenGraceMs > 0) System.currentTimeMillis() + windowOpenGraceMs else 0L
-        armedTrack = null
-        advanceSeq++
-
-        val isPlaying = main?.audioPlayer?.playingTrack != null
-        playbackState = if (isPlaying) PlaybackState.PLAYING else PlaybackState.IDLE
-
-        ResetResult.Success(lastKnownEpoch)
+        if (abortNeeded) abortXfade("reset by client")
+        return ResetResult.Success(lastKnownEpoch)
     }
 
     fun checkJitWindow() {
         val playing = main?.audioPlayer?.playingTrack ?: return
+        // Only the PLAYING state is allowed to ask for a next track; ARMED and
+        // NO_NEXT already have a plan for this advanceSeq and must not refire.
+        if (playbackState != PlaybackState.PLAYING) return
         val seq = advanceSeq
         if (needNextFiredAtSeq == seq) return
 
@@ -2278,10 +2361,17 @@ class GuildMixer(
                 if (needNextFiredAtSeq == seq) return
                 needNextFiredAtSeq = seq
             }
-            val delayMs = if (duration <= tWindow) maxOf(500L, duration - tWindow) else 0L
+            // duration <= tWindow means the whole remaining track fits inside
+            // the window; a computed "duration - tWindow" would be negative, so
+            // just give the state machine a clean settle beat.
+            val delayMs = if (duration <= tWindow) 500L else 0L
             actionQueue.execute {
                 if (delayMs > 0) Thread.sleep(delayMs)
-                sendNeedNext(duration - pos, playing)
+                // The main track can be replaced or stopped during the delay;
+                // a stale fire would describe audio that is no longer playing.
+                if (playing === main?.audioPlayer?.playingTrack) {
+                    sendNeedNext(duration - pos, playing)
+                }
             }
         }
     }
@@ -2295,12 +2385,20 @@ class GuildMixer(
 
     fun notifyAdvanced(handoffType: String) {
         val track = main?.audioPlayer?.playingTrack ?: return
+        // Consumed exactly once: only a crossfade carries an armed handoff id,
+        // and it is cleared the moment it is read so a later advance can never
+        // reuse a stale id.
+        val handoffId: String? = synchronized(lock) {
+            val id = if (handoffType == "CROSSFADE") armedHandoffId else null
+            armedHandoffId = null
+            id
+        }
         advanceSeq++
         notifyMixerEvent("MixerAdvancedEvent") {
             put("epoch", lastKnownEpoch)
             put("encodedTrack", encodeTrackBase64(track))
             put("handoffType", handoffType)
-            armedHandoffId?.let { put("handoffId", it) }
+            handoffId?.let { put("handoffId", it) }
         }
     }
 

@@ -125,9 +125,14 @@ If the same key is replayed with a different payload, the request is rejected wi
 | POST | `/mixer/silence` | — | `{guildId, enabled, ...}` | Leading/trailing silence skipping |
 
 ### Standard v2 errors
-- `HTTP 400` Bad Request — missing or invalid `Idempotency-Key`, invalid action, or payload form mismatch.
-- `HTTP 409` Conflict — `STALE_EPOCH` or `PRE_RESET_ARRIVAL`.
+- `HTTP 400` Bad Request — missing or invalid `Idempotency-Key`, invalid action, invalid `encodedTrack`, or payload form mismatch.
+- `HTTP 409` Conflict — `STALE_EPOCH`, or `PRE_RESET_ARRIVAL` with `{ "error": "PRE_RESET_ARRIVAL", "v2WindowOpenAt": <ms-epoch>, "windowOpenAt": <ms-epoch>, "lastKnownEpoch": <n> }`.
 - `HTTP 422` Unprocessable Entity — payload mismatch for the same `Idempotency-Key`.
+
+### Response fields (v2)
+- `GET /mixer/state` includes `protocolVersion: 2`, `state` (identical to `playbackState`: `"IDLE" | "PLAYING" | "ARMED" | "NO_NEXT"`), `playbackState` (raw enum name, v1-compatible), and `lastKnownEpoch`.
+- `POST /mixer/reset` returns `{ "lastKnownEpoch": <n>, "protocolVersion": 2 }`.
+- `MixerAdvancedEvent` includes `handoffId` only for `handoffType: "CROSSFADE"`.
 
 ## WebSocket events (`op: "mixer"`, pushed by the plugin)
 

@@ -77,6 +77,9 @@ class BiquadFilter(
         val y = b0 * x + s1
         s1 = b1 * x - a1 * y + s2
         s2 = b2 * x - a2 * y
+        // Flush-to-zero: prevent JVM denormal CPU spikes when input or filter state decays to sub-normal magnitude.
+        if (s1 != 0.0 && kotlin.math.abs(s1) < 1e-15) s1 = 0.0
+        if (s2 != 0.0 && kotlin.math.abs(s2) < 1e-15) s2 = 0.0
         return y
     }
 

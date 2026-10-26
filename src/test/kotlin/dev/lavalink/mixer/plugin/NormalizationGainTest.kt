@@ -78,6 +78,7 @@ class NormalizationGainTest {
         assertEquals(-3.01f, measured, 0.2f)
     }
 
+    @Test
     fun `LoudnessMeter returns -70 LUFS for digital silence`() {
         val meter = LoudnessMeter(48000)
         val silence = arrayOf(FloatArray(48000), FloatArray(48000))

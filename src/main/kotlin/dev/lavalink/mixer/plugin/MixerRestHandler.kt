@@ -130,6 +130,14 @@ data class MixerState(
     val crossfadeMs: Long,
     val fadeInMs: Long,
     val duckLevel: Float,
+    /** Wire protocol version of this plugin's control plane. */
+    val protocolVersion: Int = 2,
+    /** v2 state-machine name, identical to [playbackState] ("IDLE"|"PLAYING"|"ARMED"|"NO_NEXT"). */
+    val state: String = "IDLE",
+    /** Raw PlaybackState enum name, kept for backward compatibility with v1 clients. */
+    val playbackState: String = "IDLE",
+    /** Highest epoch the mixer has accepted (v2 protocol bookkeeping). */
+    val lastKnownEpoch: Long = 0L,
     val normalizationEnabled: Boolean = false,
     val silenceEnabled: Boolean,
     val silenceThresholdDb: Float,
@@ -182,12 +190,25 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
         val key = idemKey ?: throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Missing Idempotency-Key header")
         val guildId = gid(body.guildId)
         val mixer = plugin.find(guildId) ?: throw notFound(guildId)
-        val track = body.encodedTrack?.let { plugin.decodeTrack(it) }
+        val track = body.encodedTrack?.let {
+            try {
+                plugin.decodeTrack(it)
+            } catch (e: Exception) {
+                throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid encodedTrack: ${e.message}", e)
+            }
+        }
         return when (val res = mixer.arm(body.epoch, key, track, body.isEmpty)) {
             is ArmResult.Success -> ResponseEntity.ok(mapOf("state" to res.state.name, "epoch" to res.epoch))
             is ArmResult.Duplicate -> ResponseEntity.ok(mapOf("duplicate" to true))
             is ArmResult.Stale -> ResponseEntity.status(HttpStatus.CONFLICT).body(ConflictErrorResponse("STALE_EPOCH", res.lastKnown))
-            is ArmResult.PreResetArrival -> ResponseEntity.status(HttpStatus.CONFLICT).body(mapOf("error" to "PRE_RESET_ARRIVAL"))
+            is ArmResult.PreResetArrival -> ResponseEntity.status(HttpStatus.CONFLICT).body(
+                mapOf(
+                    "error" to "PRE_RESET_ARRIVAL",
+                    "v2WindowOpenAt" to res.windowOpenAt,
+                    "windowOpenAt" to res.windowOpenAt,
+                    "lastKnownEpoch" to res.lastKnownEpoch,
+                )
+            )
             is ArmResult.PayloadMismatch -> ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY).body(mapOf("error" to "Payload mismatch for Idempotency-Key"))
         }
     }
@@ -204,7 +225,14 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
             is InvalidateResult.Success -> ResponseEntity.ok(mapOf("state" to res.state.name, "epoch" to res.epoch, "refiredNeedNext" to res.refiredNeedNext))
             is InvalidateResult.Duplicate -> ResponseEntity.ok(mapOf("duplicate" to true))
             is InvalidateResult.Stale -> ResponseEntity.status(HttpStatus.CONFLICT).body(ConflictErrorResponse("STALE_EPOCH", res.lastKnown))
-            is InvalidateResult.PreResetArrival -> ResponseEntity.status(HttpStatus.CONFLICT).body(mapOf("error" to "PRE_RESET_ARRIVAL"))
+            is InvalidateResult.PreResetArrival -> ResponseEntity.status(HttpStatus.CONFLICT).body(
+                mapOf(
+                    "error" to "PRE_RESET_ARRIVAL",
+                    "v2WindowOpenAt" to res.windowOpenAt,
+                    "windowOpenAt" to res.windowOpenAt,
+                    "lastKnownEpoch" to res.lastKnownEpoch,
+                )
+            )
         }
     }
 
@@ -216,13 +244,26 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
         val key = idemKey ?: throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Missing Idempotency-Key header")
         val guildId = gid(body.guildId)
         val mixer = plugin.find(guildId) ?: throw notFound(guildId)
-        val track = body.encodedTrack?.let { plugin.decodeTrack(it) }
+        val track = body.encodedTrack?.let {
+            try {
+                plugin.decodeTrack(it)
+            } catch (e: Exception) {
+                throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid encodedTrack: ${e.message}", e)
+            }
+        }
         return when (val res = mixer.override(body.epoch, key, body.action, track)) {
             is OverrideResult.Success -> ResponseEntity.ok(mapOf("state" to res.state.name, "epoch" to res.epoch))
             is OverrideResult.Duplicate -> ResponseEntity.ok(mapOf("duplicate" to true))
             is OverrideResult.BadRequest -> ResponseEntity.badRequest().body(mapOf("error" to res.message))
             is OverrideResult.Stale -> ResponseEntity.status(HttpStatus.CONFLICT).body(ConflictErrorResponse("STALE_EPOCH", res.lastKnown))
-            is OverrideResult.PreResetArrival -> ResponseEntity.status(HttpStatus.CONFLICT).body(mapOf("error" to "PRE_RESET_ARRIVAL"))
+            is OverrideResult.PreResetArrival -> ResponseEntity.status(HttpStatus.CONFLICT).body(
+                mapOf(
+                    "error" to "PRE_RESET_ARRIVAL",
+                    "v2WindowOpenAt" to res.windowOpenAt,
+                    "windowOpenAt" to res.windowOpenAt,
+                    "lastKnownEpoch" to res.lastKnownEpoch,
+                )
+            )
             is OverrideResult.PayloadMismatch -> ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY).body(mapOf("error" to "Payload mismatch for Idempotency-Key"))
         }
     }
@@ -236,7 +277,7 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
         val guildId = gid(body.guildId)
         val mixer = plugin.getOrCreate(guildId)
         val res = mixer.reset(body.epoch, key) as ResetResult.Success
-        return ResponseEntity.ok(mapOf<String, Any>("lastKnownEpoch" to res.lastKnownEpoch))
+        return ResponseEntity.ok(mapOf<String, Any>("lastKnownEpoch" to res.lastKnownEpoch, "protocolVersion" to 2))
     }
 
 
@@ -257,6 +298,10 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
                 crossfadeMs = mixer.crossfadeMs,
                 fadeInMs = mixer.fadeInMs,
                 duckLevel = mixer.duckLevel,
+                protocolVersion = 2,
+                state = mixer.playbackState.name,
+                playbackState = mixer.playbackState.name,
+                lastKnownEpoch = mixer.lastKnownEpoch,
                 normalizationEnabled = mixer.normalizationEnabled,
                 silenceEnabled = mixer.silenceSkipEnabled,
                 silenceThresholdDb = mixer.silenceThresholdDb,

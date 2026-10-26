@@ -119,6 +119,27 @@ class GuildMixerProtocolTest {
         assertEquals(11L, mixer.lastKnownEpoch)
     }
 
+    @Test
+    fun `pre-reset arrival includes windowOpenAt and lastKnownEpoch and reset and invalidate tear down active xfade`() {
+        mixer.reset(50L, UUID.randomUUID().toString(), windowOpenGraceMs = 1500L)
+        val preReset = mixer.arm(50L, UUID.randomUUID().toString(), null, true)
+        assertIs<ArmResult.PreResetArrival>(preReset)
+        assertEquals(50L, preReset.lastKnownEpoch)
+        kotlin.test.assertTrue(preReset.windowOpenAt > System.currentTimeMillis() - 100L)
+
+        // Reset with 0ms grace and verify active crossfade is torn down by invalidate and reset
+        mixer.reset(60L, UUID.randomUUID().toString(), windowOpenGraceMs = 0L)
+        mixer.beginXfadeForTest(48000)
+        kotlin.test.assertTrue(mixer.isXfadeActive())
+        mixer.invalidate(61L, UUID.randomUUID().toString())
+        kotlin.test.assertFalse(mixer.isXfadeActive())
+
+        mixer.beginXfadeForTest(48000)
+        kotlin.test.assertTrue(mixer.isXfadeActive())
+        mixer.reset(70L, UUID.randomUUID().toString(), windowOpenGraceMs = 0L)
+        kotlin.test.assertFalse(mixer.isXfadeActive())
+    }
+
     private fun loadTrack(file: File): AudioTrack {
         val future = CompletableFuture<AudioTrack>()
         manager.loadItemOrdered(file.absolutePath, file.absolutePath, object : com.sedmelluq.discord.lavaplayer.player.AudioLoadResultHandler {

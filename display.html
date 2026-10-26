@@ -1,195 +1,611 @@
 <!DOCTYPE html>
 <html lang="ko">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>lavalink_mixer — 기능 설명서</title>
-<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
-<script>mermaid.initialize({ startOnLoad: true, theme: 'dark' });</script>
-<style>
-  :root { --bg:#0f1115; --card:#171b22; --line:#262c38; --txt:#e8ecf1; --dim:#9aa4b2; --acc:#7dd3fc; --grn:#86efac; --amb:#fcd34d; --red:#fca5a5; }
-  * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--txt); font-family:"Pretendard","Noto Sans KR",system-ui,sans-serif; line-height:1.65; }
-  header { padding:48px 24px 28px; text-align:center; border-bottom:1px solid var(--line); }
-  header h1 { margin:0 0 8px; font-size:32px; }
-  header p { margin:4px 0; color:var(--dim); }
-  header code { color:var(--acc); }
-  main { max-width:1020px; margin:0 auto; padding:24px 20px 80px; }
-  section { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:24px; margin:20px 0; }
-  h2 { margin:0 0 12px; font-size:22px; }
-  h3 { margin:20px 0 8px; font-size:17px; color:var(--acc); }
-  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:12px; margin-top:12px; }
-  .card { border:1px solid var(--line); border-radius:12px; padding:14px; background:#12161d; }
-  .card b { display:block; font-size:16px; margin-bottom:6px; }
-  .card span { color:var(--dim); font-size:14px; }
-  pre.mermaid { background:#0b0e13; border:1px solid var(--line); border-radius:12px; padding:16px; overflow-x:auto; }
-  table { width:100%; border-collapse:collapse; font-size:14px; margin-top:8px; }
-  th,td { border:1px solid var(--line); padding:8px 10px; text-align:left; vertical-align:top; }
-  th { background:#12161d; color:var(--acc); white-space:nowrap; }
-  code { background:#0b0e13; padding:2px 6px; border-radius:6px; font-size:13px; color:var(--grn); }
-  .tl { margin:16px 0; }
-  .bar { position:relative; height:44px; background:#0b0e13; border:1px solid var(--line); border-radius:10px; overflow:hidden; margin:8px 0; }
-  .bar .content { position:absolute; top:0; bottom:0; left:8%; right:12%; background:linear-gradient(90deg,#155e75,#0e7490); }
-  .bar .sil { position:absolute; top:0; bottom:0; display:flex; align-items:center; justify-content:center; font-size:12px; color:var(--dim); background:repeating-linear-gradient(45deg,#1a1f29,#1a1f29 8px,#141922 8px,#141922 16px); }
-  .bar .lead { left:0; width:8%; } .bar .trail { right:0; width:12%; }
-  .bar .xfade { position:absolute; top:0; bottom:0; border:2px dashed var(--amb); border-radius:8px; display:flex; align-items:center; justify-content:center; font-size:12px; color:var(--amb); }
-  .legend { font-size:13px; color:var(--dim); }
-  .warn { border-left:4px solid var(--amb); padding:8px 12px; background:#1a1608; border-radius:0 10px 10px 0; margin:10px 0; font-size:14px; }
-  .ok { border-left:4px solid var(--grn); padding:8px 12px; background:#0a1a10; border-radius:0 10px 10px 0; margin:10px 0; font-size:14px; }
-  footer { text-align:center; color:var(--dim); font-size:13px; padding:24px; }
-  ul { margin:8px 0; padding-left:20px; } li { margin:4px 0; }
-</style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>음악 봇 노래 재생 시스템 - 쉽게 이해하는 인터랙티브 가이드</title>
+  <style>
+    :root {
+      --bg-dark: #0f172a;
+      --card-bg: #1e293b;
+      --bot-blue: #38bdf8;
+      --plugin-purple: #c084fc;
+      --redis-red: #f87171;
+      --text-main: #f1f5f9;
+      --text-sub: #94a3b8;
+      --success-green: #4ade80;
+      --warn-yellow: #fbbf24;
+      --border-color: #334155;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+
+    body {
+      background-color: var(--bg-dark);
+      color: var(--text-main);
+      padding: 24px;
+      line-height: 1.6;
+    }
+
+    .container {
+      max-width: 1000px;
+      margin: 0 auto;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 30px;
+    }
+
+    h1 {
+      font-size: 2.2rem;
+      color: var(--bot-blue);
+      margin-bottom: 8px;
+    }
+
+    .subtitle {
+      font-size: 1.1rem;
+      color: var(--text-sub);
+    }
+
+    /* Tabs */
+    .tab-nav {
+      display: flex;
+      justify-content: center;
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+
+    .tab-btn {
+      background: var(--card-bg);
+      border: 2px solid var(--border-color);
+      color: var(--text-main);
+      padding: 12px 24px;
+      border-radius: 9999px;
+      font-size: 1rem;
+      font-weight: bold;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .tab-btn:hover {
+      border-color: var(--bot-blue);
+    }
+
+    .tab-btn.active {
+      background: var(--bot-blue);
+      color: var(--bg-dark);
+      border-color: var(--bot-blue);
+    }
+
+    /* Board & Actors */
+    .board {
+      background: var(--card-bg);
+      border: 2px solid var(--border-color);
+      border-radius: 16px;
+      padding: 24px;
+      position: relative;
+      margin-bottom: 24px;
+      box-shadow: 0 10px 25px -5px rgba(0,0,0,0.5);
+    }
+
+    .actors-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+      margin-bottom: 30px;
+      position: relative;
+    }
+
+    .actor-card {
+      background: rgba(15, 23, 42, 0.6);
+      border-radius: 12px;
+      border: 2px solid;
+      padding: 16px;
+      position: relative;
+    }
+
+    .actor-bot {
+      border-color: var(--bot-blue);
+    }
+
+    .actor-plugin {
+      border-color: var(--plugin-purple);
+    }
+
+    .actor-title {
+      font-size: 1.2rem;
+      font-weight: bold;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    .actor-bot .actor-title { color: var(--bot-blue); }
+    .actor-plugin .actor-title { color: var(--plugin-purple); }
+
+    .role-badge {
+      font-size: 0.75rem;
+      padding: 2px 8px;
+      border-radius: 4px;
+      background: rgba(255,255,255,0.1);
+      color: var(--text-sub);
+    }
+
+    /* Queue & Player Visuals */
+    .queue-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      background: #0b1120;
+      padding: 12px;
+      border-radius: 8px;
+      min-height: 120px;
+    }
+
+    .track-item {
+      padding: 10px 14px;
+      border-radius: 6px;
+      font-size: 0.95rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-weight: 500;
+      transition: all 0.3s;
+    }
+
+    .track-now {
+      background: rgba(56, 189, 248, 0.2);
+      border: 1px solid var(--bot-blue);
+      color: var(--bot-blue);
+    }
+
+    .track-next {
+      background: rgba(192, 132, 252, 0.2);
+      border: 1px solid var(--plugin-purple);
+      color: var(--plugin-purple);
+    }
+
+    .track-waiting {
+      background: #1e293b;
+      color: var(--text-sub);
+    }
+
+    .player-speaker {
+      background: #0b1120;
+      border-radius: 8px;
+      padding: 16px;
+      text-align: center;
+      min-height: 120px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      border: 2px dashed var(--border-color);
+      transition: all 0.3s ease;
+    }
+
+    .player-speaker.playing {
+      border-style: solid;
+      border-color: var(--success-green);
+      background: rgba(74, 222, 128, 0.05);
+    }
+
+    .sound-waves {
+      font-size: 2rem;
+      margin-bottom: 8px;
+      animation: pulse 1s infinite alternate;
+    }
+
+    @keyframes pulse {
+      0% { transform: scale(1); opacity: 0.6; }
+      100% { transform: scale(1.15); opacity: 1; }
+    }
+
+    /* Fly Message Packet */
+    .packet {
+      position: absolute;
+      background: var(--warn-yellow);
+      color: #000;
+      padding: 6px 12px;
+      border-radius: 20px;
+      font-size: 0.8rem;
+      font-weight: bold;
+      pointer-events: none;
+      z-index: 10;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+      display: none;
+    }
+
+    /* Timeline Controls */
+    .controls-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      background: rgba(15, 23, 42, 0.8);
+      padding: 16px;
+      border-radius: 12px;
+      border: 1px solid var(--border-color);
+    }
+
+    .btn-row {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    button.action-btn {
+      background: #334155;
+      color: #fff;
+      border: none;
+      padding: 10px 18px;
+      border-radius: 8px;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.2s;
+    }
+
+    button.action-btn:hover {
+      background: #475569;
+    }
+
+    button.action-btn.btn-play {
+      background: var(--success-green);
+      color: #0f172a;
+    }
+
+    button.action-btn.btn-danger {
+      background: var(--redis-red);
+      color: #fff;
+    }
+
+    button.action-btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    /* Narration Box */
+    .narration {
+      background: #0b1120;
+      border-left: 4px solid var(--bot-blue);
+      padding: 14px 18px;
+      border-radius: 0 8px 8px 0;
+      font-size: 1.05rem;
+      min-height: 64px;
+      display: flex;
+      align-items: center;
+    }
+
+    .explain-section {
+      background: var(--card-bg);
+      border-radius: 12px;
+      padding: 20px;
+      border: 1px solid var(--border-color);
+    }
+
+    .explain-title {
+      font-size: 1.25rem;
+      font-weight: bold;
+      color: var(--warn-yellow);
+      margin-bottom: 12px;
+    }
+
+    .badge-label {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-weight: bold;
+      font-size: 0.85rem;
+    }
+
+    .badge-bad { background: rgba(248, 113, 113, 0.2); color: var(--redis-red); }
+    .badge-good { background: rgba(74, 222, 128, 0.2); color: var(--success-green); }
+
+    .sub-slot {
+      margin-top: 10px;
+      padding: 8px 12px;
+      background: rgba(192, 132, 252, 0.1);
+      border: 1px dashed var(--plugin-purple);
+      border-radius: 6px;
+      font-size: 0.85rem;
+    }
+  </style>
 </head>
 <body>
-<header>
-  <h1>🎧 lavalink_mixer 플러그인</h1>
-  <p>독립형 Lavalink v4 플러그인 — Lavalink 본체 수정 없이 <code>plugins/</code> jar 하나로 동작</p>
-  <p>핵심 한 줄: <b>앞뒤 무음을 잘라내고, 곡 끝을 기다리지 않고, 겹쳐서 섞고, TTS를 음악 위에 얹는다</b></p>
-</header>
-<main>
 
-<section>
-  <h2>1. 이게 뭘 하는 건가? (4가지 기능)</h2>
-  <div class="cards">
-    <div class="card"><b>✂️ 앞뒤 무음 스킵</b><span>leading 무음은 seek으로 점프해서 "내용"부터 재생, trailing 무음은 재생도 크로스페이드도 안 하고 그 지점에서 다음 곡으로</span></div>
-    <div class="card"><b>🔗 진짜 Gapless</b><span>클라이언트 왕복 없이 서버가 직접 다음 곡을 <code>play()</code>. 파일 끝이 아니라 <code>contentEnd = duration − trailingSilence</code>에서 전환</span></div>
-    <div class="card"><b>🎚️ 오버랩 크로스페이드</b><span>들을 수 있는 구간끼리만 equal-power 곡선으로 겹치기. 핸드오프는 정확히 contentEnd에</span></div>
-    <div class="card"><b>📢 TTS 오버레이</b><span>음악은 깔고(ducking) TTS/징글을 위에 믹싱. 끝나면 자동 복구. 길드당 1개씩</span></div>
+<div class="container">
+  <header>
+    <h1>🎵 봇은 어떻게 노래를 틀까?</h1>
+    <p class="subtitle">중학생도 3분 만에 이해하는 디스코드 음악 봇의 비밀 &amp; 레이스 버그 탈출기</p>
+  </header>
+
+  <!-- Navigation Tabs -->
+  <div class="tab-nav">
+    <button class="tab-btn active" onclick="switchMode('current')">⚠️ 지금 구조 (버그 나는 이유)</button>
+    <button class="tab-btn" onclick="switchMode('new')">✨ 새로운 구조 (JIT + 티켓 방식)</button>
   </div>
-  <div class="ok">예: 5분짜리 곡 끝에 무음이 5초 있으면, 4:55에 다음 곡이 이미 겹쳐 들어오고 4:55 정각에 바톤터치. 무음 5초를 끝까지 듣는 일이 없음.</div>
-</section>
 
-<section>
-  <h2>2. 구조 — 소리 두 개를 하나로 합치는 법</h2>
-  <p>Discord 음성은 연결당 Opus 스트림이 하나뿐이라, 두 번째 소리는 <b>인코딩 전에</b> 섞어야 한다. 그래서 숨은 2번 플레이어를 둔다.</p>
-<pre class="mermaid">flowchart LR
-  Client["봇 (lavalink-client)<br/>1-ahead 예열"] -->|play / filters op| Lavalink["Lavalink 서버"]
-  Lavalink --> GM["GuildMixer (길드당 1개)<br/>poll 10Hz / drain 50Hz"]
-  GM --> Main["메인 플레이어<br/>음성 연결 O"]
-  GM --> Sub["숨은 서브 플레이어<br/>음성 연결 X"]
-  Sub -->|SiphonFilter PCM 캡처| Q["SiphonQueue"]
-  Q --> F["MixerFilter (메인 체인 말단)<br/>out = main×g + sub×g"]
-  Main --> F
-  F -->|Opus 인코딩| Discord["Discord 음성"]
-</pre>
-  <ul>
-    <li><code>MixerFilter("mixer")</code>는 볼륨/EQ 뒤, 인코딩 전에 동작. 유휴 시(가중치 1/0)엔 완전 패스스루라서 오버헤드 거의 없음.</li>
-    <li>서브 플레이어는 디코딩만 하고, 펌프 스레드가 <code>drain()</code>으로 계속 굴려서 PCM을 뽑아낸다.</li>
-    <li>필터는 길드당 <b>한 번</b> 켜면 된다: <code>{"op":"filters","pluginFilters":{"mixer":{"guildId":"..."}}}</code> (guildId는 문자열!)</li>
-  </ul>
-</section>
+  <!-- Interactive Board -->
+  <div class="board">
+    <!-- Flying Packet Indicator -->
+    <div id="packet" class="packet">✉️ 다음 곡 전달중...</div>
 
-<section>
-  <h2>3. 전환 타이밍 — 파일 끝이 아니라 "내용 끝"</h2>
-  <div class="tl">
-    <div class="legend">파일 전체 vs 실제 내용 (빗금은 무음이라 버리는 구간)</div>
-    <div class="bar"><div class="sil lead">앞무음</div><div class="content"></div><div class="sil trail">뒤무음</div>
-      <div class="xfade" style="right:12%;width:22%;">크로스페이드 (들을 수 있는 구간끼리만)</div></div>
-    <div class="legend">◀ 재생 시작점 = 앞무음 끝 &nbsp;|&nbsp; 핸드오프 = 뒷무음 시작점(contentEnd) ▶</div>
+    <div class="actors-grid">
+      <!-- Actor 1: Bot -->
+      <div class="actor-card actor-bot">
+        <div class="actor-title">
+          🤖 시루봇 (지휘자)
+          <span class="role-badge">명령 &amp; 대기열 담당</span>
+        </div>
+        <p style="font-size:0.85rem; color: var(--text-sub); margin-bottom: 8px;">
+          🧠 봇 머릿속 (대기열 목록):
+        </p>
+        <div class="queue-list" id="botQueueView">
+          <!-- JS 렌더링 -->
+        </div>
+      </div>
+
+      <!-- Actor 2: Lavalink Plugin -->
+      <div class="actor-card actor-plugin">
+        <div class="actor-title">
+          🔊 믹서 플러그인 (스피커)
+          <span class="role-badge">오디오 &amp; 믹싱 담당</span>
+        </div>
+        <p style="font-size:0.85rem; color: var(--text-sub); margin-bottom: 8px;">
+          📢 스피커에서 지금 나오는 소리:
+        </p>
+        <div class="player-speaker" id="speakerView">
+          <div class="sound-waves">🔇</div>
+          <div id="currentPlayingTitle" style="font-weight: bold;">재생 대기 중</div>
+          <div id="playProgress" style="font-size: 0.8rem; color: var(--text-sub); margin-top: 4px;">0초 / 0초</div>
+        </div>
+
+        <div class="sub-slot" id="subSlotView">
+          🔮 비밀 보조 플레이어(서브 슬롯): <b>비어있음</b>
+        </div>
+      </div>
+    </div>
+
+    <!-- Timeline Controls -->
+    <div class="controls-panel">
+      <div class="btn-row">
+        <button class="action-btn btn-play" id="btnPlay" onclick="startPlay()">▶️ 1단계: 노래 시작</button>
+        <button class="action-btn" id="btnNext" onclick="nextStep()" disabled>⏩ 다음 상황 보기</button>
+        <button class="action-btn btn-danger" id="btnSkip" onclick="userSkip()" disabled>⚡ 중간에 유저가 /skip 연타!</button>
+        <button class="action-btn" onclick="resetDemo()">🔄 처음부터 다시</button>
+      </div>
+      <div class="narration" id="narrationText">
+        위의 [▶️ 1단계: 노래 시작] 버튼을 눌러보세요!
+      </div>
+    </div>
   </div>
-<pre class="mermaid">flowchart TD
-  P["poll (10Hz): 현재 위치 pos"] --> C{다음 곡 있음?}
-  C -- "없음" --> W["감시 끔"]
-  C -- "pending/ready 있음" --> D{"pos ≥ contentEnd?"}
-  D -- "예 + 크로스페이드 켜짐<br/>+ 분석 끝남" --> X["겹치기 시작<br/>start = contentEnd − xfadeMs"]
-  X --> H["pos ≥ handoff(contentEnd) → 바톤터치<br/>다음 곡을 메인에서 이어재생 + mask 80ms"]
-  D -- "예 + 분석 아직" --> F["강제 승격 후 즉시 절삭<br/>무음을 틀느니 trim 없이라도 넘어감"]
-  D -- "아니오 + 실시간 무음 지속" --> F
-  D -- "아니오" --> W
-</pre>
-  <ul>
-    <li><code>contentEnd = duration − trailingSilence</code>, <code>start = contentEnd − crossfadeMs</code> (<code>TrimTransition</code>).</li>
-    <li>뒤로 시크하면 겹치기는 파기된다 (낡은 오버랩 방지). 스트림(길이 무한)은 실시간 감시만으로 절삭.</li>
-    <li>핸드오프 때는 실제로 믹싱된 샘플 수를 세서 다음 곡 위치를 이어붙인다 (서브 출력 기준).</li>
-  </ul>
-</section>
 
-<section>
-  <h2>4. 무음 분석 — pending → ready</h2>
-<pre class="mermaid">sequenceDiagram
-  participant B as 봇
-  participant S as 서버 (Mixer)
-  participant A as 분석 스레드 (서브 플레이어)
-  B->>S: POST /mixer/queue/next (B곡)
-  S->>S: pending 슬롯에 저장 (hasNext=true, trim=null)
-  S->>A: 백그라운드 디코드 + 스캔
-  A-->>S: leadMs / trailMs 캐시 (ready)
-  Note over S: 전환 시점에 캐시 조회 →<br/>seek(lead) + contentEnd(trail)
-</pre>
-  <ul>
-    <li><code>GET /mixer/state</code> → <code>hasNext:true + nextTrimMs:null</code> = 아직 분석 중. <code>nextTrimMs:[lead,trail]</code>이 보이면 ready.</li>
-    <li>분석이 전환 시점까지 안 끝나면 <b>무음을 틀지 않고 그냥 넘어간다</b> (degraded). 그래서 예열은 <code>trackStart</code> 직후 바로 하는 게 좋다.</li>
-    <li>분석 중엔 서브 플레이어가 바빠서 크로스페이드 시작이 잠깐 미뤄지거나, <code>announce</code>가 409를 낸다 → trim 보이면 재시도.</li>
-    <li>첫 곡(봇이 직접 <code>play()</code>한 곡)은 예열 슬롯을 안 거쳐서 앞무음 스킵이 안 될 수 있음. 그 뒤부터는 전부 자동.</li>
-  </ul>
-</section>
+  <!-- Text Explanation Cards -->
+  <div class="explain-section" id="explainSection">
+    <!-- JS 교체 -->
+  </div>
+</div>
 
-<section>
-  <h2>5. TTS 오버레이 — 음악 깔고 말 얹기</h2>
-<pre class="mermaid">flowchart LR
-  M["음악 (메인)"] --> Mix["MixerFilter"]
-  T["TTS 클립 (서브)"] --> Mix
-  Mix -->|음악은 duckLevel(기본 0.2)로 숙이고<br/>TTS는 페이드인| Discord2["Discord"]
-</pre>
-  <ul>
-    <li><code>POST /mixer/announce {identifier 또는 encodedTrack}</code> → 끝나면 자동 언덕. <code>/mixer/announce/cancel</code>로 강제 중단.</li>
-    <li>길드당 동시 1개: 크로스페이드 중이거나 분석 중이면 409 → 잠깐 뒤 재시도.</li>
-  </ul>
-</section>
+<script>
+  let mode = 'current'; // 'current' | 'new'
+  let step = 0;
+  let queue = [];
+  let currentPlaying = null;
+  let subSlot = null;
+  let currentEpoch = 1;
+  let isPlaying = false;
 
-<section>
-  <h2>6. 봇 연동 흐름 (lavalink-client)</h2>
-<pre class="mermaid">sequenceDiagram
-  participant L as lavalink-client
-  participant S as mixer 플러그인
-  L->>L: autoSkip=false (필수!)
-  L->>S: trackStart(A) → 필터 1회 등록 → preload(B)
-  S->>S: A 내용 끝에서 B 자동 시작
-  L->>L: trackStart(B) → 큐 동기화(play 전송 금지!) → preload(C)
-  L->>L: trackEnd → preload 했으면 무시 + 5초 왓치독
-  L->>S: 스킵은 mixer.skip()으로 (슬롯 정리 후 skip)
-</pre>
-  <div class="warn">⚠️ <code>player.skip()</code> 직접 호출 금지 — 낡은 예열이 다음 곡 끝에 엉뚱하게 재생됨. 핸들 <code>mixer.skip(player)</code> 사용. 반복재생(repeatMode)이 켜지면 예열을 쉬고 리피터에게 양보.</div>
-</section>
+  const sampleTracks = [
+    { id: 't1', title: '1. NewJeans - Hype Boy (4분)' },
+    { id: 't2', title: '2. IVE - I AM (3분)' },
+    { id: 't3', title: '3. aespa - Supernova (3분)' }
+  ];
 
-<section>
-  <h2>7. REST + 설정 치트시트</h2>
-  <h3>REST (<code>/mixer/*</code>, 서버와 같은 Authorization)</h3>
-  <table>
-    <tr><th>메서드/경로</th><th>하는 일</th></tr>
-    <tr><td><code>POST /mixer/queue/next</code></td><td>다음 곡 예열 <code>{guildId, identifier?, encodedTrack?}</code> (encoded 우선)</td></tr>
-    <tr><td><code>DELETE /mixer/queue/next?guildId=</code></td><td>예열 취소</td></tr>
-    <tr><td><code>GET /mixer/state?guildId=</code></td><td>상태 + 설정 (<code>hasNext, nextTrimMs, overlayActive…</code>)</td></tr>
-    <tr><td><code>POST /mixer/crossfade</code></td><td>겹치기 on/off + 길이 (500–30000ms)</td></tr>
-    <tr><td><code>POST /mixer/fade-in</code></td><td>곡 시작 페이드인 (0–10000ms, 0=끔)</td></tr>
-    <tr><td><code>POST /mixer/announce</code></td><td>TTS 오버레이 + 덕킹 (바쁘면 409)</td></tr>
-    <tr><td><code>POST /mixer/announce/cancel</code></td><td>오버레이 중단</td></tr>
-    <tr><td><code>POST /mixer/silence</code></td><td>무음 스킵 on/off + 임계값/스캔창 조정</td></tr>
-  </table>
-  <h3>기본 설정 (<code>application.yml → mixer:</code>, 전부 길드별 REST로도 변경 가능)</h3>
-  <table>
-    <tr><th>키</th><th>기본값</th><th>의미</th></tr>
-    <tr><td><code>crossfadeEnabled / crossfadeMs</code></td><td>true / 5000</td><td>겹치기 on/off, 겹치는 길이</td></tr>
-    <tr><td><code>fadeInMs / maskMs</code></td><td>300 / 80</td><td>곡 시작 페이드 / 핸드오프 이음새 가리개</td></tr>
-    <tr><td><code>duckLevel / duckFadeMs</code></td><td>0.2 / 300</td><td>TTS 중 음악 음량 / 복구 속도</td></tr>
-    <tr><td><code>silenceSkipEnabled</code></td><td>false</td><td>무음 스킵 (트랙당 디코드 1회 추가라 기본 끔)</td></tr>
-    <tr><td><code>silenceThresholdDb / silenceMinSoundMs</code></td><td>-60 / 120</td><td>이 dB 밑은 무음 / 이만큼 지속돼야 진짜 소리(클릭 무시)</td></tr>
-    <tr><td><code>silenceHeadScanMs / silenceTailScanMs</code></td><td>15000 / 15000</td><td>앞/뒤 스캔 범위</td></tr>
-    <tr><td><code>tailConfirmMs</code></td><td>1000</td><td>실시간 무음이 이만큼 지속되면 절삭 (스트림은 최소 3000)</td></tr>
-  </table>
-</section>
+  function resetDemo() {
+    step = 0;
+    queue = JSON.parse(JSON.stringify(sampleTracks));
+    currentPlaying = null;
+    subSlot = null;
+    currentEpoch = 1;
+    isPlaying = false;
+    document.getElementById('btnPlay').disabled = false;
+    document.getElementById('btnNext').disabled = true;
+    document.getElementById('btnSkip').disabled = true;
+    updateUI();
+    renderExplanation();
+    setNarration("처음 상태로 돌아왔어요. [▶️ 1단계: 노래 시작]을 눌러보세요!");
+  }
 
-<section>
-  <h2>8. 한계 (숨기지 않음)</h2>
-  <ul>
-    <li>크로스페이드는 유한+탐색가능(seekable) 곡만. 스트림은 절삭만 된다.</li>
-    <li>디코더 예열 수십 ms는 남는다. 완전 제로는 아님.</li>
-    <li>길드당 서브 소스 1개 (겹치기 vs TTS vs 분석은 서로 기다림).</li>
-    <li>필터 <code>resetFilters()</code>는 mixer 키를 날린다 → <code>enableMixerFilter()</code> 다시 호출.</li>
-  </ul>
-</section>
+  function switchMode(newMode) {
+    mode = newMode;
+    document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+    if (mode === 'current') {
+      document.querySelectorAll('.tab-btn')[0].classList.add('active');
+    } else {
+      document.querySelectorAll('.tab-btn')[1].classList.add('active');
+    }
+    resetDemo();
+  }
 
-</main>
-<footer>lavalink_mixer · plugin-api 4.2.2 · lavaplayer 2.2.6 · Java 17 · UNLICENSE · <code>GuildMixer / TrimTransition / SilenceAnalyzer / MixerFilter / MixerRestHandler</code></footer>
+  function setNarration(text) {
+    document.getElementById('narrationText').innerHTML = text;
+  }
+
+  function updateUI() {
+    // 1. Queue UI
+    const qEl = document.getElementById('botQueueView');
+    qEl.innerHTML = '';
+    if (currentPlaying) {
+      qEl.innerHTML += `<div class="track-item track-now"><span>▶️ ${currentPlaying.title}</span><span style="font-size:0.75rem;">재생 중</span></div>`;
+    }
+    queue.forEach((t, i) => {
+      let isPreloaded = (subSlot && subSlot.id === t.id);
+      let cls = isPreloaded ? 'track-item track-next' : 'track-item track-waiting';
+      let tag = isPreloaded ? '미리 장전됨(슬롯)' : `대기 #${i+1}`;
+      if (mode === 'new' && isPreloaded) tag += ` (티켓 #${currentEpoch})`;
+      qEl.innerHTML += `<div class="${cls}"><span>${t.title}</span><span style="font-size:0.75rem;">${tag}</span></div>`;
+    });
+    if (!currentPlaying && queue.length === 0) {
+      qEl.innerHTML = '<div style="color:var(--text-sub); text-align:center; padding:10px;">대기열이 비었습니다.</div>';
+    }
+
+    // 2. Speaker UI
+    const spk = document.getElementById('speakerView');
+    const titleEl = document.getElementById('currentPlayingTitle');
+    const waveEl = spk.querySelector('.sound-waves');
+    if (currentPlaying) {
+      spk.classList.add('playing');
+      waveEl.textContent = '🎶';
+      titleEl.textContent = currentPlaying.title;
+      document.getElementById('playProgress').textContent = "신나게 디스코드 음성으로 송출 중!";
+    } else {
+      spk.classList.remove('playing');
+      waveEl.textContent = '🔇';
+      titleEl.textContent = "재생 대기 중";
+      document.getElementById('playProgress').textContent = "0초 / 0초";
+    }
+
+    // 3. Sub Slot UI
+    const subEl = document.getElementById('subSlotView');
+    if (subSlot) {
+      let extra = (mode === 'new') ? ` [유효 티켓: #${currentEpoch}]` : '';
+      subEl.innerHTML = `🔮 비밀 보조 플레이어(서브 슬롯): <b style="color:var(--plugin-purple);">${subSlot.title}</b> 대기 중! ${extra}`;
+    } else {
+      subEl.innerHTML = `🔮 비밀 보조 플레이어(서브 슬롯): <b>비어있음</b>`;
+    }
+  }
+
+  function startPlay() {
+    step = 1;
+    currentPlaying = queue.shift();
+    isPlaying = true;
+    document.getElementById('btnPlay').disabled = true;
+    document.getElementById('btnNext').disabled = false;
+    document.getElementById('btnSkip').disabled = false;
+
+    if (mode === 'current') {
+      // 지금 구조: 시작하자마자 4분짜리 노래인데 다음곡을 서브 슬롯에 넣어버림
+      subSlot = queue[0];
+      setNarration(`🎵 <b>${currentPlaying.title}</b> 재생 시작!<br><span class="badge-label badge-bad">⚠️ 문제 발생</span> 봇이 아직 4분이나 남았는데 벌써 다음 곡(<b>${subSlot.title}</b>)을 스피커 비밀 슬롯에 던져버렸어요!`);
+    } else {
+      // 새 구조: 서브 슬롯 비워둠
+      subSlot = null;
+      setNarration(`🎵 <b>${currentPlaying.title}</b> 재생 시작!<br><span class="badge-label badge-good">✨ 안전함</span> 아직 노래가 한참 남았으니 봇은 다음 곡을 미리 보내지 않고 가만히 기다립니다.`);
+    }
+    updateUI();
+  }
+
+  function nextStep() {
+    step++;
+    if (mode === 'current') {
+      if (step === 2) {
+        setNarration(`⏳ 4분 동안 노래가 흐르는 중... 이 긴 시간 동안 아무 일 없으면 다음 곡이 자연스럽게 바톤터치(크로스페이드) 됩니다.<br>👉 <b>하지만 중간에 유저가 곡을 건너뛰면 어떻게 될까요? 주황색 [⚡ /skip 연타] 버튼을 눌러보세요!</b>`);
+      } else if (step >= 3) {
+        // 자연 전환
+        currentPlaying = subSlot;
+        queue.shift();
+        subSlot = queue[0] || null;
+        setNarration(`🎉 크로스페이드 성공! <b>${currentPlaying.title}</b>(으)로 자연스럽게 소리가 이어졌어요.`);
+      }
+    } else {
+      // 새 구조
+      if (step === 2) {
+        setNarration(`⏳ 노래 끝 <b>7초 전</b> 감지! 스피커가 봇에게 <b>"야, 노래 곧 끝나! 다음 곡 줘(requestNextTrack)"</b> 라고 물어봅니다.<br>👉 [⏩ 다음 상황 보기]를 눌러보세요.`);
+      } else if (step === 3) {
+        subSlot = queue[0];
+        setNarration(`📩 봇이 방금 대기열 1번(<b>${subSlot.title}</b>)을 딱 7초 전에 <b>티켓 번호(#${currentEpoch})</b>를 붙여 슬롯에 장전(Arm)했습니다!`);
+      } else if (step >= 4) {
+        currentPlaying = queue.shift();
+        subSlot = null;
+        setNarration(`🎉 <b>티켓 #${currentEpoch} 확인 완료!</b> 오차 없이 0초 지연으로 <b>${currentPlaying.title}</b> 전환 성공! 대기열에서도 정확히 1곡만 빠졌습니다.`);
+        document.getElementById('btnNext').disabled = true;
+      }
+    }
+    updateUI();
+  }
+
+  function userSkip() {
+    if (!isPlaying) return;
+
+    if (mode === 'current') {
+      // 유저가 스킵을 눌렀을 때의 버그 재현
+      let skippedTrack = currentPlaying;
+      let ghostTrack = subSlot; // 이미 슬롯에 들어가있던 곡
+
+      // 봇은 대기열에서 지우고 3번을 틀고 싶어함
+      let newTrack = queue[1] || queue[0];
+      queue = queue.filter(t => t.id !== ghostTrack?.id);
+
+      currentPlaying = ghostTrack; // 슬롯에 있던 놈이 맘대로 터져나옴
+      setNarration(`
+        💥 <b>대참사 발생 (레이스 컨디션)!</b><br>
+        유저는 <b>"${ghostTrack?.title}"</b>도 건너뛰고 바로 3번 곡을 듣고 싶어서 스킵했는데,<br>
+        스피커가 4분 전부터 지 멋대로 쥐고 있던 <b>"${ghostTrack?.title}"</b>을 확 틀어버렸습니다!<br>
+        <span style="color:var(--redis-red);">결과: 방금 건너뛴 귀신 곡이 다시 튀어나오고 대기열 순서가 완전히 꼬여버림!</span>
+      `);
+      document.getElementById('btnSkip').disabled = true;
+      document.getElementById('btnNext').disabled = true;
+    } else {
+      // 새 구조: Ticket(Epoch) 덕분에 안전하게 거절
+      currentEpoch++;
+      let oldSub = subSlot;
+      subSlot = null; // 티켓 번호가 바뀌었으므로 즉시 무효화
+      let skipped = currentPlaying;
+      currentPlaying = queue.shift(); // 유저가 원한 다음 곡 즉시 재생
+
+      setNarration(`
+        🛡️ <b>레이스 완벽 방어 성공!</b><br>
+        유저가 스킵을 누르자 봇이 <b>티켓 번호를 #${currentEpoch}로 변경</b>했습니다.<br>
+        스피커는 예전 티켓(#${currentEpoch-1})으로 준비 중이던 <b>${oldSub ? oldSub.title : '예전 곡'}</b>을 0.01초 만에 쓰레기통에 버렸습니다!<br>
+        <span style="color:var(--success-green);">결과: 유저가 원한 곡으로 칼같이 넘어가고, 대기열도 100% 일치합니다.</span>
+      `);
+      document.getElementById('btnSkip').disabled = true;
+      document.getElementById('btnNext').disabled = true;
+    }
+    updateUI();
+  }
+
+  function renderExplanation() {
+    const el = document.getElementById('explainSection');
+    if (mode === 'current') {
+      el.innerHTML = `
+        <div class="explain-title">🤔 지금 방식은 왜 자꾸 오류가 날까요?</div>
+        <p style="color:var(--text-sub); margin-bottom: 12px;">
+          지금 방식은 <b>"너무 일찍 다음 곡을 보내버리는 것"</b>이 문제입니다.
+        </p>
+        <ul style="padding-left: 20px; color: var(--text-sub); display: flex; flex-direction: column; gap: 8px;">
+          <li><b>4분의 시간 동안 유저는 가만히 있지 않아요:</b> 노래가 나오는 4분 동안 유저는 셔플도 누르고, 맘에 안 드는 곡을 삭제도 하고, 스킵도 누릅니다.</li>
+          <li><b>두 사람의 주인이 싸워요 (지휘자 봇 vs 제멋대로 스피커):</b> 봇은 대기열을 바꿨는데, 스피커는 자기가 4분 전에 받아둔 옛날 곡을 갑자기 틀어버립니다.</li>
+          <li><b>이중 재생 버그:</b> 봇도 "어? 노래 끝났네? 내가 틀어야지!" 하고, 스피커도 "내가 틀어야지!" 하면서 같은 노래가 2번 겹쳐서 재생되는 끔찍한 일이 생깁니다.</li>
+        </ul>
+      `;
+    } else {
+      el.innerHTML = `
+        <div class="explain-title">💡 새 구조 (JIT + 티켓 방식)는 왜 절대 안 꼬일까요?</div>
+        <p style="color:var(--text-sub); margin-bottom: 12px;">
+          비결은 딱 2가지! <b>"마지막 7초 전까지 기다리기(JIT)"</b>와 <b>"티켓 번호 검사(Epoch)"</b>입니다.
+        </p>
+        <ul style="padding-left: 20px; color: var(--text-sub); display: flex; flex-direction: column; gap: 8px;">
+          <li><b>1. JIT (Just-In-Time) 프리페치:</b> 4분 내내 미리 곡을 보내놓지 않고, 노래 끝나기 딱 7초 전에만 <b>"야, 다음 곡 뭐 틀까?"</b> 하고 물어봅니다. 유저가 큐를 바꿀 위험 시간이 4분에서 7초로 확 줄어듭니다!</li>
+          <li><b>2. 티켓 번호(Epoch):</b> 곡을 바꿀 때마다 봇이 티켓 번호(#1, #2, #3...)를 1씩 올립니다. 유저가 스킵을 누르면 티켓이 올라가서, 스피커가 과거 티켓으로 틀려던 소리를 0.01초 만에 음소거하고 버립니다.</li>
+          <li><b>3. 크로스페이드 켜기/끄기 자유:</b> 크로스페이드가 켜져 있으면 7초 동안 부드럽게 겹쳐서 틀고, 꺼져 있으면 0초의 틈도 없이 딱 끊김 없이 이어붙입니다!</li>
+        </ul>
+      `;
+    }
+  }
+
+  // Initial call
+  resetDemo();
+</script>
+
 </body>
 </html>

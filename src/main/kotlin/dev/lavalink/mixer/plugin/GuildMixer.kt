@@ -21,6 +21,45 @@ import kotlin.math.cos
 import kotlin.math.sin
 
 data class Gains(val main: Float, val sub: Float)
+enum class PlaybackState { IDLE, PLAYING, ARMED, NO_NEXT }
+
+sealed class GateResult {
+    object Ok : GateResult()
+    object Duplicate : GateResult()
+    data class Stale(val lastKnown: Long) : GateResult()
+    object PreResetArrival : GateResult()
+    object PayloadMismatch : GateResult()
+    object InProgress : GateResult()
+}
+
+sealed class ArmResult {
+    data class Success(val state: PlaybackState, val epoch: Long) : ArmResult()
+    object Duplicate : ArmResult()
+    data class Stale(val lastKnown: Long) : ArmResult()
+    object PreResetArrival : ArmResult()
+    object PayloadMismatch : ArmResult()
+}
+
+sealed class InvalidateResult {
+    data class Success(val state: PlaybackState, val epoch: Long, val refiredNeedNext: Boolean) : InvalidateResult()
+    object Duplicate : InvalidateResult()
+    data class Stale(val lastKnown: Long) : InvalidateResult()
+    object PreResetArrival : InvalidateResult()
+}
+
+sealed class OverrideResult {
+    data class Success(val state: PlaybackState, val epoch: Long) : OverrideResult()
+    object Duplicate : OverrideResult()
+    data class Stale(val lastKnown: Long) : OverrideResult()
+    object PreResetArrival : OverrideResult()
+    object PayloadMismatch : OverrideResult()
+    data class BadRequest(val message: String) : OverrideResult()
+}
+
+sealed class ResetResult {
+    data class Success(val lastKnownEpoch: Long) : ResetResult()
+}
+
 
 /**
  * One concurrent `mode=parallel` TTS overlay. Each slot owns its own
@@ -77,6 +116,7 @@ class GuildMixer(
     @Volatile var maxParallelOverlays: Int = config.maxParallelOverlays.coerceIn(1, 16)
 
     @Volatile var normalizationEnabled: Boolean = config.normalizationEnabled
+    @Volatile var targetLufs: Float = config.targetLufs
 
     @Volatile var silenceSkipEnabled: Boolean = config.silenceSkipEnabled
     @Volatile var silenceThresholdDb: Float = config.silenceThresholdDb
@@ -87,6 +127,27 @@ class GuildMixer(
     @Volatile var tailConfirmMs: Long = config.tailConfirmMs
     /** Set by poll(): realtime tail watch armed (cheap per-chunk check reads this). */
     @Volatile var tailWatch: Boolean = false
+
+    // ---- Protocol State ----
+    @Volatile var playbackState: PlaybackState = PlaybackState.IDLE
+        private set
+    @Volatile var lastKnownEpoch: Long = 0L
+        private set
+    @Volatile var windowOpenAt: Long = 0L
+        private set
+    private var armedTrack: AudioTrack? = null
+    private var armedEpoch: Long = 0L
+    private var armedHandoffId: String? = null
+    @Volatile private var needNextFiredAtSeq: Long = -1L
+    @Volatile private var advanceSeq: Long = 0L
+
+    private val recentRequestIds = object : LinkedHashMap<String, String>(64, 0.75f, true) {
+        override fun removeEldestEntry(e: MutableMap.MutableEntry<String, String>) = size > 64
+    }
+
+    private val actionQueue = java.util.concurrent.Executors.newFixedThreadPool(2) { r ->
+        Thread(r, "mixer-v2-action").apply { isDaemon = true }
+    }
 
     // ---- volume normalization ----
 
@@ -702,6 +763,7 @@ class GuildMixer(
             is PollAction.AdvanceNext -> advanceNext()
             is PollAction.AbortXfade -> abortXfade(action.reason)
         }
+        checkJitWindow()
     }
 
     /** 1Hz breadcrumb while an overlap runs: is the sub actually feeding us? */
@@ -1138,6 +1200,11 @@ class GuildMixer(
                 log.warn("parallel overlay destroy failed on guild {}", guildId, e)
             }
         }
+        try {
+            actionQueue.shutdownNow()
+        } catch (e: Exception) {
+            log.warn("actionQueue shutdown failed on guild {}", guildId, e)
+        }
     }
 
     // ---- internals (all called under lock) ----
@@ -1433,6 +1500,7 @@ class GuildMixer(
                 put("reason", "handoff")
                 putTrack(plan.source)
             }
+            notifyAdvanced("CROSSFADE")
         } catch (e: Exception) {
             log.warn("handoff play failed on guild {}", guildId, e)
             synchronized(lock) {
@@ -1542,6 +1610,7 @@ class GuildMixer(
         try {
             main?.play(next)
             log.info("gapless advance on guild {}: now '{}'", guildId, titleOf(next))
+            notifyAdvanced("GAPLESS")
         } catch (e: Exception) {
             log.warn("gapless play failed on guild {}", guildId, e)
         }
@@ -1583,21 +1652,17 @@ class GuildMixer(
     private fun trailForLocked(track: AudioTrack): Long = trimForLocked(track).trailMs
 
     /**
-     * Effective gain for a track: pulled to the first track's loudness.
-     * The baseline stores the FIRST track's measured RMS; each queued
-     * track is then normalized to that same loudness as `fromRms(trackRms, baselineRms)`.
+     * Effective gain for a track: normalized to [targetLufs] (-14 LUFS standard).
+     * If [normGainBaseline] is explicitly overridden (e.g. in test fixtures), it anchors
+     * to that baseline; otherwise it normalizes directly against [targetLufs].
      */
     private fun normGainForLocked(track: AudioTrack): Float {
         val id = idOf(track) ?: return 1f
-        val baseline = normGainBaseline
-        // No baseline yet (first track still measuring): the first track
-        // itself plays at unity; subsequent tracks wait for the anchor.
-        return when {
-            baseline <= 0f -> 1f
-            else -> NormalizationGain.fromRms(
-                normCache[id] ?: 0f,
-                baseline,
-            ).gain
+        val measuredLufs = normCache[id] ?: return 1f
+        return if (normGainBaseline != 0f) {
+            NormalizationGain.fromLufs(measuredLufs, targetLufs = normGainBaseline).gain
+        } else {
+            NormalizationGain.fromLufs(measuredLufs, targetLufs = targetLufs).gain
         }
     }
 
@@ -1671,14 +1736,12 @@ class GuildMixer(
                 val loudness = measureLoudnessBlocking(clone, factory)
                 if (loudness != null) {
                     synchronized(lock) {
-                        // The FIRST track's measured RMS anchors every queued
-                        // track: subsequent tracks are pulled to this loudness.
-                        normGainBaseline = loudness
                         normCache[track.identifier] = loudness
                         while (normCache.size > 200) normCache.remove(normCache.keys.first())
                     }
-                    log.info("normalization baseline guild {}: rms={}", guildId, loudness)
+                    log.info("normalization baseline guild {}: lufs={}", guildId, loudness)
                 }
+
             } catch (e: Exception) {
                 log.warn("baseline loudness scan failed on guild {}", guildId, e)
             } finally {
@@ -1776,8 +1839,9 @@ class GuildMixer(
                             normCache[identifier] = result.loudnessRms
                             while (normCache.size > 200) normCache.remove(normCache.keys.first())
                         }
-                        log.info("normalization guild {}: rms={}", guildId, result.loudnessRms)
+                        log.info("normalization guild {}: lufs={}", guildId, result.loudnessRms)
                     }
+
                 } else {
                     if (hasSilence) {
                         lead = scanHead(track, factory)
@@ -1794,8 +1858,9 @@ class GuildMixer(
                                 normCache[identifier] = loudness
                                 while (normCache.size > 200) normCache.remove(normCache.keys.first())
                             }
-                            log.info("normalization guild {}: rms={}", guildId, loudness)
+                            log.info("normalization guild {}: lufs={}", guildId, loudness)
                         }
+
                     }
                 }
             }
@@ -2030,6 +2095,213 @@ class GuildMixer(
         track.position
     } catch (e: Exception) {
         lastPosition
+    }
+
+    // ==========================================
+    // ====== v2 Core Protocol Implementation ===
+    // ==========================================
+
+    fun encodeTrackBase64(track: AudioTrack): String = try {
+        val baos = java.io.ByteArrayOutputStream()
+        playerManager.encodeTrack(com.sedmelluq.discord.lavaplayer.tools.io.MessageOutput(baos), track)
+        java.util.Base64.getEncoder().encodeToString(baos.toByteArray())
+    } catch (e: Exception) {
+        track.identifier
+    }
+
+    private fun checkAndRecordLocked(epoch: Long, idemKey: String, fp: String): GateResult {
+        val prev = recentRequestIds[idemKey]
+        if (prev != null) {
+            return if (prev == fp) GateResult.Duplicate else GateResult.PayloadMismatch
+        }
+        val now = System.currentTimeMillis()
+        if (now < windowOpenAt) return GateResult.PreResetArrival
+        if (epoch < lastKnownEpoch) return GateResult.Stale(lastKnownEpoch)
+        recentRequestIds[idemKey] = fp
+        lastKnownEpoch = epoch
+        return GateResult.Ok
+    }
+
+    fun arm(epoch: Long, idemKey: String, track: AudioTrack?, isEmpty: Boolean): ArmResult = synchronized(lock) {
+        val fp = "arm|${track?.let { encodeTrackBase64(it) } ?: "empty"}"
+        when (val g = checkAndRecordLocked(epoch, idemKey, fp)) {
+            is GateResult.Duplicate -> return ArmResult.Duplicate
+            is GateResult.Stale -> return ArmResult.Stale(g.lastKnown)
+            is GateResult.PreResetArrival -> return ArmResult.PreResetArrival
+            is GateResult.PayloadMismatch -> return ArmResult.PayloadMismatch
+            else -> {}
+        }
+
+        if (isEmpty || track == null) {
+            clearNext()
+            armedTrack = null
+            armedEpoch = epoch
+            playbackState = PlaybackState.NO_NEXT
+            return ArmResult.Success(playbackState, epoch)
+        }
+
+        // ARMED or NO_NEXT or PLAYING -> 교체 장전
+        clearNext()
+        armedTrack = track
+        armedEpoch = epoch
+        armedHandoffId = java.util.UUID.randomUUID().toString()
+        playbackState = PlaybackState.ARMED
+
+        // Preload / analysis trigger
+        readyNextTrack = null
+        pendingNextTrack = track
+        promoteIfPendingLocked()
+
+        ArmResult.Success(playbackState, epoch)
+    }
+
+    fun invalidate(epoch: Long, idemKey: String): InvalidateResult = synchronized(lock) {
+        when (val g = checkAndRecordLocked(epoch, idemKey, "invalidate")) {
+            is GateResult.Duplicate -> return InvalidateResult.Duplicate
+            is GateResult.Stale -> return InvalidateResult.Stale(g.lastKnown)
+            is GateResult.PreResetArrival -> return InvalidateResult.PreResetArrival
+            else -> {}
+        }
+
+        clearNext()
+        armedTrack = null
+        if (playbackState == PlaybackState.ARMED || playbackState == PlaybackState.NO_NEXT) {
+            playbackState = PlaybackState.PLAYING
+        }
+
+        var refired = false
+        if (playbackState == PlaybackState.PLAYING) {
+            val playing = main?.audioPlayer?.playingTrack
+            if (playing != null) {
+                val pos = safePosition(playing)
+                val dur = playing.duration
+                val tWindow = crossfadeMs + 7000L
+                if (dur > 0 && (dur - pos <= tWindow || dur <= tWindow)) {
+                    refired = true
+                    actionQueue.execute {
+                        Thread.sleep(50)
+                        sendNeedNext(dur - pos, playing)
+                    }
+                }
+            }
+        }
+        InvalidateResult.Success(playbackState, epoch, refired)
+    }
+
+    fun override(epoch: Long, idemKey: String, action: String, newTrack: AudioTrack?): OverrideResult {
+        if (action != "STOP" && action != "PLAY_NOW") {
+            return OverrideResult.BadRequest("Invalid action: $action")
+        }
+        if (action == "PLAY_NOW" && newTrack == null) {
+            return OverrideResult.BadRequest("PLAY_NOW requires a non-null track")
+        }
+
+        val fp = "override|$action|${newTrack?.let { encodeTrackBase64(it) } ?: ""}"
+        synchronized(lock) {
+            when (val g = checkAndRecordLocked(epoch, idemKey, fp)) {
+                is GateResult.Duplicate -> return OverrideResult.Duplicate
+                is GateResult.Stale -> return OverrideResult.Stale(g.lastKnown)
+                is GateResult.PreResetArrival -> return OverrideResult.PreResetArrival
+                is GateResult.PayloadMismatch -> return OverrideResult.PayloadMismatch
+                else -> {}
+            }
+
+            clearNext()
+            armedTrack = null
+            advanceSeq++
+
+            when (action) {
+                "STOP" -> playbackState = PlaybackState.IDLE
+                "PLAY_NOW" -> playbackState = PlaybackState.PLAYING
+            }
+        }
+
+        // Execute audio mutation outside lock on actionQueue
+        actionQueue.execute {
+            var success = false
+            try {
+                when (action) {
+                    "STOP" -> {
+                        main?.stop()
+                        success = true
+                    }
+                    "PLAY_NOW" -> {
+                        newTrack?.let {
+                            main?.play(it)
+                            success = true
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                log.warn("override action {} execution failed on guild {}", action, guildId, e)
+            } finally {
+                if (success) {
+                    notifyMixerEvent("MixerOverriddenEvent") {
+                        put("epoch", epoch)
+                        put("requestId", idemKey)
+                        put("action", action)
+                    }
+                }
+            }
+        }
+
+        return OverrideResult.Success(playbackState, epoch)
+    }
+
+    fun reset(epoch: Long, idemKey: String, windowOpenGraceMs: Long = 1500L): ResetResult = synchronized(lock) {
+        if (epoch < lastKnownEpoch) {
+            log.warn("reset epoch {} < lastKnown {} on guild {}; keeping {}", epoch, lastKnownEpoch, guildId, lastKnownEpoch)
+        }
+        lastKnownEpoch = maxOf(lastKnownEpoch, epoch)
+        recentRequestIds.clear()
+        windowOpenAt = if (windowOpenGraceMs > 0) System.currentTimeMillis() + windowOpenGraceMs else 0L
+        armedTrack = null
+        advanceSeq++
+
+        val isPlaying = main?.audioPlayer?.playingTrack != null
+        playbackState = if (isPlaying) PlaybackState.PLAYING else PlaybackState.IDLE
+
+        ResetResult.Success(lastKnownEpoch)
+    }
+
+    fun checkJitWindow() {
+        val playing = main?.audioPlayer?.playingTrack ?: return
+        val seq = advanceSeq
+        if (needNextFiredAtSeq == seq) return
+
+        val pos = safePosition(playing)
+        val duration = playing.duration
+        val tWindow = crossfadeMs + 7000L
+
+        if (duration > 0 && (duration - pos <= tWindow || duration <= tWindow)) {
+            synchronized(lock) {
+                if (needNextFiredAtSeq == seq) return
+                needNextFiredAtSeq = seq
+            }
+            val delayMs = if (duration <= tWindow) maxOf(500L, duration - tWindow) else 0L
+            actionQueue.execute {
+                if (delayMs > 0) Thread.sleep(delayMs)
+                sendNeedNext(duration - pos, playing)
+            }
+        }
+    }
+
+    private fun sendNeedNext(remainingMs: Long, currentTrack: AudioTrack) {
+        notifyMixerEvent("MixerNeedNextTrackEvent") {
+            put("remainingMs", remainingMs)
+            put("currentTrackEncoded", encodeTrackBase64(currentTrack))
+        }
+    }
+
+    fun notifyAdvanced(handoffType: String) {
+        val track = main?.audioPlayer?.playingTrack ?: return
+        advanceSeq++
+        notifyMixerEvent("MixerAdvancedEvent") {
+            put("epoch", lastKnownEpoch)
+            put("encodedTrack", encodeTrackBase64(track))
+            put("handoffType", handoffType)
+            armedHandoffId?.let { put("handoffId", it) }
+        }
     }
 
     companion object {

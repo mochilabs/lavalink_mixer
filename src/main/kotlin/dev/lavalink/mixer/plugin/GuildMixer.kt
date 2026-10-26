@@ -139,13 +139,17 @@ class GuildMixer(
     private var armedEpoch: Long = 0L
     private var armedHandoffId: String? = null
     @Volatile private var needNextFiredAtSeq: Long = -1L
-    @Volatile private var advanceSeq: Long = 0L
+    private val advanceSeq = AtomicLong(0L)
+    /** Last advanceSeq whose MixerNeedNextTrackEvent was actually dispatched (dedup). */
+    @Volatile private var needNextDispatchedAtSeq: Long = -1L
 
     private val recentRequestIds = object : LinkedHashMap<String, String>(64, 0.75f, true) {
         override fun removeEldestEntry(e: MutableMap.MutableEntry<String, String>) = size > 64
     }
 
-    private val actionQueue = java.util.concurrent.Executors.newFixedThreadPool(2) { r ->
+    // Order-sensitive submissions (override STOP/PLAY_NOW, invalidate refires,
+    // JIT delayed fires): a multi-thread pool can reorder them.
+    private val actionQueue = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
         Thread(r, "mixer-v2-action").apply { isDaemon = true }
     }
 
@@ -196,6 +200,9 @@ class GuildMixer(
     private var subStartPositionMs: Long = 0L
     private var announceToken: Long = 0L
     private var masking: Boolean = false
+    private var maskingTrack: AudioTrack? = null
+    /** Bumped on every sub arming/teardown; in-flight startOverlap/startOverlay re-check it. */
+    private var subGen: Long = 0L
 
     private var lastMainTrack: AudioTrack? = null
     private var lastPosition: Long = 0L
@@ -291,8 +298,12 @@ class GuildMixer(
                 if (playbackState == PlaybackState.IDLE || playbackState == PlaybackState.NO_NEXT) {
                     playbackState = PlaybackState.PLAYING
                 }
-                if (masking) {
+                // The mask is identity-checked: another player's TrackStart (two
+                // socket sessions) or a client-initiated play must not consume a
+                // handoff mask armed for a specific clone.
+                if (masking && maskingTrack === track) {
                     masking = false
+                    maskingTrack = null
                     null
                 } else {
                     StartSnap(
@@ -1314,7 +1325,7 @@ class GuildMixer(
         }
         seekPastLead(next)
         val sub = synchronized(lock) { ensureSubLocked() }
-        synchronized(lock) {
+        val gen = synchronized(lock) {
             if (overlayActive || xfadeActive) {
                 // Lost a race with an overlay/overlap started on another thread:
                 // re-queue rather than dropping the track.
@@ -1348,12 +1359,33 @@ class GuildMixer(
                 )
             }
             xfadeLogMs = 0L
+            ++subGen
         }
         try {
             sub.playTrack(next)
         } catch (e: Exception) {
             log.warn("overlap play failed on guild {}", guildId, e)
             abortXfade("overlap play failed")
+            return
+        }
+        // A control command (override/invalidate/reset) that aborted the fade
+        // while playTrack was in flight bumps subGen and stops an empty sub —
+        // the playTrack above then decodes a zombie into a torn-down slot.
+        // Detect and unwind it: stop the decoder and restore the popped track.
+        val stillCurrent = synchronized(lock) { subGen == gen && xfadeActive && subTrack === next }
+        if (!stillCurrent) {
+            log.warn("overlap superseded during start on guild {}; unwinding '{}'", guildId, titleOf(next))
+            try {
+                sub.stopTrack()
+            } catch (e: Exception) {
+                log.warn("superseded overlap stop failed on guild {}", guildId, e)
+            }
+            synchronized(lock) {
+                // Restore the track we popped so poll() can re-evaluate it.
+                if (readyNextTrack == null) readyNextTrack = next
+                else if (pendingNextTrack == null) pendingNextTrack = next
+                else log.warn("dropping superseded overlap on guild {}: slot busy", guildId)
+            }
             return
         }
         log.info(
@@ -1434,10 +1466,13 @@ class GuildMixer(
         if (!handoffAllowed) {
             // Callers decide under the lock and act after releasing it, so a
             // client replace can slip in between; never hand off into a track
-            // the overlap was not armed on.
+            // the overlap was not armed on. Re-evaluate the slot so a stuck
+            // main track still advances instead of stalling silent.
             abortXfade("handoff arrived after the armed main track was replaced")
+            fallbackAdvanceOrIdle()
             return
         }
+        data class Plan(val handoff: Handoff?, val epochAtStart: Long, val seqAtStart: Long)
         val plan = synchronized(lock) {
             // poll(), mainListener.onTrackEnd and recoverFromMainStall all read
             // xfadeActive under the lock and then call us *after* releasing it.
@@ -1445,7 +1480,7 @@ class GuildMixer(
             // therefore race the position-based handoff; without this guard the
             // second caller replays the whole transition and throws away the
             // mask ramp it just armed.
-            if (!xfadeActive) return
+            if (!xfadeActive) return@doHandoff
             val sub = subTrack
             xfadeActive = false
             // The handoff is a transition into the incoming track, not an end
@@ -1455,29 +1490,41 @@ class GuildMixer(
             xfadeStartSample = -1L
             xfadeEndSample = -1L
             xfadeMainTrack = null
+            val epochAtStart = lastKnownEpoch
+            val seqAtStart = advanceSeq.get()
             if (sub == null) {
                 resetGainsLocked()
-                null
+                Plan(null, epochAtStart, seqAtStart)
             } else {
                 val clone = sub.makeClone()
                 val subOutMs = subOutputSamples.get() * 1000L / SAMPLE_RATE
-                Handoff(
-                    source = sub,
-                    clone = clone,
-                    outputPosition = subStartPositionMs + subOutMs,
-                    subReportedMs = safePosition(sub),
-                    subOutMs = subOutMs,
-                    droppedFrames = siphon.droppedFrames,
+                Plan(
+                    Handoff(
+                        source = sub,
+                        clone = clone,
+                        outputPosition = subStartPositionMs + subOutMs,
+                        subReportedMs = safePosition(sub),
+                        subOutMs = subOutMs,
+                        droppedFrames = siphon.droppedFrames,
+                    ),
+                    epochAtStart,
+                    seqAtStart,
                 )
             }
-        } ?: return
+        }
+        val handoff = plan.handoff ?: run {
+            // sub==null while xfadeActive was true: inconsistent arming. Do not
+            // leave the state machine PLAYING with nothing queued.
+            fallbackAdvanceOrIdle()
+            return
+        }
         try {
-            if (plan.clone.isSeekable) {
-                val duration = plan.clone.duration
-                plan.clone.position = if (duration > 0) {
-                    plan.outputPosition.coerceIn(0, duration)
+            if (handoff.clone.isSeekable) {
+                val duration = handoff.clone.duration
+                handoff.clone.position = if (duration > 0) {
+                    handoff.outputPosition.coerceIn(0, duration)
                 } else {
-                    plan.outputPosition.coerceAtLeast(0)
+                    handoff.outputPosition.coerceAtLeast(0)
                 }
             }
         } catch (e: Exception) {
@@ -1502,36 +1549,77 @@ class GuildMixer(
         // synchronously from playTrack(), so a flag set afterwards is too late.
         // An unmasked onTrackStart re-seeks the clone to its leading-silence
         // offset, rewinding the whole overlap the crossfade just built.
+        // The mask is identity-checked so another player's TrackStart cannot
+        // consume it, and cleared by the superseded re-check if play is dropped.
         synchronized(lock) {
             // Only clear our own slot; a newer overlap may already reuse it.
-            if (subTrack === plan.source) subTrack = null
+            if (subTrack === handoff.source) subTrack = null
             masking = true
+            maskingTrack = handoff.clone
         }
-        try {
-            // Volatile read: attachMain publishes the player safely.
-            main?.play(plan.clone)
-            log.info(
-                "crossfade handoff on guild {} at {}ms (sub decoder was at {}ms, " +
-                    "{}ms of sub audio heard, {} frames dropped)",
-                guildId, plan.outputPosition, plan.subReportedMs, plan.subOutMs, plan.droppedFrames,
-            )
-            notifyMixerEvent("overlapEnd") {
-                put("reason", "handoff")
-                putTrack(plan.source)
+        // Defer the play into the single-thread actionQueue so it is ordered
+        // against concurrent override/invalidate/reset submissions; re-check the
+        // control plane did not supersede this handoff while the seek ran.
+        actionQueue.execute {
+            val superseded = synchronized(lock) {
+                lastKnownEpoch != plan.epochAtStart || advanceSeq.get() != plan.seqAtStart
             }
-            notifyAdvanced("CROSSFADE")
-        } catch (e: Exception) {
-            log.warn("handoff play failed on guild {}", guildId, e)
+            if (superseded) {
+                synchronized(lock) {
+                    if (maskingTrack === handoff.clone) {
+                        masking = false
+                        maskingTrack = null
+                        resetGainsLocked()
+                    }
+                }
+                log.warn("crossfade handoff superseded on guild {}; dropping '{}'", guildId, titleOf(handoff.source))
+                return@execute
+            }
+            try {
+                // Volatile read: attachMain publishes the player safely.
+                main?.play(handoff.clone)
+                log.info(
+                    "crossfade handoff on guild {} at {}ms (sub decoder was at {}ms, " +
+                        "{}ms of sub audio heard, {} frames dropped)",
+                    guildId, handoff.outputPosition, handoff.subReportedMs, handoff.subOutMs, handoff.droppedFrames,
+                )
+                notifyMixerEvent("overlapEnd") {
+                    put("reason", "handoff")
+                    putTrack(handoff.source)
+                }
+                notifyAdvanced("CROSSFADE", plan.epochAtStart, plan.seqAtStart)
+            } catch (e: Exception) {
+                log.warn("handoff play failed on guild {}", guildId, e)
+                synchronized(lock) {
+                    if (subTrack === handoff.source) subTrack = null
+                    masking = false
+                    maskingTrack = null
+                    resetGainsLocked()
+                }
+            }
+        }
+    }
+
+    /** After an aborted/stale handoff, fall back to advancing the slot or idle. */
+    private fun fallbackAdvanceOrIdle() {
+        val hasNext = synchronized(lock) { readyNextTrack != null || pendingNextTrack != null }
+        if (hasNext) {
+            advanceNext()
+        } else {
             synchronized(lock) {
-                if (subTrack === plan.source) subTrack = null
-                masking = false
-                resetGainsLocked()
+                if (main?.audioPlayer?.playingTrack == null) {
+                    playbackState = PlaybackState.IDLE
+                }
             }
         }
     }
 
     private fun abortXfade(reason: String) {
         val (sub, armedSub, subName) = synchronized(lock) {
+            // Idempotent: nothing armed means a duplicate/late abort (e.g. a
+            // deliberate sub.stopTrack() racing the listener) must not replay
+            // teardown, clobber a handoff mask ramp, or spam overlapEnd.
+            if (!xfadeActive && subTrack == null) return@abortXfade
             val subPosMs = subTrack?.let { safePosition(it) } ?: -1L
             val subOutMs = subOutputSamples.get() * 1000L / SAMPLE_RATE
             val elapsed = if (subStartMs > 0) System.currentTimeMillis() - subStartMs else -1L
@@ -1550,6 +1638,7 @@ class GuildMixer(
             val armed = subTrack
             subTrack = null
             subNormGain = 1f
+            subGen++
             siphon.clear()
             mainGain.rampTo(1f, msToSamples(duckFadeMs))
             subGain.setNow(0f)
@@ -1617,7 +1706,7 @@ class GuildMixer(
 
     /** Plays the queued track now, seeking past analyzed leading silence. */
     private fun advanceNext() {
-        val next = synchronized(lock) {
+        val (next, epochAtStart, seqAtStart) = synchronized(lock) {
             val n = readyNextTrack ?: pendingNextTrack ?: return
             readyNextTrack = null
             pendingNextTrack = null
@@ -1631,15 +1720,28 @@ class GuildMixer(
             if (normalizationEnabled) {
                 mainNormGain = normGainForLocked(n)
             }
-            n
+            Triple(n, lastKnownEpoch, advanceSeq.get())
         }
         seekPastLead(next)
-        try {
-            main?.play(next)
-            log.info("gapless advance on guild {}: now '{}'", guildId, titleOf(next))
-            notifyAdvanced("GAPLESS")
-        } catch (e: Exception) {
-            log.warn("gapless play failed on guild {}", guildId, e)
+        // The play is a control-plane audio mutation: route it through the
+        // single-thread actionQueue so it is ordered against concurrent
+        // override/invalidate/reset submissions, and re-check that no newer
+        // control command superseded this decision while seekPastLead ran.
+        actionQueue.execute {
+            val superseded = synchronized(lock) {
+                lastKnownEpoch != epochAtStart || advanceSeq.get() != seqAtStart
+            }
+            if (superseded) {
+                log.warn("gapless advance superseded on guild {}; dropping '{}'", guildId, titleOf(next))
+                return@execute
+            }
+            try {
+                main?.play(next)
+                log.info("gapless advance on guild {}: now '{}'", guildId, titleOf(next))
+                notifyAdvanced("GAPLESS", epochAtStart, seqAtStart)
+            } catch (e: Exception) {
+                log.warn("gapless play failed on guild {}", guildId, e)
+            }
         }
     }
 
@@ -1699,8 +1801,13 @@ class GuildMixer(
     }
 
     /** Moves pending → ready once its trim and gain are known (or no analysis needed). */
-    private fun promoteIfPendingLocked() {
+    private fun promoteIfPendingLocked(expectedId: String? = null) {
         val pending = pendingNextTrack ?: return
+        // A finished analysis must only promote the track it analyzed: a late
+        // queueNext/arm can replace pendingNextTrack mid-scan, and promoting the
+        // replacement with the stale scan's identity would hand the mixer a
+        // mismatched (or partially-cached) track.
+        if (expectedId != null && idOf(pending) != expectedId) return
         val id = idOf(pending) ?: run {
             pendingNextTrack = null
             readyNextTrack = pending
@@ -1909,7 +2016,7 @@ class GuildMixer(
                     analysisFailures = 0
                     analysisFailureId = null
                 }
-                promoteIfPendingLocked()
+                promoteIfPendingLocked(identifier)
             }
             if (hasSilence) {
                 log.info("silence analysis guild {}: lead={}ms trail={}ms", guildId, guardedLead, tail)
@@ -2227,10 +2334,20 @@ class GuildMixer(
                         // Record the refire under lock so the mixer loop's
                         // checkJitWindow() never sends a duplicate
                         // MixerNeedNextTrackEvent for the same advanceSeq.
-                        needNextFiredAtSeq = advanceSeq
+                        val refireSeq = advanceSeq.get()
+                        needNextFiredAtSeq = refireSeq
                         actionQueue.execute {
                             Thread.sleep(50)
-                            sendNeedNext(dur - pos, playing)
+                            val still = synchronized(lock) {
+                                playbackState == PlaybackState.PLAYING &&
+                                    main?.audioPlayer?.playingTrack === playing &&
+                                    advanceSeq.get() == refireSeq &&
+                                    needNextDispatchedAtSeq != refireSeq
+                            }
+                            if (still) {
+                                sendNeedNext(dur - safePosition(playing), playing)
+                                synchronized(lock) { needNextDispatchedAtSeq = refireSeq }
+                            }
                         }
                     }
                 }
@@ -2265,7 +2382,7 @@ class GuildMixer(
 
             clearNext()
             armedTrack = null
-            advanceSeq++
+            advanceSeq.incrementAndGet()
 
             when (action) {
                 "STOP" -> playbackState = PlaybackState.IDLE
@@ -2331,7 +2448,7 @@ class GuildMixer(
             clearNext()
             armedTrack = null
             armedHandoffId = null
-            advanceSeq++
+            advanceSeq.incrementAndGet()
 
             val isPlaying = main?.audioPlayer?.playingTrack != null
             playbackState = if (isPlaying) PlaybackState.PLAYING else PlaybackState.IDLE
@@ -2349,8 +2466,8 @@ class GuildMixer(
         // Only the PLAYING state is allowed to ask for a next track; ARMED and
         // NO_NEXT already have a plan for this advanceSeq and must not refire.
         if (playbackState != PlaybackState.PLAYING) return
-        val seq = advanceSeq
-        if (needNextFiredAtSeq == seq) return
+        val seq = advanceSeq.get()
+        if (needNextFiredAtSeq == seq || needNextDispatchedAtSeq == seq) return
 
         val pos = safePosition(playing)
         val duration = playing.duration
@@ -2358,7 +2475,7 @@ class GuildMixer(
 
         if (duration > 0 && (duration - pos <= tWindow || duration <= tWindow)) {
             synchronized(lock) {
-                if (needNextFiredAtSeq == seq) return
+                if (needNextFiredAtSeq == seq || needNextDispatchedAtSeq == seq) return
                 needNextFiredAtSeq = seq
             }
             // duration <= tWindow means the whole remaining track fits inside
@@ -2369,8 +2486,14 @@ class GuildMixer(
                 if (delayMs > 0) Thread.sleep(delayMs)
                 // The main track can be replaced or stopped during the delay;
                 // a stale fire would describe audio that is no longer playing.
-                if (playing === main?.audioPlayer?.playingTrack) {
-                    sendNeedNext(duration - pos, playing)
+                val still = synchronized(lock) {
+                    playbackState == PlaybackState.PLAYING &&
+                        main?.audioPlayer?.playingTrack === playing &&
+                        advanceSeq.get() == seq
+                }
+                if (still) {
+                    sendNeedNext(duration - safePosition(playing), playing)
+                    synchronized(lock) { needNextDispatchedAtSeq = seq }
                 }
             }
         }
@@ -2383,7 +2506,7 @@ class GuildMixer(
         }
     }
 
-    fun notifyAdvanced(handoffType: String) {
+    fun notifyAdvanced(handoffType: String, expectedEpoch: Long = lastKnownEpoch, expectedSeq: Long = advanceSeq.get()) {
         val track = main?.audioPlayer?.playingTrack ?: return
         // Consumed exactly once: only a crossfade carries an armed handoff id,
         // and it is cleared the moment it is read so a later advance can never
@@ -2393,9 +2516,21 @@ class GuildMixer(
             armedHandoffId = null
             id
         }
-        advanceSeq++
+        // A concurrent override/invalidate/reset already superseded this
+        // transition: do not stamp its fresh epoch onto the stale track, or the
+        // client will recover() on a false desync. Emit the epoch captured at
+        // the decision point, not a re-read that a racing control command may
+        // have already bumped.
+        val superseded = synchronized(lock) {
+            lastKnownEpoch != expectedEpoch || advanceSeq.get() != expectedSeq
+        }
+        if (superseded) {
+            log.warn("{} advance superseded on guild {}; not emitting MixerAdvancedEvent", handoffType, guildId)
+            return
+        }
+        advanceSeq.incrementAndGet()
         notifyMixerEvent("MixerAdvancedEvent") {
-            put("epoch", lastKnownEpoch)
+            put("epoch", expectedEpoch)
             put("encodedTrack", encodeTrackBase64(track))
             put("handoffType", handoffType)
             handoffId?.let { put("handoffId", it) }

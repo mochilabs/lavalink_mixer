@@ -41,7 +41,7 @@ data class OverrideRequest(
 )
 
 @Serializable
-data class ResetRequest(val guildId: String, val epoch: Long)
+data class ResetRequest(val guildId: String, val epoch: Long, val windowOpenGraceMs: Long = 1500L)
 @Serializable
 data class ConflictErrorResponse(val error: String, val lastKnownEpoch: Long)
 
@@ -189,7 +189,7 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
     ): ResponseEntity<Any> {
         val key = idemKey ?: throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Missing Idempotency-Key header")
         val guildId = gid(body.guildId)
-        val mixer = plugin.find(guildId) ?: throw notFound(guildId)
+        val mixer = plugin.getOrCreate(guildId)
         val track = body.encodedTrack?.let {
             try {
                 plugin.decodeTrack(it)
@@ -197,9 +197,10 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
                 throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid encodedTrack: ${e.message}", e)
             }
         }
-        return when (val res = mixer.arm(body.epoch, key, track, body.isEmpty)) {
+        return when (val res = mixer.arm(body.epoch, key, track, body.isEmpty, body.encodedTrack)) {
             is ArmResult.Success -> ResponseEntity.ok(mapOf("state" to res.state.name, "epoch" to res.epoch))
             is ArmResult.Duplicate -> ResponseEntity.ok(mapOf("duplicate" to true))
+            is ArmResult.BadRequest -> ResponseEntity.badRequest().body(mapOf("error" to res.message))
             is ArmResult.Stale -> ResponseEntity.status(HttpStatus.CONFLICT).body(ConflictErrorResponse("STALE_EPOCH", res.lastKnown))
             is ArmResult.PreResetArrival -> ResponseEntity.status(HttpStatus.CONFLICT).body(
                 mapOf(
@@ -220,7 +221,7 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
     ): ResponseEntity<Any> {
         val key = idemKey ?: throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Missing Idempotency-Key header")
         val guildId = gid(body.guildId)
-        val mixer = plugin.find(guildId) ?: throw notFound(guildId)
+        val mixer = plugin.getOrCreate(guildId)
         return when (val res = mixer.invalidate(body.epoch, key)) {
             is InvalidateResult.Success -> ResponseEntity.ok(mapOf("state" to res.state.name, "epoch" to res.epoch, "refiredNeedNext" to res.refiredNeedNext))
             is InvalidateResult.Duplicate -> ResponseEntity.ok(mapOf("duplicate" to true))
@@ -233,6 +234,7 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
                     "lastKnownEpoch" to res.lastKnownEpoch,
                 )
             )
+            is InvalidateResult.PayloadMismatch -> ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY).body(mapOf("error" to "Payload mismatch for Idempotency-Key"))
         }
     }
 
@@ -243,7 +245,7 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
     ): ResponseEntity<Any> {
         val key = idemKey ?: throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Missing Idempotency-Key header")
         val guildId = gid(body.guildId)
-        val mixer = plugin.find(guildId) ?: throw notFound(guildId)
+        val mixer = plugin.getOrCreate(guildId)
         val track = body.encodedTrack?.let {
             try {
                 plugin.decodeTrack(it)
@@ -251,7 +253,7 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
                 throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid encodedTrack: ${e.message}", e)
             }
         }
-        return when (val res = mixer.override(body.epoch, key, body.action, track)) {
+        return when (val res = mixer.override(body.epoch, key, body.action, track, body.encodedTrack)) {
             is OverrideResult.Success -> ResponseEntity.ok(mapOf("state" to res.state.name, "epoch" to res.epoch))
             is OverrideResult.Duplicate -> ResponseEntity.ok(mapOf("duplicate" to true))
             is OverrideResult.BadRequest -> ResponseEntity.badRequest().body(mapOf("error" to res.message))
@@ -276,8 +278,11 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
         val key = idemKey ?: throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Missing Idempotency-Key header")
         val guildId = gid(body.guildId)
         val mixer = plugin.getOrCreate(guildId)
-        val res = mixer.reset(body.epoch, key) as ResetResult.Success
-        return ResponseEntity.ok(mapOf<String, Any>("lastKnownEpoch" to res.lastKnownEpoch, "protocolVersion" to 2))
+        return when (val res = mixer.reset(body.epoch, key, body.windowOpenGraceMs)) {
+            is ResetResult.Success -> ResponseEntity.ok(mapOf<String, Any>("lastKnownEpoch" to res.lastKnownEpoch, "protocolVersion" to 2))
+            is ResetResult.Duplicate -> ResponseEntity.ok(mapOf<String, Any>("lastKnownEpoch" to res.lastKnownEpoch, "protocolVersion" to 2, "duplicate" to true))
+            is ResetResult.PayloadMismatch -> ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY).body(mapOf("error" to "Payload mismatch for Idempotency-Key"))
+        }
     }
 
 
@@ -287,7 +292,7 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
     }
 
     private fun stateById(raw: String, guildId: Long): ResponseEntity<MixerState> {
-        val mixer = plugin.find(guildId) ?: throw notFound(guildId)
+        val mixer = plugin.getOrCreate(guildId)
         return ResponseEntity.ok(
             MixerState(
                 guildId = raw,

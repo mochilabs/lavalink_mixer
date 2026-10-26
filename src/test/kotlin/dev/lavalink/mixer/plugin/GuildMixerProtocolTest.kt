@@ -140,6 +140,70 @@ class GuildMixerProtocolTest {
         kotlin.test.assertFalse(mixer.isXfadeActive())
     }
 
+    @Test
+    fun `encodeTrackBase64 normalizes non-zero position so handoff seek preserves canonical encodedTrack`() {
+        val original = loadTrack(testFile)
+        val initialEncoded = mixer.encodeTrackBase64(original)
+
+        val bytes = java.util.Base64.getDecoder().decode(initialEncoded)
+        val decoded = manager.decodeTrack(com.sedmelluq.discord.lavaplayer.tools.io.MessageInput(java.io.ByteArrayInputStream(bytes))).decodedTrack
+        val clone = decoded.makeClone().apply { position = 3000L }
+
+        assertEquals(initialEncoded, mixer.encodeTrackBase64(clone))
+    }
+
+    @Test
+    fun `arm tears down active crossfade and validates non-empty null track before gate`() {
+        mixer.reset(10L, UUID.randomUUID().toString(), windowOpenGraceMs = 0L)
+        val trackB = loadTrack(testFile)
+        val trackC = loadTrack(testFile)
+
+        // Non-empty arm with null track must fail with BadRequest and not consume key
+        val reusableKey = UUID.randomUUID().toString()
+        val badArm = mixer.arm(10L, reusableKey, null, false)
+        assertIs<ArmResult.BadRequest>(badArm)
+
+        val goodArm = mixer.arm(10L, reusableKey, trackB, false)
+        assertIs<ArmResult.Success>(goodArm)
+
+        // Active overlap must be aborted when client re-arms with another track or empty
+        mixer.beginXfadeForTest(48000)
+        kotlin.test.assertTrue(mixer.isXfadeActive())
+        val reArm = mixer.arm(11L, UUID.randomUUID().toString(), trackC, false)
+        assertIs<ArmResult.Success>(reArm)
+        kotlin.test.assertFalse(mixer.isXfadeActive())
+
+        mixer.beginXfadeForTest(48000)
+        kotlin.test.assertTrue(mixer.isXfadeActive())
+        val emptyArm = mixer.arm(12L, UUID.randomUUID().toString(), null, true)
+        assertIs<ArmResult.Success>(emptyArm)
+        kotlin.test.assertFalse(mixer.isXfadeActive())
+        assertEquals(PlaybackState.NO_NEXT, mixer.playbackState)
+    }
+
+    @Test
+    fun `invalidate and reset enforce idempotency payload mismatch`() {
+        val resetKey = UUID.randomUUID().toString()
+        val r1 = mixer.reset(10L, resetKey, windowOpenGraceMs = 0L)
+        assertIs<ResetResult.Success>(r1)
+        val rDup = mixer.reset(10L, resetKey, windowOpenGraceMs = 0L)
+        assertIs<ResetResult.Duplicate>(rDup)
+        val rMismatch = mixer.reset(20L, resetKey, windowOpenGraceMs = 0L)
+        assertIs<ResetResult.PayloadMismatch>(rMismatch)
+        assertEquals(10L, mixer.lastKnownEpoch)
+
+        val armKey = UUID.randomUUID().toString()
+        val track = loadTrack(testFile)
+        assertIs<ArmResult.Success>(mixer.arm(10L, armKey, track, false))
+        assertEquals(PlaybackState.ARMED, mixer.playbackState)
+
+        // Reusing arm's Idempotency-Key on invalidate must return PayloadMismatch without clearing slot or changing epoch
+        val invMismatch = mixer.invalidate(99L, armKey)
+        assertIs<InvalidateResult.PayloadMismatch>(invMismatch)
+        assertEquals(10L, mixer.lastKnownEpoch)
+        assertEquals(PlaybackState.ARMED, mixer.playbackState)
+    }
+
     private fun loadTrack(file: File): AudioTrack {
         val future = CompletableFuture<AudioTrack>()
         manager.loadItemOrdered(file.absolutePath, file.absolutePath, object : com.sedmelluq.discord.lavaplayer.player.AudioLoadResultHandler {

@@ -182,8 +182,16 @@ class GuildMixer(
 
     private var subPlayer: AudioPlayer? = null
     private var siphonFactory: SiphonFactory? = null
+    /**
+     * Decoder dedicated to background analysis. Must NEVER be the live sub
+     * player: analyzeBlocking decodes whole tracks, so sharing the live
+     * player makes startOverlap's playTrack() steal the decoder and the
+     * analysis cleanup's stopTrack() then kill the just-started live overlap
+     * (production: "crossfade aborted after 9ms ... dropped=12363f").
+     */
+    private var analysisPlayer: AudioPlayer? = null
+    private var analysisFactory: SiphonFactory? = null
     private var analysisActive: Boolean = false
-    /** Throttle for analysis deferred because the sub player was busy at preload time. */
     @Volatile private var analysisRetryAtMs: Long = 0L
     /** Consecutive analysis failures for [analysisFailureId]; retries give up after 3. */
     private var analysisFailures: Int = 0
@@ -347,7 +355,6 @@ class GuildMixer(
                 synchronized(lock) {
                     val id = idOf(track)
                     normGainBaseline == 0f &&
-                        subPlayer == null &&
                         !analysisActive &&
                         readyNextTrack == null &&
                         pendingNextTrack == null &&
@@ -1252,7 +1259,7 @@ class GuildMixer(
     }
 
     fun destroy() {
-        val (sub, parallels) = synchronized(lock) {
+        val (sub, analysis, parallels) = synchronized(lock) {
             pendingNextTrack = null
             readyNextTrack = null
             armedTrack = null
@@ -1261,14 +1268,20 @@ class GuildMixer(
             subTrack = null
             xfadeActive = false
             overlayActive = false
+            analysisActive = false
             val p = parallelOverlays.values.toList()
             parallelOverlays.clear()
-            subPlayer.also { subPlayer = null } to p
+            Triple(subPlayer.also { subPlayer = null }, analysisPlayer.also { analysisPlayer = null }, p)
         }
         try {
             sub?.destroy()
         } catch (e: Exception) {
             log.warn("sub destroy failed on guild {}", guildId, e)
+        }
+        try {
+            analysis?.destroy()
+        } catch (e: Exception) {
+            log.warn("analysis destroy failed on guild {}", guildId, e)
         }
         for (slot in parallels) {
             try {
@@ -1363,6 +1376,24 @@ class GuildMixer(
             subPlayer = sub
         }
         return sub
+    }
+
+    /**
+     * Lazily creates the analysis-only decoder. Its tap is a private
+     * SiphonQueue-less factory: every scan attaches its own bounded tap, so
+     * the live siphon never receives analysis audio and analysis never
+     * overflows it.
+     */
+    private fun ensureAnalysisPlayerLocked(): AudioPlayer {
+        var analysis = analysisPlayer
+        if (analysis == null) {
+            analysis = playerManager.createPlayer()
+            val factory = SiphonFactory(SiphonQueue(maxFrames = 1, maxSamples = 1))
+            analysisFactory = factory
+            analysis.setFilterFactory(factory)
+            analysisPlayer = analysis
+        }
+        return analysis
     }
 
     private fun startOverlap(plan: CrossfadePlan) {
@@ -1961,11 +1992,11 @@ class GuildMixer(
      */
     internal fun scheduleBaselineAnalysis(track: AudioTrack) {
         val factory = synchronized(lock) {
-            if (normGainBaseline != 0f || subPlayer != null || analysisActive) return
+            if (normGainBaseline != 0f || analysisActive) return
             analysisActive = true
             analysisBroken = false
-            ensureSubLocked()
-            siphonFactory
+            ensureAnalysisPlayerLocked()
+            analysisFactory
         } ?: return
         analysisExecutor.execute {
             val clone = try {
@@ -1987,7 +2018,15 @@ class GuildMixer(
             } catch (e: Exception) {
                 log.warn("baseline loudness scan failed on guild {}", guildId, e)
             } finally {
-                synchronized(lock) { analysisActive = false }
+                val analysisToStop = synchronized(lock) {
+                    analysisActive = false
+                    analysisPlayer
+                }
+                try {
+                    analysisToStop?.stopTrack()
+                } catch (e: Exception) {
+                    log.warn("baseline cleanup stop failed on guild {}", guildId, e)
+                }
             }
         }
     }
@@ -2000,7 +2039,7 @@ class GuildMixer(
             val needSilence = silenceSkipEnabled && !trimCache.containsKey(id)
             val needNorm = normalizationEnabled && !normCache.containsKey(id)
             if (!needSilence && !needNorm) return null
-            if (overlayActive || xfadeActive || analysisActive) return null
+            if (analysisActive) return null
             if (analysisFailureId == id && analysisFailures >= 3) return null
             if (now - analysisRetryAtMs < 250) return null
             analysisRetryAtMs = now
@@ -2040,10 +2079,10 @@ class GuildMixer(
                 promoteIfPendingLocked()
                 return
             }
-            if (overlayActive || xfadeActive || analysisActive) {
+            if (analysisActive) {
                 log.debug(
-                    "analysis deferred on guild {}: sub player busy (overlay={} xfade={}); will retry",
-                    guildId, overlayActive, xfadeActive,
+                    "analysis deferred on guild {}: another scan is running; will retry",
+                    guildId,
                 )
                 return
             }
@@ -2051,7 +2090,7 @@ class GuildMixer(
             analysisBroken = false
         }
         try {
-            val factory = synchronized(lock) { ensureSubLocked(); siphonFactory }
+            val factory = synchronized(lock) { ensureAnalysisPlayerLocked(); analysisFactory }
                 ?: return
             val duration = try {
                 track.duration
@@ -2133,12 +2172,12 @@ class GuildMixer(
             log.warn("silence analysis failed on guild {}", guildId, e)
             synchronized(lock) { noteAnalysisFailureLocked(identifier) }
         } finally {
-            val subToStop = synchronized(lock) {
+            val analysisToStop = synchronized(lock) {
                 analysisActive = false
-                subPlayer
+                analysisPlayer
             }
             try {
-                subToStop?.stopTrack()
+                analysisToStop?.stopTrack()
             } catch (e: Exception) {
                 log.warn("analysis cleanup stop failed on guild {}", guildId, e)
             }
@@ -2150,7 +2189,7 @@ class GuildMixer(
         val tap = SiphonQueue(maxFrames = 512)
         factory.addTap(tap)
         try {
-            val sub = synchronized(lock) { subPlayer } ?: return 0
+            val sub = synchronized(lock) { analysisPlayer } ?: return 0
             val clone = track.makeClone()
             sub.playTrack(clone)
             val scanner = SilenceAnalyzer.LeadScanner(
@@ -2241,7 +2280,7 @@ class GuildMixer(
         val tap = SiphonQueue(maxFrames = 512)
         factory.addTap(tap)
         try {
-            val sub = synchronized(lock) { subPlayer } ?: return null
+            val sub = synchronized(lock) { analysisPlayer } ?: return null
             val clone = track.makeClone()
             sub.playTrack(clone)
             val meter = LoudnessMeter()
@@ -2293,7 +2332,7 @@ class GuildMixer(
         val tap = SiphonQueue(maxFrames = 512)
         factory.addTap(tap)
         try {
-            val sub = synchronized(lock) { subPlayer } ?: return emptyList()
+            val sub = synchronized(lock) { analysisPlayer } ?: return emptyList()
             val clone = track.makeClone()
             if (startMs > 0) {
                 try {

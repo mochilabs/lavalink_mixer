@@ -20,17 +20,16 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * Preload-time silence analysis is skipped while the secondary player is busy
- * (overlay, overlap, another scan). That skip used to strand the queued track
- * in "pending" until the end-of-file fallback fired — the overlap plan never
- * became available, so the transition landed without a crossfade.
- * [GuildMixer.maybeRetryAnalysis] must resume the scan once the sub frees up.
+ * Preload-time silence analysis fills the trim cache; until it lands the
+ * queued track stays "pending" and the end-of-file fallback fires the
+ * transition without a crossfade. [GuildMixer.maybeRetryAnalysis] must hand
+ * out a scannable clone (throttled) so the retry completes the scan.
  */
 class DeferredAnalysisTest {
     private val sampleRate = 48000
 
     @Test
-    fun `analysis skipped on a busy sub retries after it frees up`() {
+    fun `analysis completes and promotes the pending slot without a live overlap deferring it`() {
         val manager = manager()
         val file = toneFile("mixer-deferred-analysis", 440.0, 8)
         try {
@@ -45,27 +44,21 @@ class DeferredAnalysisTest {
             // Silence skip on and no cached trim yet: the slot waits for analysis.
             assertEquals("pending", mixer.analysisState())
 
-            // Busy sub: neither a retry nor a direct scan may run.
-            mixer.beginXfadeForTest(sampleRate)
-            assertNull(mixer.maybeRetryAnalysis(), "analysis retried while the sub was busy")
-            val skippedAt = System.currentTimeMillis()
+            // The analysis decoder is dedicated (a live overlap no longer
+            // defers the scan — that regression is pinned in
+            // AnalysisIsolatedFromLiveSubTest), so analyzeBlocking completes
+            // here and caches the trim.
             mixer.analyzeBlocking(track)
-            assertTrue(System.currentTimeMillis() - skippedAt < 1_000, "a busy-sub scan must skip immediately")
-            assertNull(mixer.trimForTest(track.identifier), "a skipped analysis must not cache a trim")
-            mixer.endXfadeForTest()
 
-            // Free sub: the retry hands out a scannable clone, throttled.
-            val retry = mixer.maybeRetryAnalysis()
-            assertNotNull(retry, "no analysis retry offered once the sub freed up")
-            assertEquals(track.identifier, retry.identifier)
-            assertNull(mixer.maybeRetryAnalysis(), "retry is not throttled — it must not rescan in a hot loop")
-
-            mixer.analyzeBlocking(retry)
-
-            val trim = mixer.trimForTest(track.identifier)
-            assertNotNull(trim, "the retried analysis never cached a trim")
+            // Cached: the slot is promoted and no retry is offered.
             assertEquals("ready", mixer.analysisState(), "the analyzed slot was never promoted to ready")
             assertNull(mixer.maybeRetryAnalysis(), "retries keep offered after the trim is cached")
+
+            // Promotion only happens when the scan is not broken; the trim
+            // is what made the slot ready.
+            val trim = mixer.trimForTest(track.identifier)
+            assertNotNull(trim, "the completed analysis never cached a trim")
+            assertEquals(0L, trim.leadMs, "a tone that starts immediately must have no leading silence")
             mixer.destroy()
         } finally {
             file.delete()

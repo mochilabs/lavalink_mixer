@@ -5,6 +5,7 @@ plugins {
     kotlin("jvm") version "2.1.20"
     kotlin("plugin.serialization") version "2.1.20"
     `java-library`
+    `maven-publish`
 }
 
 group = "dev.lavalink.mixer"
@@ -63,5 +64,38 @@ tasks {
 
     processResources {
         filter(ReplaceTokens::class, mapOf("tokens" to mapOf("version" to project.version.toString())))
+    }
+
+    // GitHub Packages publish. CI (publish.yml) authenticates with
+    // GRADLE_PUBLISH_USER/GRADLE_PUBLISH_KEY; local publishes read the same
+    // properties or fall back to a read-only anonymous query.
+    publishing {
+        publications {
+            register<MavenPublication>("plugin") {
+                from(project.components.getByName("java"))
+                artifactId = "mixer-plugin"
+                pom {
+                    name.set("mixer-plugin")
+                    description.set("Lavalink v4 plugin: gapless, crossfade, TTS ducking, and volume normalization")
+                    url.set("https://github.com/mochilabs/lavalink_mixer")
+                    licenses {
+                        license {
+                            name.set("Unlicense")
+                            url.set("https://unlicense.org")
+                        }
+                    }
+                }
+            }
+        }
+        repositories {
+            maven {
+                name = "GitHubPackages"
+                url = uri("https://maven.pkg.github.com/mochilabs/lavalink_mixer")
+                credentials {
+                    username = (findProperty("gpr.user") as String?) ?: System.getenv("GRADLE_PUBLISH_USER") ?: ""
+                    password = (findProperty("gpr.key") as String?) ?: System.getenv("GRADLE_PUBLISH_KEY") ?: ""
+                }
+            }
+        }
     }
 }

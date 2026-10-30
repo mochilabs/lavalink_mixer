@@ -1,7 +1,12 @@
 package dev.lavalink.mixer.plugin
 
+import com.sedmelluq.discord.lavaplayer.format.StandardAudioDataFormats
 import com.sedmelluq.discord.lavaplayer.player.AudioPlayerManager
+import com.sedmelluq.discord.lavaplayer.player.DefaultAudioPlayerManager
+import java.io.File
 import java.lang.reflect.Proxy
+import java.util.concurrent.CompletableFuture
+import kotlin.math.sin
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -66,6 +71,126 @@ class NormalizationIntegrationTest {
         // main: fade 1.0 × norm 0.25 = 0.25; sub: fade 1.0 × norm 0.75 = 0.75
         assertEquals(0.25f, gains.main, 1e-6f)
         assertEquals(0.75f, gains.sub, 1e-6f)
+    }
+
+    /**
+     * Regression guard for the "volume surges after bot restart" report: once
+     * normalization is enabled (or re-enabled after a session restore), the
+     * currently-playing track must not play at unity — its cached gain must
+     * apply immediately. Conversely, disabling normalization resets the gain
+     * to unity instead of leaving a stale attenuation in place.
+     */
+    @Test
+    fun `updateNormalization applies the cached gain immediately and disables cleanly`() {
+        val manager = DefaultAudioPlayerManager()
+        manager.registerSourceManager(com.sedmelluq.discord.lavaplayer.source.local.LocalAudioSourceManager())
+        manager.configuration.outputFormat = StandardAudioDataFormats.DISCORD_PCM_S16_LE
+        val m = GuildMixer(123L, manager, MixerConfig(), java.util.concurrent.Executor { it.run() })
+        try {
+            val player = manager.createPlayer()
+            m.attachMain(
+                Proxy.newProxyInstance(
+                    javaClass.classLoader,
+                    arrayOf(dev.arbjerg.lavalink.api.IPlayer::class.java),
+                ) { _, method, _ ->
+                    when (method.name) {
+                        "getAudioPlayer" -> player
+                        "getGuildId" -> 123L
+                        else -> null
+                    }
+                } as dev.arbjerg.lavalink.api.IPlayer,
+            )
+            val file = File.createTempFile("mixer-norm-enable", ".wav")
+            try {
+                // 1kHz sine at low amplitude → a known non-unity gain path.
+                // We only need the track loaded and playing so main is non-null.
+                writeToneWav(file)
+                val track = loadTrack(manager, file)
+                player.playTrack(track)
+
+                // Seed the track's measured LUFS so normGainForLocked returns a real gain.
+                m.normBaselineForTest(rms = 0f, trackId = track.identifier, trackRms = -8.0f)
+                m.updateNormalization(true)
+                // Gain applies to the playing track immediately (no unity surge).
+                val expected = NormalizationGain.fromLufs(-8.0f, targetLufs = -14.0f).gain
+                assertEquals(expected, m.currentTrackGain(), 1e-4f, "cached gain must apply on enable, not unity")
+
+                // Disabling drops the gain back to unity (no stale attenuation).
+                m.updateNormalization(false)
+                assertEquals(1f, m.currentTrackGain(), 1e-6f)
+            } finally {
+                file.delete()
+            }
+        } finally {
+            m.destroy()
+        }
+    }
+
+    @Test
+    fun `updateNormalization enabling with no cached gain stays at unity`() {
+        val m = mixer()
+        m.updateNormalization(true)
+        // No track in normCache → normGainForLocked returns 1f.
+        val gains = m.advance(1, 1L)
+        assertEquals(1f, gains.main, 1e-6f)
+    }
+
+    private fun writeToneWav(file: File) {
+        val sampleRate = 48000
+        val channels = 2
+        val samples = sampleRate
+        val dataLen = samples * channels * 2
+        java.io.DataOutputStream(java.io.FileOutputStream(file).buffered()).use { out ->
+            out.writeBytes("RIFF")
+            out.writeIntLE(36 + dataLen)
+            out.writeBytes("WAVE")
+            out.writeBytes("fmt ")
+            out.writeIntLE(16)
+            out.writeShortLE(1)
+            out.writeShortLE(channels)
+            out.writeIntLE(sampleRate)
+            out.writeIntLE(sampleRate * channels * 2)
+            out.writeShortLE(channels * 2)
+            out.writeShortLE(16)
+            out.writeBytes("data")
+            out.writeIntLE(dataLen)
+            for (i in 0 until samples) {
+                val v = (sin(2.0 * Math.PI * 440.0 * i / sampleRate) * 8000).toInt()
+                out.writeShortLE(v)
+                out.writeShortLE(v)
+            }
+        }
+    }
+
+    private fun loadTrack(manager: DefaultAudioPlayerManager, file: File): com.sedmelluq.discord.lavaplayer.track.AudioTrack {
+        val future = CompletableFuture<com.sedmelluq.discord.lavaplayer.track.AudioTrack>()
+        manager.loadItem(file.absolutePath, object : com.sedmelluq.discord.lavaplayer.player.AudioLoadResultHandler {
+            override fun trackLoaded(track: com.sedmelluq.discord.lavaplayer.track.AudioTrack) {
+                future.complete(track)
+            }
+            override fun playlistLoaded(playlist: com.sedmelluq.discord.lavaplayer.track.AudioPlaylist) {
+                future.complete(playlist.selectedTrack ?: playlist.tracks.first())
+            }
+            override fun noMatches() {
+                future.completeExceptionally(RuntimeException("no match"))
+            }
+            override fun loadFailed(exception: com.sedmelluq.discord.lavaplayer.tools.FriendlyException) {
+                future.completeExceptionally(exception)
+            }
+        })
+        return future.get(10, java.util.concurrent.TimeUnit.SECONDS)
+    }
+
+    private fun java.io.DataOutputStream.writeIntLE(value: Int) {
+        write(value and 0xFF)
+        write((value shr 8) and 0xFF)
+        write((value shr 16) and 0xFF)
+        write((value shr 24) and 0xFF)
+    }
+
+    private fun java.io.DataOutputStream.writeShortLE(value: Int) {
+        write(value and 0xFF)
+        write((value shr 8) and 0xFF)
     }
 
     /**

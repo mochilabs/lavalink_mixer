@@ -888,7 +888,7 @@ class GuildMixer(
                     TrimTransition.crossfade(contentEnd, crossfadeMs)
                 } else null
                 if (readyNextTrack != null && plan != null &&
-                    chainPos.get() >= plan.startMs * SAMPLE_RATE / 1000 && !analysisActive
+                    chainPos.get() >= plan.startMs * SAMPLE_RATE / 1000
                 ) {
                     // Chain, not track.position: the mix lands on frames as they
                     // are decoded, which runs a frame buffer ahead of playback.
@@ -1374,7 +1374,19 @@ class GuildMixer(
             Triple(n, lastKnownEpoch, advanceSeq.get())
         }
         seekPastLead(next)
+        // Pre-warm the secondary decoder BEFORE arming the fade. playTrack()
+        // returns after Lavaplayer fills the whole frame buffer; draining a
+        // burst here lets the siphon bank up to a frame-buffer's worth of PCM
+        // so the overlap's opening seconds are actually audible — previously
+        // the sub side started with a near-empty siphon (pending=1s,
+        // dropped=22k+ frames, subOut lagging subPos by a full second).
         val sub = synchronized(lock) { ensureSubLocked() }
+        try {
+            sub.playTrack(next)
+        } catch (e: Exception) {
+            log.warn("overlap pre-start play failed on guild {}", guildId, e)
+        }
+        prefillSubSiphon(sub)
         val gen = synchronized(lock) {
             if (lastKnownEpoch != epochAtStart || advanceSeq.get() != seqAtStart || playbackState != PlaybackState.ARMED) {
                 return
@@ -1414,19 +1426,6 @@ class GuildMixer(
             xfadeLogMs = 0L
             ++subGen
         }
-        try {
-            sub.playTrack(next)
-        } catch (e: Exception) {
-            log.warn("overlap play failed on guild {}", guildId, e)
-            abortXfade("overlap play failed")
-            synchronized(lock) {
-                if (lastKnownEpoch == epochAtStart && advanceSeq.get() == seqAtStart && playbackState == PlaybackState.ARMED) {
-                    if (readyNextTrack == null) readyNextTrack = next
-                    else if (pendingNextTrack == null) pendingNextTrack = next
-                }
-            }
-            return
-        }
         // A control command (override/invalidate/reset/arm) that aborted the fade
         // while playTrack was in flight bumps subGen and stops an empty sub —
         // the playTrack above then decodes a zombie into a torn-down slot.
@@ -1462,6 +1461,28 @@ class GuildMixer(
             put("crossfadeMs", plan.durationMs)
             put("handoffInMs", (plan.handoffMs - mainPosMs).coerceAtLeast(0L))
             putTrack(next)
+        }
+    }
+
+    /**
+     * Pumps the just-started secondary decoder so the siphon banks a
+     * frame-buffer's worth of PCM before the fade begins mixing it.
+     * playTrack() returns once Lavaplayer has decoded the frame buffer full;
+     * without this drain that audio stays inside the sub player's own frame
+     * buffer and the siphon only fills at live-decode speed, leaving the
+     * overlap's opening chunk starved (subOut lagging subPos by ~1s).
+     */
+    private fun prefillSubSiphon(sub: AudioPlayer) {
+        val frame = newProvideFrame()
+        try {
+            var burst = 0
+            val deadline = System.currentTimeMillis() + 2000
+            while (burst < 600 && System.currentTimeMillis() < deadline) {
+                if (!pumpAnalysis(sub, frame)) break
+                burst++
+            }
+        } finally {
+            frame.setBuffer(java.nio.ByteBuffer.allocate(0))
         }
     }
 
@@ -2411,13 +2432,17 @@ class GuildMixer(
             pendingNextTrack = track
             promoteIfPendingLocked()
 
-            // Arm leaves the track pending when silence or normalization analysis
-            // is still needed: schedule a background scan on the analysis executor
-            // so the pending slot can be promoted to ready as soon as the scan
-            // finishes, instead of waiting for the slow mixer-loop retry.
-            val cloneForAnalysis = if (pendingNextTrack != null) {
-                runCatching { track.makeClone() }.getOrNull()
-            } else null
+            // Arm always arms inside the JIT window (T_window = crossfadeMs + 7s),
+            // so waiting for the full silence/norm decode (8-11s observed) made the
+            // overlap start past mid-window — half the crossfade was lost and
+            // startOverlap warned "armed late" on every track. Force-promote now:
+            // analysis still runs in the background, but its trim/gain apply from
+            // the NEXT use of the same identifier (caches are keyed by id).
+            if (readyNextTrack == null && pendingNextTrack != null) {
+                promoteForcedLocked()
+            }
+
+            val cloneForAnalysis = runCatching { track.makeClone() }.getOrNull()
             if (cloneForAnalysis != null) {
                 analysisExecutor.execute {
                     try {

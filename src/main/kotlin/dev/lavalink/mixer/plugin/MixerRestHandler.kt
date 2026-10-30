@@ -385,8 +385,7 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
     fun normalization(@RequestBody body: NormalizationRequest): ResponseEntity<MixerState> {
         val guildId = gid(body.guildId)
         val mixer = plugin.getOrCreate(guildId)
-        mixer.normalizationEnabled = body.enabled
-        body.targetLufs?.let { mixer.targetLufs = it.coerceIn(-30.0f, -6.0f) }
+        mixer.updateNormalization(body.enabled, body.targetLufs)
         return stateById(body.guildId, guildId)
     }
 

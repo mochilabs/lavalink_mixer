@@ -122,6 +122,37 @@ class GuildMixer(
     @Volatile var normalizationEnabled: Boolean = config.normalizationEnabled
     @Volatile var targetLufs: Float = config.targetLufs
 
+    fun updateNormalization(enabled: Boolean, newTargetLufs: Float? = null) {
+        var needsBaselineTrack: AudioTrack? = null
+        synchronized(lock) {
+            normalizationEnabled = enabled
+            newTargetLufs?.let { targetLufs = it.coerceIn(-30.0f, -6.0f) }
+            if (!enabled) {
+                mainNormGain = 1f
+                subNormGain = 1f
+                return
+            }
+            val playing = main?.audioPlayer?.playingTrack
+            if (playing != null) {
+                mainNormGain = normGainForLocked(playing)
+                val id = idOf(playing)
+                if (normGainBaseline == 0f &&
+                    !analysisActive &&
+                    readyNextTrack == null &&
+                    pendingNextTrack == null &&
+                    (id == null || !hasCachedNorm(id))
+                ) {
+                    needsBaselineTrack = playing
+                }
+            }
+            val activeSub = subTrack
+            if (xfadeActive && activeSub != null) {
+                subNormGain = normGainForLocked(activeSub)
+            }
+        }
+        needsBaselineTrack?.let { scheduleBaselineAnalysis(it) }
+    }
+
     @Volatile var silenceSkipEnabled: Boolean = config.silenceSkipEnabled
     @Volatile var silenceThresholdDb: Float = config.silenceThresholdDb
     @Volatile var silenceMinSoundMs: Long = config.silenceMinSoundMs
@@ -161,16 +192,15 @@ class GuildMixer(
 
     // ---- volume normalization ----
 
-    /** Track id → measured RMS (first track anchors the baseline). */
-    private val normCache = LinkedHashMap<String, Float>()
     /** Normalization gain for the currently playing main track; read lock-free by the voice thread. */
     @Volatile private var mainNormGain: Float = 1f
     /** Normalization gain for the armed sub (crossfade) track; 1 while no overlap is armed. */
     @Volatile private var subNormGain: Float = 1f
     /**
-     * Gain that anchors every track to the first track's loudness.
-     * Zero until the first track's background analysis completes; after
-     * that every queued track's gain is computed as `fromRms(trackRms, baselineRms)`.
+     * Test-only anchor: when non-zero, [normGainForLocked] normalizes every
+     * track to this loudness instead of [targetLufs]. Production always
+     * normalizes to [targetLufs] (-14 LUFS); see commit 1f80569 which removed
+     * the first-track anchor in favor of a fixed target.
      */
     @Volatile private var normGainBaseline: Float = 0f
 
@@ -196,7 +226,6 @@ class GuildMixer(
     /** Consecutive analysis failures for [analysisFailureId]; retries give up after 3. */
     private var analysisFailures: Int = 0
     private var analysisFailureId: String? = null
-    private val trimCache = LinkedHashMap<String, TrimPoints>()
     private var subTrack: AudioTrack? = null
     private var subStartMs: Long = 0L
     /** Active parallel (`mode=parallel`) overlays: each owns its decoder + siphon + fade ramp. */
@@ -306,6 +335,8 @@ class GuildMixer(
             // Snapshot under lock; the (potentially blocking) seek runs outside it
             // so the voice thread never stalls behind us.
             val snap = synchronized(lock) {
+                val currentMain = main?.audioPlayer
+                if (currentMain != null && player !== currentMain) return@synchronized null
                 tailCutter.reset()
                 // The client-side play() is the ground truth for "audio is
                 // flowing"; recover the state machine if it lagged behind.
@@ -358,7 +389,7 @@ class GuildMixer(
                         !analysisActive &&
                         readyNextTrack == null &&
                         pendingNextTrack == null &&
-                        (id == null || !normCache.containsKey(id))
+                        (id == null || !hasCachedNorm(id))
                 }
             } else false
             if (needsBaselineAnalysis) {
@@ -397,6 +428,8 @@ class GuildMixer(
         }
 
         override fun onTrackEnd(player: AudioPlayer, track: AudioTrack, endReason: AudioTrackEndReason) {
+            val currentMain = synchronized(lock) { main?.audioPlayer }
+            if (currentMain != null && player !== currentMain) return
             if (endReason != AudioTrackEndReason.FINISHED && endReason != AudioTrackEndReason.LOAD_FAILED) {
                 if (endReason == AudioTrackEndReason.STOPPED || endReason == AudioTrackEndReason.CLEANUP) {
                     synchronized(lock) {
@@ -435,12 +468,16 @@ class GuildMixer(
         }
 
         override fun onTrackStuck(player: AudioPlayer, track: AudioTrack, thresholdMs: Long) {
+            val currentMain = synchronized(lock) { main?.audioPlayer }
+            if (currentMain != null && player !== currentMain) return
             val title = runCatching { track.info.title }.getOrDefault("unknown")
             log.warn("main track '{}' stuck on guild {} (threshold {}ms); mixer failover", title, guildId, thresholdMs)
             recoverFromMainStall()
         }
 
         override fun onTrackException(player: AudioPlayer, track: AudioTrack, exception: com.sedmelluq.discord.lavaplayer.tools.FriendlyException) {
+            val currentMain = synchronized(lock) { main?.audioPlayer }
+            if (currentMain != null && player !== currentMain) return
             val title = runCatching { track.info.title }.getOrDefault("unknown")
             log.warn("main track '{}' failed on guild {}; mixer failover", title, guildId, exception)
             recoverFromMainStall()
@@ -522,10 +559,29 @@ class GuildMixer(
     }
 
     fun attachMain(player: IPlayer) {
+        val previousPlayers: List<AudioPlayer>
         synchronized(lock) {
+            val newAudioPlayer = player.audioPlayer
+            previousPlayers = attachedPlayers.filter { it !== newAudioPlayer }
+            for (old in previousPlayers) {
+                old.removeListener(mainListener)
+                attachedPlayers.remove(old)
+            }
             main = player
-            if (attachedPlayers.add(player.audioPlayer)) {
-                player.audioPlayer.addListener(mainListener)
+            if (attachedPlayers.add(newAudioPlayer)) {
+                newAudioPlayer.addListener(mainListener)
+            }
+            if (previousPlayers.isNotEmpty()) {
+                // Release the stale session's filter feeder so the new session's
+                // filter takes over immediately and syncs chainPos to the new track.
+                electedFeeder.set(0L)
+            }
+        }
+        for (old in previousPlayers) {
+            try {
+                old.stopTrack()
+            } catch (e: Exception) {
+                log.debug("stopping replaced session player failed on guild {}: {}", guildId, e.toString())
             }
         }
     }
@@ -707,7 +763,7 @@ class GuildMixer(
     internal fun normBaselineForTest(rms: Float, trackId: String? = null, trackRms: Float? = null) {
         normGainBaseline = rms
         if (trackId != null && trackRms != null) {
-            synchronized(lock) { normCache[trackId] = trackRms }
+            putCachedNorm(trackId, trackRms)
         }
     }
 
@@ -757,7 +813,7 @@ class GuildMixer(
     }
 
     internal fun trimForTest(identifier: String): TrimPoints? =
-        synchronized(lock) { trimCache[identifier] }
+        synchronized(lock) { getCachedTrim(identifier) }
 
     /** Test seam: count currently active parallel overlay slots. */
     internal fun parallelOverlayCountForTest(): Int = synchronized(lock) { parallelOverlays.size }
@@ -880,6 +936,11 @@ class GuildMixer(
             resetFilterHeartbeatLocked(pos)
             syncChainPos(pos)
             if (xfadeActive) return PollAction.AbortXfade("seek during crossfade")
+        } else if (pos > lastPosition + 2500 && pos * SAMPLE_RATE / 1000 > chainPos.get() + SAMPLE_RATE) {
+            // Forward seek (e.g. fresh session restore seeking to saved position):
+            // re-base chainPos if track.position jumped ahead of the decoded chain.
+            resetFilterHeartbeatLocked(pos)
+            syncChainPos(pos)
         }
         lastPosition = pos
         checkFilterHeartbeatLocked(audioPlayer, pos)
@@ -1913,7 +1974,7 @@ class GuildMixer(
 
     private fun trimForLocked(track: AudioTrack): TrimPoints {
         val id = idOf(track) ?: return TrimPoints.NONE
-        return trimCache[id] ?: TrimPoints.NONE
+        return getCachedTrim(id) ?: TrimPoints.NONE
     }
 
     private fun leadForLocked(track: AudioTrack): Long = trimForLocked(track).leadMs
@@ -1926,11 +1987,36 @@ class GuildMixer(
      */
     private fun normGainForLocked(track: AudioTrack): Float {
         val id = idOf(track) ?: return 1f
-        val measuredLufs = normCache[id] ?: return 1f
+        val measuredLufs = getCachedNorm(id) ?: return 1f
         return if (normGainBaseline != 0f) {
             NormalizationGain.fromLufs(measuredLufs, targetLufs = normGainBaseline).gain
         } else {
             NormalizationGain.fromLufs(measuredLufs, targetLufs = targetLufs).gain
+        }
+    }
+
+    private fun hasCachedNorm(id: String): Boolean = sharedNormCache.containsKey(id)
+
+    private fun getCachedNorm(id: String): Float? = sharedNormCache[id]
+
+    private fun putCachedNorm(id: String, lufs: Float) {
+        sharedNormCache[id] = lufs
+        // Coarse, non-atomic eviction: shared across every guild, so a hard cap
+        // prevents unbounded growth after long uptime or many restarts. Being
+        // off-by-a-few under concurrency is acceptable for a loudness cache.
+        if (sharedNormCache.size > 1000) {
+            sharedNormCache.keys.firstOrNull()?.let { sharedNormCache.remove(it) }
+        }
+    }
+
+    private fun hasCachedTrim(id: String): Boolean = sharedTrimCache.containsKey(id)
+
+    private fun getCachedTrim(id: String): TrimPoints? = sharedTrimCache[id]
+
+    private fun putCachedTrim(id: String, points: TrimPoints) {
+        sharedTrimCache[id] = points
+        if (sharedTrimCache.size > 1000) {
+            sharedTrimCache.keys.firstOrNull()?.let { sharedTrimCache.remove(it) }
         }
     }
 
@@ -1952,8 +2038,8 @@ class GuildMixer(
             readyNextTrack = pending
             return
         }
-        val silenceDone = !silenceSkipEnabled || trimCache.containsKey(id)
-        val normDone = !normalizationEnabled || normCache.containsKey(id)
+        val silenceDone = !silenceSkipEnabled || hasCachedTrim(id)
+        val normDone = !normalizationEnabled || hasCachedNorm(id)
         if (silenceDone && normDone) {
             pendingNextTrack = null
             readyNextTrack = pending
@@ -1976,19 +2062,10 @@ class GuildMixer(
     }
 
     /**
-     * Deferred analysis (silence + normalization). Preload-time scanning is
-     * skipped while the secondary player is busy (overlay, overlap, another
-     * scan), which used to strand the slot in pending until the end-of-file
-     * fallback fired - an untrimmed advance with no crossfade. The mixer loop
-     * calls this every tick; once the sub is free it returns a fresh clone to
-     * scan, or null to wait. The end-of-file fallback still covers tracks
-     * whose analysis keeps failing.
-     */
-    /**
-     * Schedules a background loudness scan of the currently playing first
-     * track so its RMS can become [normGainBaseline] before the next track
-     * starts. The scan reuses the secondary player (hidden, no voice) and
-     * therefore must wait until no crossfade/overlay occupies it.
+     * Schedules a background loudness scan of the currently playing track so
+     * its measured LUFS lands in the shared cache (and, if it is still the
+     * playing track, its [mainNormGain] updates immediately). Runs on the
+     * dedicated analysis decoder, never the live sub player.
      */
     internal fun scheduleBaselineAnalysis(track: AudioTrack) {
         val factory = synchronized(lock) {
@@ -2008,9 +2085,13 @@ class GuildMixer(
             try {
                 val loudness = measureLoudnessBlocking(clone, factory)
                 if (loudness != null) {
+                    val trackId = idOf(track) ?: track.identifier
+                    putCachedNorm(trackId, loudness)
                     synchronized(lock) {
-                        normCache[track.identifier] = loudness
-                        while (normCache.size > 200) normCache.remove(normCache.keys.first())
+                        val playing = main?.audioPlayer?.playingTrack
+                        if (normalizationEnabled && playing != null && idOf(playing) == trackId) {
+                            mainNormGain = normGainForLocked(playing)
+                        }
                     }
                     log.info("normalization baseline guild {}: lufs={}", guildId, loudness)
                 }
@@ -2036,8 +2117,8 @@ class GuildMixer(
         return synchronized(lock) {
             val pending = pendingNextTrack ?: return null
             val id = idOf(pending) ?: return null
-            val needSilence = silenceSkipEnabled && !trimCache.containsKey(id)
-            val needNorm = normalizationEnabled && !normCache.containsKey(id)
+            val needSilence = silenceSkipEnabled && !hasCachedTrim(id)
+            val needNorm = normalizationEnabled && !hasCachedNorm(id)
             if (!needSilence && !needNorm) return null
             if (analysisActive) return null
             if (analysisFailureId == id && analysisFailures >= 3) return null
@@ -2073,8 +2154,8 @@ class GuildMixer(
             return
         }
         synchronized(lock) {
-            val hasSilence = !doSilence || trimCache.containsKey(identifier)
-            val hasNorm = !doNorm || normCache.containsKey(identifier)
+            val hasSilence = !doSilence || hasCachedTrim(identifier)
+            val hasNorm = !doNorm || hasCachedNorm(identifier)
             if (hasSilence && hasNorm) {
                 promoteIfPendingLocked()
                 return
@@ -2103,9 +2184,8 @@ class GuildMixer(
                 false
             }
             val scanCap = maxOf(silenceHeadScanMs, silenceTailScanMs)
-            val hasSilence = doSilence && !trimCache.containsKey(identifier)
-            val hasNorm = doNorm && !normCache.containsKey(identifier)
-
+            val hasSilence = doSilence && !hasCachedTrim(identifier)
+            val hasNorm = doNorm && !hasCachedNorm(identifier)
             var lead = 0L
             var tail = 0L
             if (hasSilence || hasNorm) {
@@ -2116,10 +2196,8 @@ class GuildMixer(
                     lead = result.leadMs
                     tail = result.trailMs
                     if (hasNorm && result.loudnessRms != null) {
-                        synchronized(lock) {
-                            normCache[identifier] = result.loudnessRms
-                            while (normCache.size > 200) normCache.remove(normCache.keys.first())
-                        }
+                        putCachedNorm(identifier, result.loudnessRms)
+                        applyAnalyzedNormGain(identifier)
                         log.info("normalization guild {}: lufs={}", guildId, result.loudnessRms)
                     }
 
@@ -2135,10 +2213,8 @@ class GuildMixer(
                         // silence scans' seeks/early stops never skew the RMS.
                         val loudness = measureLoudnessBlocking(track, factory)
                         if (loudness != null) {
-                            synchronized(lock) {
-                                normCache[identifier] = loudness
-                                while (normCache.size > 200) normCache.remove(normCache.keys.first())
-                            }
+                            putCachedNorm(identifier, loudness)
+                            applyAnalyzedNormGain(identifier)
                             log.info("normalization guild {}: lufs={}", guildId, loudness)
                         }
 
@@ -2156,8 +2232,7 @@ class GuildMixer(
             }
             synchronized(lock) {
                 if (hasSilence) {
-                    trimCache[identifier] = TrimPoints(guardedLead, tail.coerceAtLeast(0))
-                    while (trimCache.size > 200) trimCache.remove(trimCache.keys.first())
+                    putCachedTrim(identifier, TrimPoints(guardedLead, tail.coerceAtLeast(0)))
                 }
                 if (analysisFailureId == identifier) {
                     analysisFailures = 0
@@ -2180,6 +2255,20 @@ class GuildMixer(
                 analysisToStop?.stopTrack()
             } catch (e: Exception) {
                 log.warn("analysis cleanup stop failed on guild {}", guildId, e)
+            }
+        }
+    }
+
+    private fun applyAnalyzedNormGain(identifier: String) {
+        synchronized(lock) {
+            if (!normalizationEnabled) return
+            val playing = main?.audioPlayer?.playingTrack
+            if (playing != null && idOf(playing) == identifier) {
+                mainNormGain = normGainForLocked(playing)
+            }
+            val activeSub = subTrack
+            if (xfadeActive && activeSub != null && idOf(activeSub) == identifier) {
+                subNormGain = normGainForLocked(activeSub)
             }
         }
     }
@@ -2684,8 +2773,15 @@ class GuildMixer(
             maskingTrack = null
             advanceSeq.incrementAndGet()
 
-            val isPlaying = main?.audioPlayer?.playingTrack != null
+            val playing = main?.audioPlayer?.playingTrack
+            val isPlaying = playing != null
             playbackState = if (isPlaying) PlaybackState.PLAYING else PlaybackState.IDLE
+            if (playing != null) {
+                syncChainPos(safePosition(playing))
+                if (normalizationEnabled) {
+                    mainNormGain = normGainForLocked(playing)
+                }
+            }
 
             // Teardown runs outside the lock (abortXfade re-acquires it); the
             // protocol restart forbids any armed overlap surviving it.
@@ -2819,6 +2915,9 @@ class GuildMixer(
          * just ended" for the handoff guard; see [lastEndedMain].
          */
         private const val LAST_ENDED_MAIN_GRACE_MS = 10_000L
+
+        private val sharedNormCache = java.util.concurrent.ConcurrentHashMap<String, Float>()
+        private val sharedTrimCache = java.util.concurrent.ConcurrentHashMap<String, TrimPoints>()
 
         fun msToSamples(ms: Long): Int = ((ms.coerceAtLeast(0) * SAMPLE_RATE) / 1000).toInt().coerceAtLeast(1)
     }

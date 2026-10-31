@@ -36,6 +36,11 @@ class MixerConfig {
     /** Head window (ms) decoded for tempo analysis; 30s spans ~15-60 beats across 60-200 BPM. */
     var bpmScanMs: Long = 30000
 
+    // Beat-matched crossfading (aligns beat grids of outgoing and incoming tracks)
+    var beatmatchEnabled: Boolean = false
+    var maxTempoChange: Float = 0.06f
+    var beatmatchMinConfidence: Float = 0.30f
+
     /** Parallel silence analyses (per-guild decoders are independent). Read at startup. */
     var analysisThreads: Int = 2
 

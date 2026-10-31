@@ -112,6 +112,17 @@ data class BpmRequest(
     val guildId: String,
     val enabled: Boolean,
     val scanMs: Long? = null,
+    val beatmatchEnabled: Boolean? = null,
+    val maxTempoChange: Float? = null,
+    val minConfidence: Float? = null,
+)
+
+@Serializable
+data class BeatmatchRequest(
+    val guildId: String,
+    val enabled: Boolean,
+    val maxTempoChange: Float? = null,
+    val minConfidence: Float? = null,
 )
 
 @Serializable
@@ -177,6 +188,11 @@ data class MixerState(
     val nextTrackBpm: Float? = null,
     /** Offset (ms) of the queued track's first detected downbeat; null with [nextTrackBpm]. */
     val nextTrackFirstBeatMs: Long? = null,
+    val nextTrackPhaseMs: Long? = null,
+    val nextTrackBpmConfidence: Float? = null,
+    val beatmatchEnabled: Boolean = false,
+    val maxTempoChange: Float = 0.06f,
+    val beatmatchMinConfidence: Float = 0.30f,
 )
 
 /**
@@ -336,8 +352,13 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
                 nextTrackGain = mixer.nextTrackGain(),
                 nextTrackGainDb = mixer.nextTrackGain()?.let { gainToDb(it) },
                 bpmDetectionEnabled = mixer.bpmDetectionEnabled,
-                nextTrackBpm = mixer.peekNextBpm()?.bpm,
-                nextTrackFirstBeatMs = mixer.peekNextBpm()?.firstBeatMs,
+                nextTrackBpm = mixer.peekNextBeatGrid()?.bpm ?: mixer.peekNextBpm()?.bpm,
+                nextTrackFirstBeatMs = mixer.peekNextBeatGrid()?.phaseMs ?: mixer.peekNextBpm()?.firstBeatMs,
+                nextTrackPhaseMs = mixer.peekNextBeatGrid()?.phaseMs ?: mixer.peekNextBpm()?.firstBeatMs,
+                nextTrackBpmConfidence = mixer.peekNextBeatGrid()?.confidence ?: mixer.peekNextBpm()?.confidence,
+                beatmatchEnabled = mixer.beatmatchEnabled,
+                maxTempoChange = mixer.maxTempoChange,
+                beatmatchMinConfidence = mixer.beatmatchMinConfidence,
             )
         )
     }
@@ -421,7 +442,21 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
     fun bpm(@RequestBody body: BpmRequest): ResponseEntity<MixerState> {
         val guildId = gid(body.guildId)
         val mixer = plugin.getOrCreate(guildId)
-        mixer.updateBpm(body.enabled, body.scanMs)
+        mixer.updateBpm(
+            enabled = body.enabled,
+            scanMs = body.scanMs,
+            beatmatchEnabled = body.beatmatchEnabled,
+            maxTempoChange = body.maxTempoChange,
+            minConfidence = body.minConfidence,
+        )
+        return stateById(body.guildId, guildId)
+    }
+
+    @PostMapping("/mixer/beatmatch")
+    fun beatmatch(@RequestBody body: BeatmatchRequest): ResponseEntity<MixerState> {
+        val guildId = gid(body.guildId)
+        val mixer = plugin.getOrCreate(guildId)
+        mixer.updateBeatmatch(body.enabled, body.maxTempoChange, body.minConfidence)
         return stateById(body.guildId, guildId)
     }
 

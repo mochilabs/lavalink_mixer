@@ -45,10 +45,12 @@ info:
        "requestId":"<idemKey>","action":"STOP"|"PLAY_NOW"}`
       - A user or admin stop/skip command has executed on the engine.
     - `{"op":"mixer","type":"overlapStart","guildId":"<id>","crossfadeMs":<ms>,
-       "handoffInMs":<ms>,"track":{"identifier":"...","title":"..."}}`
+       "handoffInMs":<ms>,"beatMatched":<bool>,"fadeBeats":<n>,"targetBpm":<bpm>,"rateRatio":<ratio>,
+       "fallbackReason":"...","track":{"identifier":"...","title":"..."}}`
       - an overlap (crossfade) armed; `track` is the incoming track.
     - `{"op":"mixer","type":"overlapEnd","guildId":"<id>","reason":"handoff"|"aborted",
-       "detail":"<abort reason, when aborted>","track":{"identifier":"...","title":"..."}}`
+       "beatMatched":<bool>,"fallbackReason":"...","detail":"<abort reason, when aborted>",
+       "track":{"identifier":"...","title":"..."}}`
       - the overlap handed off, or was torn down (client replace/stop).
     - `{"op":"mixer","type":"announceStart","guildId":"<id>","announcementId":<id>,
        "track":{"identifier":"...","title":"..."}}`
@@ -226,6 +228,16 @@ components:
           type: [integer, 'null']
           format: int64
           description: Offset (ms) of the queued track's first detected downbeat; null with nextTrackBpm.
+        nextTrackPhaseMs:
+          type: [integer, 'null']
+          format: int64
+          description: Beat grid phase offset (ms), not musical downbeat.
+        nextTrackBpmConfidence:
+          type: [number, 'null']
+          format: float
+        beatmatchEnabled: { type: boolean }
+        maxTempoChange: { type: number, format: float }
+        beatmatchMinConfidence: { type: number, format: float }
         playbackState:
           type: string
           enum: [IDLE, PLAYING, ARMED, NO_NEXT]
@@ -302,6 +314,17 @@ components:
           type: integer
           format: int64
           description: Head window decoded for tempo analysis (default 30000). Clamped to [5000, 60000].
+        beatmatchEnabled: { type: boolean }
+        maxTempoChange: { type: number, format: float }
+        minConfidence: { type: number, format: float }
+    BeatmatchRequest:
+      type: object
+      required: [guildId, enabled]
+      properties:
+        guildId: { type: string }
+        enabled: { type: boolean }
+        maxTempoChange: { type: number, format: float }
+        minConfidence: { type: number, format: float }
 paths:
   /mixer/info:
     get:
@@ -568,6 +591,21 @@ paths:
         content:
           application/json:
             schema: { $ref: '#/components/schemas/BpmRequest' }
+      responses:
+        '200':
+          description: Updated state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MixerState' }
+  /mixer/beatmatch:
+    post:
+      operationId: setBeatmatch
+      summary: Configure beat-matched automix
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BeatmatchRequest' }
       responses:
         '200':
           description: Updated state

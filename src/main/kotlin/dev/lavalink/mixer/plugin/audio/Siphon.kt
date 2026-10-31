@@ -170,6 +170,9 @@ class SiphonFactory(
     val isTimescaleActive: Boolean
         get() = currentStretcher?.isActive == true
 
+
+    val nativeFailed: Boolean
+        get() = currentStretcher?.nativeFailed == true
     override fun buildChain(
         track: AudioTrack?,
         format: AudioDataFormat,

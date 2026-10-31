@@ -125,7 +125,8 @@ If the same key is replayed with a different payload, the request is rejected wi
 | POST | `/mixer/announce/cancel` | — | `{guildId}` | Stop overlay, restore music |
 | POST | `/mixer/normalization` | — | `{guildId, enabled, targetLufs?}` | Volume normalization on/off (target clamped to [-30, -6]) |
 | POST | `/mixer/silence` | — | `{guildId, enabled, ...}` | Leading/trailing silence skipping |
-| POST | `/mixer/bpm` | — | `{guildId, enabled, scanMs?}` | Tempo (BPM) detection on/off (scan window clamped to [5000, 60000] ms) |
+| POST | `/mixer/bpm` | — | `{guildId, enabled, scanMs?, beatmatchEnabled?, maxTempoChange?, minConfidence?}` | Tempo (BPM) detection on/off (scan window clamped to [5000, 60000] ms) |
+| POST | `/mixer/beatmatch` | — | `{guildId, enabled, maxTempoChange?, minConfidence?}` | Beat-matched crossfade on/off (max tempo shift default 0.06, min confidence default 0.30) |
 
 ### Standard v2 errors
 - `HTTP 400` Bad Request — missing or invalid `Idempotency-Key`, invalid action, invalid `encodedTrack`, or payload form mismatch.
@@ -136,13 +137,16 @@ If the same key is replayed with a different payload, the request is rejected wi
 - `GET /mixer/state` includes `protocolVersion: 2`, `state` (identical to `playbackState`: `"IDLE" | "PLAYING" | "ARMED" | "NO_NEXT"`), `playbackState` (raw enum name, v1-compatible), and `lastKnownEpoch`.
 - `POST /mixer/reset` returns `{ "lastKnownEpoch": <n>, "protocolVersion": 2 }`.
 - `MixerAdvancedEvent` includes `handoffId` only for `handoffType: "CROSSFADE"`.
+- `GET /mixer/state` also reports `beatmatchEnabled`, `maxTempoChange`, `beatmatchMinConfidence`, `nextTrackBpmConfidence`, `nextTrackPhaseMs` (beat grid phase offset, not musical downbeat), and backward-compatible `nextTrackFirstBeatMs`.
 
 ## WebSocket events (`op: "mixer"`, pushed by the plugin)
 
 - `{"op":"mixer","type":"MixerNeedNextTrackEvent","guildId":"<id>","remainingMs":<ms>,"currentTrackEncoded":"<base64>"}` — JIT window fired, client should arm the next track.
 - `{"op":"mixer","type":"MixerAdvancedEvent","guildId":"<id>","epoch":<n>,"encodedTrack":"<base64>","handoffType":"<CROSSFADE|GAPLESS>","handoffId":"<uuid>"}` — playback advanced server-side; client must sync its local queue.
 - `{"op":"mixer","type":"MixerOverriddenEvent","guildId":"<id>","epoch":<n>,"requestId":"<key>","action":"<STOP|PLAY_NOW>"}` — override executed on the audio engine.
-- `{"op":"mixer","type":"overlapStart|overlapEnd|announceStart|announceEnd", ...}` — traditional overlay & crossfade events. See `api/openapi.yaml`.
+- `{"op":"mixer","type":"overlapStart","guildId":"<id>","crossfadeMs":<ms>,"handoffInMs":<ms>,"beatMatched":<bool>,"fadeBeats":<n>,"targetBpm":<bpm>,"rateRatio":<ratio>,"fallbackReason":"...", ...}` — overlap started.
+- `{"op":"mixer","type":"overlapEnd","guildId":"<id>","reason":"handoff"|"aborted","beatMatched":<bool>,"fallbackReason":"...", ...}` — overlap ended or aborted.
+- `{"op":"mixer","type":"announceStart|announceEnd", ...}` — announcement events. See `api/openapi.yaml`.
 
 ## Behavior notes / limits
 
@@ -169,14 +173,14 @@ If the same key is replayed with a different payload, the request is rejected wi
   explicitly overridden. The K-weighting filter is strictly applied to a
   measurement copy of PCM; the output signal is only scaled by the resulting
   linear gain.
-- **Tempo detection** (`/mixer/bpm`): opt-in, best-effort. A preloaded track
-  decodes its head `bpmScanMs` window (default 30s) and runs a pure-Kotlin
-  energy-flux onset + lag autocorrelation to estimate tempo (BPM) and the
-  first downbeat offset (ms), exposed via `/mixer/state` as `nextTrackBpm` /
-  `nextTrackFirstBeatMs`. It never gates track promotion: a failed or absent
-  onset just leaves those fields null. No native code, no LGPL dependency —
-  the detection is intended to feed a future beat-matched crossfade
-  (`TimescalePcmAudioFilter`), which is not yet wired.
+- **Beat-matched AutoMix & Tempo detection** (`/mixer/bpm`, `/mixer/beatmatch`):
+  A preloaded track decodes its head `bpmScanMs` window (default 30s) and runs a pure-Kotlin
+  energy-flux onset + lag autocorrelation to estimate tempo (BPM) and beat grid phase offset (ms),
+  exposed via `/mixer/state` as `nextTrackBpm` / `nextTrackPhaseMs` (`nextTrackFirstBeatMs`).
+  When `beatmatchEnabled = true`, outgoing and incoming beat grids align kicks across 2, 4, or 8
+  beats using producer-side timescale time-stretching (`SoundTouch` via `TempoStretcher`) within `maxTempoChange` (clamped up to 0.12).
+  If tempo difference exceeds `maxTempoChange` or confidence is below `minConfidence`, it cleanly falls back
+  to equal-power crossfading (`fallbackReason` reported on `overlapStart`/`overlapEnd`).
 - **Crossfade mixes are soft-limited**: the equal-power sum of two hot
   sources can exceed full scale (up to ~1.41× at the midpoint). Instead of
   hard-clipping that sum into a square wave, only the excursion past a 0.9

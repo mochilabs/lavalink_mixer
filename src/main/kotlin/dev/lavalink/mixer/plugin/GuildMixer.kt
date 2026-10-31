@@ -89,10 +89,27 @@ class GuildMixer(
         needsBaselineTrack?.let { scheduleBaselineAnalysis(it) }
     }
 
-    fun updateBpm(enabled: Boolean, scanMs: Long? = null) {
+    fun updateBpm(
+        enabled: Boolean,
+        scanMs: Long? = null,
+        beatmatchEnabled: Boolean? = null,
+        maxTempoChange: Float? = null,
+        minConfidence: Float? = null,
+    ) {
         synchronized(lock) {
             bpmDetectionEnabled = enabled
             scanMs?.let { bpmScanMs = it.coerceIn(5000, 60000) }
+            beatmatchEnabled?.let { this.beatmatchEnabled = it }
+            maxTempoChange?.let { this.maxTempoChange = it.coerceIn(0f, 0.12f) }
+            minConfidence?.let { this.beatmatchMinConfidence = it.coerceIn(0f, 1f) }
+        }
+    }
+
+    fun updateBeatmatch(enabled: Boolean, maxTempoChange: Float? = null, minConfidence: Float? = null) {
+        synchronized(lock) {
+            beatmatchEnabled = enabled
+            maxTempoChange?.let { this.maxTempoChange = it.coerceIn(0f, 0.12f) }
+            minConfidence?.let { this.beatmatchMinConfidence = it.coerceIn(0f, 1f) }
         }
     }
 
@@ -108,6 +125,9 @@ class GuildMixer(
     /** Tempo (BPM) detection is opt-in; each preloaded track decodes one head window for onset analysis. */
     @Volatile var bpmDetectionEnabled: Boolean = config.bpmDetectionEnabled
     @Volatile var bpmScanMs: Long = config.bpmScanMs.coerceIn(5000, 60000)
+    @Volatile var beatmatchEnabled: Boolean = config.beatmatchEnabled
+    @Volatile var maxTempoChange: Float = config.maxTempoChange.coerceIn(0f, 0.12f)
+    @Volatile var beatmatchMinConfidence: Float = config.beatmatchMinConfidence.coerceIn(0f, 1f)
 
     // ---- Protocol State ----
     private val protocol = ProtocolController(object : MixerCore {
@@ -219,6 +239,9 @@ class GuildMixer(
     private var xfadeMainTrack: AudioTrack? = null
     /** Position within [subTrack] that has reached the audible output. */
     private val subOutputSamples = AtomicLong(0L)
+    private val subSourceMilliSamples = AtomicLong(0L)
+    @Volatile private var xfadeBeatMatched: Boolean = false
+    @Volatile private var xfadeFallbackReason: String? = null
     private var subStartPositionMs: Long = 0L
     private var announceToken: Long = 0L
     private var masking: Boolean = false
@@ -642,6 +665,9 @@ class GuildMixer(
     fun noteSubOutput(samples: Int) {
         if (samples <= 0 || !xfadeActive) return
         subOutputSamples.addAndGet(samples.toLong())
+        val speed = siphonFactory?.effectiveSpeed ?: 1.0
+        val sourceMillis = kotlin.math.round(samples * speed * 1000.0).toLong()
+        subSourceMilliSamples.addAndGet(sourceMillis)
     }
 
     /** Heartbeat from the voice path: the mixer filter processed a chunk. */
@@ -718,6 +744,7 @@ class GuildMixer(
         xfadeStartSample = -1L
         xfadeEndSample = -1L
         subOutputSamples.set(0L)
+        subSourceMilliSamples.set(0L)
         xfadeActive = true
     }
 
@@ -746,6 +773,9 @@ class GuildMixer(
     }
 
     internal fun subOutputSamplesForTest(): Long = subOutputSamples.get()
+    internal fun subSourceSamples(): Long = (subSourceMilliSamples.get() + 500L) / 1000L
+    internal fun isXfadeBeatMatchedForTest(): Boolean = xfadeBeatMatched
+    internal fun currentSubEffectiveSpeedForTest(): Double = siphonFactory?.effectiveSpeed ?: 1.0
 
     internal fun filterRunsForTest(): Long = filterRunCount.get()
 
@@ -896,9 +926,7 @@ class GuildMixer(
             if (duration > 0 && duration < Long.MAX_VALUE / 2) {
                 val trail = if (silenceSkipEnabled) trailForLocked(track) else 0L
                 val contentEnd = TrimTransition.contentEnd(duration, trail)
-                val plan = if (track.isSeekable && crossfadeEnabled) {
-                    TrimTransition.crossfade(contentEnd, crossfadeMs)
-                } else null
+                val plan = planCrossfadeLocked(track, readyNextTrack ?: pendingNextTrack, contentEnd)
                 if (readyNextTrack != null && plan != null &&
                     chainPos.get() >= plan.startMs * SAMPLE_RATE / 1000
                 ) {
@@ -941,6 +969,47 @@ class GuildMixer(
             tailWatch = false
             return PollAction.None
         }
+    }
+
+    private fun planCrossfadeLocked(
+        outgoingTrack: AudioTrack,
+        incomingTrack: AudioTrack?,
+        contentEndMs: Long,
+    ): CrossfadePlan? {
+        if (!outgoingTrack.isSeekable || !crossfadeEnabled) return null
+        if (!beatmatchEnabled || !bpmDetectionEnabled || incomingTrack == null || !incomingTrack.isSeekable) {
+            val reason = when {
+                !beatmatchEnabled -> "beatmatch_disabled"
+                !bpmDetectionEnabled -> "bpm_disabled"
+                incomingTrack == null -> "missing_incoming_track"
+                else -> "incoming_unseekable"
+            }
+            return TrimTransition.crossfade(contentEndMs, crossfadeMs)?.copy(beatMatched = false, fallbackReason = reason)
+        }
+        val outId = idOf(outgoingTrack)
+        val inId = idOf(incomingTrack)
+        val outGrid = outId?.let { AnalysisCaches.bpmTail[it] ?: AnalysisCaches.bpmHead[it] }
+        val inGrid = inId?.let { AnalysisCaches.bpmHead[it] }
+        val inLead = if (silenceSkipEnabled) leadForLocked(incomingTrack) else 0L
+        val inDuration = try { incomingTrack.duration } catch (e: Exception) { -1L }
+        val decision = try {
+            BeatMatchPolicy.decide(
+                outgoing = outGrid,
+                incoming = inGrid,
+                contentEndMs = contentEndMs,
+                requestedCrossfadeMs = crossfadeMs,
+                crossfadeEnabled = crossfadeEnabled,
+                beatmatchEnabled = beatmatchEnabled,
+                maxTempoChange = maxTempoChange,
+                minConfidence = beatmatchMinConfidence,
+                incomingLeadMs = inLead,
+                incomingDurationMs = inDuration,
+            )
+        } catch (e: Exception) {
+            log.warn("beatmatch policy failed on guild {}, falling back to equal-power", guildId, e)
+            TransitionDecision.EqualPower("policy_error")
+        }
+        return BeatMatchPolicy.toCrossfadePlan(decision, contentEndMs, crossfadeMs)
     }
 
     private fun resetFilterHeartbeatLocked(position: Long) {
@@ -1113,6 +1182,7 @@ class GuildMixer(
         val (sub, gen) = synchronized(lock) {
             if (overlayActive || xfadeActive) throw MixerBusyException("secondary player busy on guild $guildId")
             val s = ensureSubLocked()
+            siphonFactory?.resetSpeed()
             announceToken++
             subTrack = track
             overlayActive = true
@@ -1221,6 +1291,7 @@ class GuildMixer(
             xfadeActive = false
             overlayActive = false
             analysisState.active = false
+            siphonFactory?.resetSpeed()
             val p = parallelOverlays.values.toList()
             parallelOverlays.clear()
             subPlayer.also { subPlayer = null } to p
@@ -1289,7 +1360,7 @@ class GuildMixer(
         var sub = subPlayer
         if (sub == null) {
             sub = playerManager.createPlayer()
-            val factory = SiphonFactory(siphon)
+            val factory = SiphonFactory(siphon, enableTimescale = true)
             siphonFactory = factory
             sub.setFilterFactory(factory)
             sub.addListener(subListener)
@@ -1307,14 +1378,36 @@ class GuildMixer(
             pendingNextTrack = null
             Triple(n, protocol.gate.lastKnownEpoch, protocol.advanceSeq.get())
         }
-        seekPastLead(next)
+        if (plan.beatMatched && next.isSeekable) {
+            val lead = if (silenceSkipEnabled) synchronized(lock) { leadForLocked(next) } else 0L
+            val target = maxOf(lead, plan.incomingStartMs)
+            if (target > 0L) {
+                try {
+                    val duration = next.duration
+                    next.position = if (duration > 0) target.coerceIn(0, (duration - 500).coerceAtLeast(0)) else target
+                    log.debug("beatmatch seek to {}ms on guild {}", target, guildId)
+                } catch (e: Exception) {
+                    log.warn("beatmatch seek failed on guild {}", guildId, e)
+                }
+            }
+        } else {
+            seekPastLead(next)
+        }
         // Pre-warm the secondary decoder BEFORE arming the fade. playTrack()
         // returns after Lavaplayer fills the whole frame buffer; draining a
         // burst here lets the siphon bank up to a frame-buffer's worth of PCM
         // so the overlap's opening seconds are actually audible — previously
         // the sub side started with a near-empty siphon (pending=1s,
         // dropped=22k+ frames, subOut lagging subPos by a full second).
-        val sub = synchronized(lock) { ensureSubLocked() }
+        val sub = synchronized(lock) {
+            val s = ensureSubLocked()
+            if (plan.beatMatched) {
+                siphonFactory?.setSpeed(plan.rateRatio.toDouble())
+            } else {
+                siphonFactory?.resetSpeed()
+            }
+            s
+        }
         try {
             sub.playTrack(next)
         } catch (e: Exception) {
@@ -1323,22 +1416,32 @@ class GuildMixer(
         prefillSubSiphon(sub)
         val gen = synchronized(lock) {
             if (protocol.gate.lastKnownEpoch != epochAtStart || protocol.advanceSeq.get() != seqAtStart || protocol.playbackState != PlaybackState.ARMED) {
+                siphonFactory?.resetSpeed()
                 return
             }
             if (overlayActive || xfadeActive) {
                 // Lost a race with an overlay/overlap started on another thread:
                 // re-queue rather than dropping the track.
+                siphonFactory?.resetSpeed()
                 if (readyNextTrack == null) readyNextTrack = next
                 else if (pendingNextTrack == null) pendingNextTrack = next
                 else log.warn("dropping overlapped queue on guild {}: slot busy", guildId)
                 return
             }
+            val nativeFailed = siphonFactory?.nativeFailed == true
+            if (plan.beatMatched && nativeFailed) {
+                siphonFactory?.resetSpeed()
+            }
+            xfadeBeatMatched = plan.beatMatched && !nativeFailed
+            xfadeFallbackReason = if (plan.beatMatched && nativeFailed) "timescale_native_failed" else plan.fallbackReason
+
             subTrack = next
             overlayActive = false
             xfadeActive = true
             xfadeHandoffMs = plan.handoffMs
             xfadeMainTrack = main?.audioPlayer?.playingTrack
             subOutputSamples.set(0L)
+            subSourceMilliSamples.set(0L)
             subStartPositionMs = safePosition(next)
             subStartMs = System.currentTimeMillis()
             siphon.clear()
@@ -1372,8 +1475,10 @@ class GuildMixer(
             } catch (e: Exception) {
                 log.warn("superseded overlap stop failed on guild {}", guildId, e)
             }
-            siphon.clear()
+            siphonFactory?.resetSpeed()
             synchronized(lock) {
+                xfadeBeatMatched = false
+                xfadeFallbackReason = null
                 // Only restore if the same arm epoch/seq is still active (e.g. transient sub contention),
                 // never when superseded by invalidate/override/reset/re-arm.
                 if (protocol.gate.lastKnownEpoch == epochAtStart && protocol.advanceSeq.get() == seqAtStart && protocol.playbackState == PlaybackState.ARMED) {
@@ -1382,6 +1487,7 @@ class GuildMixer(
                     else log.warn("dropping superseded overlap on guild {}: slot busy", guildId)
                 }
             }
+            siphon.clear()
             return
         }
         log.info(
@@ -1394,6 +1500,14 @@ class GuildMixer(
         notifyMixerEvent("overlapStart") {
             put("crossfadeMs", plan.durationMs)
             put("handoffInMs", (plan.handoffMs - mainPosMs).coerceAtLeast(0L))
+            put("beatMatched", xfadeBeatMatched)
+            if (xfadeBeatMatched) {
+                put("fadeBeats", plan.fadeBeats)
+                put("targetBpm", plan.targetBpm)
+                put("rateRatio", plan.rateRatio)
+            } else if (xfadeFallbackReason != null) {
+                put("fallbackReason", xfadeFallbackReason)
+            }
             putTrack(next)
         }
     }
@@ -1455,7 +1569,13 @@ class GuildMixer(
             fallbackAdvanceOrIdle()
             return
         }
-        data class Plan(val handoff: Handoff?, val epochAtStart: Long, val seqAtStart: Long)
+        data class Plan(
+            val handoff: Handoff?,
+            val epochAtStart: Long,
+            val seqAtStart: Long,
+            val wasBeatMatched: Boolean,
+            val fallbackReason: String?,
+        )
         val plan = synchronized(lock) {
             // poll(), mainListener.onTrackEnd and recoverFromMainStall all read
             // xfadeActive under the lock and then call us *after* releasing it.
@@ -1464,6 +1584,10 @@ class GuildMixer(
             // second caller replays the whole transition and throws away the
             // mask ramp it just armed.
             if (!xfadeActive) return@doHandoff
+            val wasBeatMatched = xfadeBeatMatched
+            val fallbackReason = xfadeFallbackReason
+            xfadeBeatMatched = false
+            xfadeFallbackReason = null
             val sub = subTrack
             val armedEnc = protocol.armedEncodedTrack
             protocol.armedTrack = null
@@ -1480,22 +1604,25 @@ class GuildMixer(
             val seqAtStart = protocol.advanceSeq.get()
             if (sub == null) {
                 resetGainsLocked()
-                Plan(null, epochAtStart, seqAtStart)
+                Plan(null, epochAtStart, seqAtStart, wasBeatMatched, fallbackReason)
             } else {
                 val clone = sub.makeClone()
                 val subOutMs = subOutputSamples.get() * 1000L / SAMPLE_RATE
+                val subSourceMs = subSourceSamples() * 1000L / SAMPLE_RATE
                 Plan(
                     Handoff(
                         source = sub,
                         clone = clone,
                         encodedTrack = armedEnc,
-                        outputPosition = subStartPositionMs + subOutMs,
+                        outputPosition = subStartPositionMs + subSourceMs,
                         subReportedMs = safePosition(sub),
                         subOutMs = subOutMs,
                         droppedFrames = siphon.droppedFrames,
                     ),
                     epochAtStart,
                     seqAtStart,
+                    wasBeatMatched,
+                    fallbackReason,
                 )
             }
         }
@@ -1541,6 +1668,7 @@ class GuildMixer(
                 } catch (e: Exception) {
                     log.warn("sub stop failed on guild {}", guildId, e)
                 }
+                siphonFactory?.resetSpeed()
                 siphon.clear()
                 log.warn("crossfade handoff superseded on guild {}; dropping '{}'", guildId, titleOf(handoff.source))
                 return
@@ -1550,6 +1678,7 @@ class GuildMixer(
             } catch (e: Exception) {
                 log.warn("sub stop failed on guild {}", guildId, e)
             }
+            siphonFactory?.resetSpeed()
             siphon.clear()
             subGain.setNow(0f)
             mainGain.setNow(0f)
@@ -1578,6 +1707,10 @@ class GuildMixer(
                 )
                 notifyMixerEvent("overlapEnd") {
                     put("reason", "handoff")
+                    put("beatMatched", plan.wasBeatMatched)
+                    if (!plan.wasBeatMatched && plan.fallbackReason != null) {
+                        put("fallbackReason", plan.fallbackReason)
+                    }
                     putTrack(handoff.source)
                 }
                 notifyAdvanced("CROSSFADE", plan.epochAtStart, committedSeq, handoff.encodedTrack)
@@ -1608,11 +1741,15 @@ class GuildMixer(
     }
 
     private fun abortXfade(reason: String) {
+        var wasBeatMatched = false
         val (sub, armedSub, subName) = synchronized(lock) {
             // Idempotent: nothing armed means a duplicate/late abort (e.g. a
             // deliberate sub.stopTrack() racing the listener) must not replay
             // teardown, clobber a handoff mask ramp, or spam overlapEnd.
             if (!xfadeActive && subTrack == null) return@abortXfade
+            wasBeatMatched = xfadeBeatMatched
+            xfadeBeatMatched = false
+            xfadeFallbackReason = null
             val subPosMs = subTrack?.let { safePosition(it) } ?: -1L
             val subOutMs = subOutputSamples.get() * 1000L / SAMPLE_RATE
             val elapsed = if (subStartMs > 0) System.currentTimeMillis() - subStartMs else -1L
@@ -1643,9 +1780,11 @@ class GuildMixer(
         } catch (e: Exception) {
             log.warn("sub stop failed on guild {} (was '{}')", guildId, subName, e)
         }
+        siphonFactory?.resetSpeed()
         notifyMixerEvent("overlapEnd") {
             put("reason", "aborted")
             put("detail", reason)
+            put("beatMatched", wasBeatMatched)
             putTrack(armedSub)
         }
     }
@@ -1792,6 +1931,13 @@ class GuildMixer(
         AnalysisCaches.bpm[id]
     }
 
+    fun peekNextBeatGrid(): BeatGrid? = synchronized(lock) {
+        if (!bpmDetectionEnabled) return null
+        val next = readyNextTrack ?: pendingNextTrack ?: return null
+        val id = idOf(next) ?: return null
+        AnalysisCaches.bpmHead[id]
+    }
+
     /** Moves pending → ready once its trim and gain are known (or no analysis needed). */
     private fun promoteIfPendingLocked(expectedId: String? = null) {
         val pending = pendingNextTrack ?: return
@@ -1903,7 +2049,7 @@ class GuildMixer(
         synchronized(lock) {
             val hasSilence = !doSilence || AnalysisCaches.trim.contains(identifier)
             val hasNorm = !doNorm || AnalysisCaches.norm.contains(identifier)
-            val hasBpm = !doBpm || AnalysisCaches.bpm.contains(identifier)
+            val hasBpm = !doBpm || (AnalysisCaches.bpm.contains(identifier) && AnalysisCaches.bpmHead.contains(identifier) && AnalysisCaches.bpmTail.contains(identifier))
             if (hasSilence && hasNorm && hasBpm) {
                 promoteIfPendingLocked()
                 return
@@ -1921,13 +2067,13 @@ class GuildMixer(
         try {
             val hasSilence = doSilence && !AnalysisCaches.trim.contains(identifier)
             val hasNorm = doNorm && !AnalysisCaches.norm.contains(identifier)
-            val hasBpm = doBpm && !AnalysisCaches.bpm.contains(identifier)
+            val needBpm = doBpm && (!AnalysisCaches.bpm.contains(identifier) || !AnalysisCaches.bpmHead.contains(identifier) || !AnalysisCaches.bpmTail.contains(identifier))
             val result = analysisService.analyze(
                 track,
                 TrackAnalysisSettings(
                     silence = hasSilence,
                     normalization = hasNorm,
-                    bpm = hasBpm,
+                    bpm = needBpm,
                     silenceThresholdDb = silenceThresholdDb,
                     silenceMinSoundMs = silenceMinSoundMs,
                     silenceHeadScanMs = silenceHeadScanMs,
@@ -1940,7 +2086,7 @@ class GuildMixer(
                 applyAnalyzedNormGain(identifier)
                 log.info("normalization guild {}: lufs={}", guildId, result.loudnessRms)
             }
-            if (hasBpm && result.bpm != null) {
+            if (needBpm && result.bpm != null) {
                 AnalysisCaches.bpm[identifier] = result.bpm
                 log.info(
                     "bpm analysis guild {}: bpm={} firstBeat={}ms confidence={}",
@@ -1949,6 +2095,22 @@ class GuildMixer(
                     result.bpm.firstBeatMs,
                     result.bpm.confidence,
                 )
+            }
+            if (needBpm && result.bpmHead != null) {
+                AnalysisCaches.bpmHead[identifier] = result.bpmHead
+            }
+            if (needBpm && result.bpmTail != null) {
+                AnalysisCaches.bpmTail[identifier] = result.bpmTail
+            }
+            if (doBpm && !result.aborted) {
+                val playing = synchronized(lock) { main?.audioPlayer?.playingTrack }
+                val playingId = playing?.let { idOf(it) }
+                if (playing != null && playingId != null && !AnalysisCaches.bpmTail.contains(playingId)) {
+                    val tailGrid = analysisService.measureTailGrid(playing, bpmScanMs)
+                    if (tailGrid != null) {
+                        AnalysisCaches.bpmTail[playingId] = tailGrid
+                    }
+                }
             }
             if (result.aborted) {
                 log.warn("silence analysis aborted on guild {}: sub decoder failed", guildId)

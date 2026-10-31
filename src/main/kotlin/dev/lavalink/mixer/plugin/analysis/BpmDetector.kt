@@ -52,8 +52,9 @@ object BpmDetector {
      * scores high. A null [BpmResult] (no usable signal) stays distinct from a
      * low-confidence one.
      */
-    data class BpmResult(val bpm: Float, val firstBeatMs: Long, val confidence: Float)
-
+    data class BpmResult(val bpm: Float, val firstBeatMs: Long, val confidence: Float) {
+        val phaseMs: Long get() = firstBeatMs
+    }
     /**
      * Frames-per-second of the envelope. 100 fps = 10ms resolution; parabolic
      * refinement recovers sub-hop period precision on top of that.
@@ -99,8 +100,7 @@ object BpmDetector {
         sampleRate: Int = 48000,
         minBpm: Float = 60f,
         maxBpm: Float = 200f,
-        windowHeadMs: Long? = null,
-        windowTailMs: Boolean = false,
+        windowStartMs: Long = 0L,
     ): BeatGrid? {
         val det = detect(frames, sampleRate, minBpm, maxBpm) ?: return null
         val periodMs = 60_000.0 / det.bpm
@@ -109,13 +109,12 @@ object BpmDetector {
         // grid at `firstOnsetMs mod period` makes a grid beat land exactly on
         // the first onset (and every period thereafter). NOT a musical downbeat:
         // no bar/section awareness, just the phase where the periodic pulse sits.
-        val phaseMs = ((firstOnsetMs % periodMs) + periodMs) % periodMs
+        val localPhaseMs = ((firstOnsetMs % periodMs) + periodMs) % periodMs
+        val phaseMs = windowStartMs + round(localPhaseMs).toLong()
         return BeatGrid(
             bpm = det.bpm,
-            phaseMs = round(phaseMs).toLong(),
+            phaseMs = phaseMs,
             confidence = det.confidence,
-            windowHeadMs = windowHeadMs,
-            windowTailMs = windowTailMs,
         )
     }
 

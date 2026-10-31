@@ -24,6 +24,8 @@ internal data class TrackAnalysisResult(
     val loudnessRms: Float?,
     val bpm: BpmDetector.BpmResult?,
     val aborted: Boolean,
+    val bpmHead: BeatGrid? = null,
+    val bpmTail: BeatGrid? = null,
 )
 
 /**
@@ -73,6 +75,8 @@ internal class TrackAnalysisService(
         val trailMs: Long,
         val loudnessRms: Float?,
         val bpm: BpmDetector.BpmResult?,
+        val bpmHead: BeatGrid? = null,
+        val bpmTail: BeatGrid? = null,
     )
 
     @Volatile
@@ -106,6 +110,8 @@ internal class TrackAnalysisService(
             var tail = 0L
             var loudness: Float? = null
             var bpm: BpmDetector.BpmResult? = null
+            var bpmHead: BeatGrid? = null
+            var bpmTail: BeatGrid? = null
             var bpmAttempted = false
             val shortTrack = duration in 1..minOf(scanCap, 30000)
 
@@ -116,6 +122,8 @@ internal class TrackAnalysisService(
                 loudness = result.loudnessRms
                 if (settings.bpm) {
                     bpm = result.bpm
+                    bpmHead = result.bpmHead
+                    bpmTail = result.bpmTail
                     bpmAttempted = true
                 }
             } else if (settings.silence || settings.normalization) {
@@ -131,7 +139,22 @@ internal class TrackAnalysisService(
             }
 
             if (settings.bpm && !bpmAttempted) {
-                bpm = measureBpmBlocking(track, factory, settings.bpmScanMs)
+                val headFrames = collectFrom(track, factory, 0, msToSamples(settings.bpmScanMs))
+                if (headFrames.isNotEmpty()) {
+                    bpm = BpmDetector.analyze(headFrames)
+                    bpmHead = BpmDetector.analyzeGrid(headFrames, windowStartMs = 0L)
+                }
+                if (seekable && duration > 0 && duration < Long.MAX_VALUE / 2) {
+                    val tailStartMs = (duration - settings.bpmScanMs).coerceAtLeast(0L)
+                    if (tailStartMs == 0L) {
+                        bpmTail = bpmHead
+                    } else {
+                        val tailFrames = collectFrom(track, factory, tailStartMs, msToSamples(settings.bpmScanMs + 2000))
+                        if (tailFrames.isNotEmpty()) {
+                            bpmTail = BpmDetector.analyzeGrid(tailFrames, windowStartMs = tailStartMs)
+                        }
+                    }
+                }
             }
             val guardedLead = if (duration > 0 && lead >= duration - 500) 0 else lead.coerceAtLeast(0)
             val trim = if (settings.silence) {
@@ -139,7 +162,7 @@ internal class TrackAnalysisService(
             } else {
                 null
             }
-            return TrackAnalysisResult(trim, loudness, bpm, analysisBroken)
+            return TrackAnalysisResult(trim, loudness, bpm, analysisBroken, bpmHead, bpmTail)
         } finally {
             stopTrack()
         }
@@ -149,6 +172,30 @@ internal class TrackAnalysisService(
         val factory = ensureAnalysisPlayer().second
         return try {
             measureLoudnessBlocking(track, factory)
+        } finally {
+            stopTrack()
+        }
+    }
+
+    fun measureTailGrid(track: AudioTrack, bpmScanMs: Long): BeatGrid? {
+        val factory = ensureAnalysisPlayer().second
+        return try {
+            val duration = try {
+                track.duration
+            } catch (e: Exception) {
+                -1L
+            }
+            val seekable = try {
+                track.isSeekable
+            } catch (e: Exception) {
+                false
+            }
+            if (!seekable || duration <= 0 || duration >= Long.MAX_VALUE / 2) {
+                return null
+            }
+            val tailStartMs = (duration - bpmScanMs).coerceAtLeast(0L)
+            val collected = collectFrom(track, factory, tailStartMs, msToSamples(bpmScanMs + 2000))
+            if (collected.isEmpty()) null else BpmDetector.analyzeGrid(collected, windowStartMs = tailStartMs)
         } finally {
             stopTrack()
         }
@@ -271,7 +318,8 @@ internal class TrackAnalysisService(
             meter.finish()
         } else null
         val bpm = if (measureBpm) BpmDetector.analyze(frames) else null
-        return SinglePassResult(lead, trail, loudness, bpm)
+        val grid = if (measureBpm) BpmDetector.analyzeGrid(frames, windowStartMs = 0L) else null
+        return SinglePassResult(lead, trail, loudness, bpm, bpmHead = grid, bpmTail = grid)
     }
 
     private fun trailingSilenceMs(

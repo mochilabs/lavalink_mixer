@@ -6,6 +6,12 @@ data class CrossfadePlan(
     /** Point where the outgoing track's audible content ends. */
     val handoffMs: Long,
     val durationMs: Long,
+    val beatMatched: Boolean = false,
+    val rateRatio: Float = 1.0f,
+    val incomingStartMs: Long = 0L,
+    val fadeBeats: Int = 0,
+    val targetBpm: Float = 0f,
+    val fallbackReason: String? = null,
 )
 
 /** Timing rules for silence-trimmed transitions. */

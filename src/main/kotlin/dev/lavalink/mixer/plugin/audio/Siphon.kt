@@ -133,8 +133,18 @@ class SiphonFilter(
     override fun close() = Unit
 }
 
-class SiphonFactory(primary: SiphonQueue) : PcmFilterFactory {
+class SiphonFactory(
+    primary: SiphonQueue,
+    private val enableTimescale: Boolean = false,
+    private val timescaleFactory: ((FloatPcmAudioFilter, Int, Int) -> FloatPcmAudioFilter)? = null,
+) : PcmFilterFactory {
     private val taps = java.util.concurrent.CopyOnWriteArrayList<SiphonQueue>(listOf(primary))
+
+    @Volatile
+    private var currentStretcher: TempoStretcher? = null
+
+    @Volatile
+    var targetSpeed: Double = 1.0
 
     fun addTap(queue: SiphonQueue) {
         taps.addIfAbsent(queue)
@@ -144,9 +154,37 @@ class SiphonFactory(primary: SiphonQueue) : PcmFilterFactory {
         taps.remove(queue)
     }
 
+    fun setSpeed(speed: Double) {
+        targetSpeed = speed
+        currentStretcher?.updateSpeed(speed)
+    }
+
+    fun resetSpeed() {
+        targetSpeed = 1.0
+        currentStretcher?.reset()
+    }
+
+    val effectiveSpeed: Double
+        get() = currentStretcher?.effectiveSpeed ?: 1.0
+
+    val isTimescaleActive: Boolean
+        get() = currentStretcher?.isActive == true
+
     override fun buildChain(
         track: AudioTrack?,
         format: AudioDataFormat,
         output: UniversalPcmAudioFilter,
-    ): MutableList<AudioFilter> = mutableListOf(SiphonFilter(taps.toList(), output))
+    ): MutableList<AudioFilter> {
+        val siphonFilter = SiphonFilter(taps.toList(), output)
+        if (!enableTimescale) {
+            return mutableListOf(siphonFilter)
+        }
+        val stretcher = if (timescaleFactory != null) {
+            TempoStretcher(siphonFilter, format.channelCount, format.sampleRate, targetSpeed, timescaleFactory)
+        } else {
+            TempoStretcher(siphonFilter, format.channelCount, format.sampleRate, targetSpeed)
+        }
+        currentStretcher = stretcher
+        return mutableListOf(stretcher, siphonFilter)
+    }
 }

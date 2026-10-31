@@ -28,6 +28,8 @@ internal object AnalysisCaches {
     val norm = BoundedCache<Float>()
     val trim = BoundedCache<TrimPoints>()
     val bpm = BoundedCache<BpmDetector.BpmResult>()
+    val bpmHead = BoundedCache<BeatGrid>()
+    val bpmTail = BoundedCache<BeatGrid>()
 
     fun trimFor(track: AudioTrack): TrimPoints {
         val id = idOf(track) ?: return TrimPoints.NONE

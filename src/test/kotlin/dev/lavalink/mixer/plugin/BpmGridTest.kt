@@ -117,12 +117,12 @@ class BpmGridTest {
     }
 
     @Test
-    fun `window tagging carries through to the grid`() {
-        val grid = BpmDetector.analyzeGrid(
+    fun `window start offset shifts the grid phase`() {
+        val baseGrid = BpmDetector.analyzeGrid(clickTrack(120f, 8)) ?: fail("no base grid")
+        val shiftedGrid = BpmDetector.analyzeGrid(
             clickTrack(120f, 8),
-            windowHeadMs = 15_000L,
-            windowTailMs = true,
-        ) ?: fail("no grid")
-        assertTrue(grid.windowHeadMs == 15_000L && grid.windowTailMs, "grid=$grid")
+            windowStartMs = 15_000L,
+        ) ?: fail("no shifted grid")
+        assertNear(shiftedGrid.phaseMs.toFloat(), 15_000f + baseGrid.phaseMs, 5f, "shifted phase")
     }
 }

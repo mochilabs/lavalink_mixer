@@ -14,7 +14,8 @@ info:
        "pluginFilters": { "mixer": { "guildId": "<id>" } } }`.
        Without this step every endpoint below still works, but nothing is audible.
     2. Optionally tune per-guild behavior: POST /mixer/crossfade,
-       POST /mixer/fade-in, POST /mixer/normalization, POST /mixer/silence.
+       POST /mixer/fade-in, POST /mixer/normalization, POST /mixer/silence,
+       POST /mixer/bpm.
     3. Track transitions are driven by the server: the plugin fires
        `MixerNeedNextTrackEvent` when ~7s + crossfadeMs remain. The client
        MUST respond by POSTing to `queue/arm` with the next track and the
@@ -216,6 +217,15 @@ components:
         currentTrackGainDb: { type: number, format: float }
         nextTrackGain: { type: [number, 'null'], format: float }
         nextTrackGainDb: { type: [number, 'null'], format: float }
+        bpmDetectionEnabled: { type: boolean }
+        nextTrackBpm:
+          type: [number, 'null']
+          format: float
+          description: Detected tempo (BPM) of the queued next track; null while detection is pending or disabled.
+        nextTrackFirstBeatMs:
+          type: [integer, 'null']
+          format: int64
+          description: Offset (ms) of the queued track's first detected downbeat; null with nextTrackBpm.
         playbackState:
           type: string
           enum: [IDLE, PLAYING, ARMED, NO_NEXT]
@@ -282,6 +292,16 @@ components:
           type: number
           format: float
           description: Target loudness in LUFS (default -14.0). Clamped to [-30.0, -6.0].
+    BpmRequest:
+      type: object
+      required: [guildId, enabled]
+      properties:
+        guildId: { type: string }
+        enabled: { type: boolean }
+        scanMs:
+          type: integer
+          format: int64
+          description: Head window decoded for tempo analysis (default 30000). Clamped to [5000, 60000].
 paths:
   /mixer/info:
     get:
@@ -533,6 +553,21 @@ paths:
         content:
           application/json:
             schema: { $ref: '#/components/schemas/SilenceRequest' }
+      responses:
+        '200':
+          description: Updated state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MixerState' }
+  /mixer/bpm:
+    post:
+      operationId: setBpmDetection
+      summary: Configure tempo (BPM) detection for preloaded tracks
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BpmRequest' }
       responses:
         '200':
           description: Updated state

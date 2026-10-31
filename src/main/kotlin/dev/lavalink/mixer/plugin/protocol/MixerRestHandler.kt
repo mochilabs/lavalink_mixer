@@ -108,6 +108,13 @@ data class SilenceRequest(
 )
 
 @Serializable
+data class BpmRequest(
+    val guildId: String,
+    val enabled: Boolean,
+    val scanMs: Long? = null,
+)
+
+@Serializable
 data class TrackInfo(
     val identifier: String,
     val title: String,
@@ -165,6 +172,11 @@ data class MixerState(
     val nextTrackGain: Float? = null,
     /** [nextTrackGain] in dB. */
     val nextTrackGainDb: Float? = null,
+    val bpmDetectionEnabled: Boolean = false,
+    /** Detected tempo (BPM) of the queued next track; null while detection is pending or disabled. */
+    val nextTrackBpm: Float? = null,
+    /** Offset (ms) of the queued track's first detected downbeat; null with [nextTrackBpm]. */
+    val nextTrackFirstBeatMs: Long? = null,
 )
 
 /**
@@ -323,6 +335,9 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
                 currentTrackGainDb = gainToDb(mixer.currentTrackGain()),
                 nextTrackGain = mixer.nextTrackGain(),
                 nextTrackGainDb = mixer.nextTrackGain()?.let { gainToDb(it) },
+                bpmDetectionEnabled = mixer.bpmDetectionEnabled,
+                nextTrackBpm = mixer.peekNextBpm()?.bpm,
+                nextTrackFirstBeatMs = mixer.peekNextBpm()?.firstBeatMs,
             )
         )
     }
@@ -352,8 +367,8 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
         requireTrackRef(body.identifier, body.encodedTrack)
         val guildId = gid(body.guildId)
         val mode = when (body.mode?.lowercase()) {
-            null, "", "sequential" -> GuildMixer.AnnounceMode.SEQUENTIAL
-            "parallel" -> GuildMixer.AnnounceMode.PARALLEL
+            null, "", "sequential" -> AnnounceMode.SEQUENTIAL
+            "parallel" -> AnnounceMode.PARALLEL
             else -> throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Unknown announce mode '${body.mode}' (use 'sequential' or 'parallel')")
         }
         val (id, position) = plugin.announce(guildId, body.identifier, body.encodedTrack, body.duckLevel, mode)
@@ -399,6 +414,14 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
         body.headScanMs?.let { mixer.silenceHeadScanMs = it.coerceIn(1000, 60000) }
         body.tailScanMs?.let { mixer.silenceTailScanMs = it.coerceIn(1000, 60000) }
         body.tailConfirmMs?.let { mixer.tailConfirmMs = it.coerceIn(300, 10000) }
+        return stateById(body.guildId, guildId)
+    }
+
+    @PostMapping("/mixer/bpm")
+    fun bpm(@RequestBody body: BpmRequest): ResponseEntity<MixerState> {
+        val guildId = gid(body.guildId)
+        val mixer = plugin.getOrCreate(guildId)
+        mixer.updateBpm(body.enabled, body.scanMs)
         return stateById(body.guildId, guildId)
     }
 

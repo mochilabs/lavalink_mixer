@@ -30,6 +30,12 @@ class MixerConfig {
     /** Sustained realtime silence before an early cut (streams demand max(this, 3000)). */
     var tailConfirmMs: Long = 1000
 
+    // Tempo (BPM) detection is opt-in: each preloaded track is decoded once
+    // more for onset analysis, which costs CPU/bandwidth.
+    var bpmDetectionEnabled: Boolean = false
+    /** Head window (ms) decoded for tempo analysis; 30s spans ~15-60 beats across 60-200 BPM. */
+    var bpmScanMs: Long = 30000
+
     /** Parallel silence analyses (per-guild decoders are independent). Read at startup. */
     var analysisThreads: Int = 2
 

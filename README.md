@@ -71,6 +71,8 @@ mixer:
   silenceHeadScanMs: 15000
   silenceTailScanMs: 15000
   tailConfirmMs: 1000
+  bpmDetectionEnabled: false
+  bpmScanMs: 30000
   analysisThreads: 2
   maxParallelOverlays: 4
 ```
@@ -123,6 +125,7 @@ If the same key is replayed with a different payload, the request is rejected wi
 | POST | `/mixer/announce/cancel` | — | `{guildId}` | Stop overlay, restore music |
 | POST | `/mixer/normalization` | — | `{guildId, enabled, targetLufs?}` | Volume normalization on/off (target clamped to [-30, -6]) |
 | POST | `/mixer/silence` | — | `{guildId, enabled, ...}` | Leading/trailing silence skipping |
+| POST | `/mixer/bpm` | — | `{guildId, enabled, scanMs?}` | Tempo (BPM) detection on/off (scan window clamped to [5000, 60000] ms) |
 
 ### Standard v2 errors
 - `HTTP 400` Bad Request — missing or invalid `Idempotency-Key`, invalid action, invalid `encodedTrack`, or payload form mismatch.
@@ -166,6 +169,14 @@ If the same key is replayed with a different payload, the request is rejected wi
   explicitly overridden. The K-weighting filter is strictly applied to a
   measurement copy of PCM; the output signal is only scaled by the resulting
   linear gain.
+- **Tempo detection** (`/mixer/bpm`): opt-in, best-effort. A preloaded track
+  decodes its head `bpmScanMs` window (default 30s) and runs a pure-Kotlin
+  energy-flux onset + lag autocorrelation to estimate tempo (BPM) and the
+  first downbeat offset (ms), exposed via `/mixer/state` as `nextTrackBpm` /
+  `nextTrackFirstBeatMs`. It never gates track promotion: a failed or absent
+  onset just leaves those fields null. No native code, no LGPL dependency —
+  the detection is intended to feed a future beat-matched crossfade
+  (`TimescalePcmAudioFilter`), which is not yet wired.
 - **Crossfade mixes are soft-limited**: the equal-power sum of two hot
   sources can exceed full scale (up to ~1.41× at the midpoint). Instead of
   hard-clipping that sum into a square wave, only the excursion past a 0.9

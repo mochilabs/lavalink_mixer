@@ -482,4 +482,35 @@ class BpmDetectorTest {
             assertTrue(result.confidence < 0.25f, "confidence should be low for out-of-range tempo: ${result.confidence}")
         }
     }
+
+    @Test
+    fun `test bansanka real audio`() {
+        val file = java.io.File("build/tmp/test-audio/bansanka.wav")
+        if (!file.exists()) return
+        val ais = javax.sound.sampled.AudioSystem.getAudioInputStream(file)
+        val format = ais.format
+        val totalBytes = ais.readAllBytes()
+        val channels = format.channels
+        val totalSamples = totalBytes.size / (channels * 2)
+        val left = FloatArray(totalSamples)
+        val right = FloatArray(totalSamples)
+        val bb = java.nio.ByteBuffer.wrap(totalBytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        for (i in 0 until totalSamples) {
+            left[i] = bb.short / 32768.0f
+            if (channels > 1) right[i] = bb.short / 32768.0f
+        }
+        val sampleRate = format.sampleRate.toInt()
+        println("BANSANKA: sr=$sampleRate, channels=$channels, totalSamples=$totalSamples, duration=${totalSamples / sampleRate}s")
+
+        for (startSec in listOf(0, 30, 60, 90, 120, 150, 180)) {
+            val startSample = startSec * sampleRate
+            val endSample = minOf(startSample + 30 * sampleRate, totalSamples)
+            if (endSample - startSample < 10 * sampleRate) break
+            val sliceL = left.copyOfRange(startSample, endSample)
+            val sliceR = if (channels > 1) right.copyOfRange(startSample, endSample) else sliceL
+            val frames = listOf(arrayOf(sliceL, sliceR))
+            val grid = BpmDetector.analyzeGrid(frames, sampleRate = sampleRate, windowStartMs = startSec * 1000L)
+            println("SEGMENT ${startSec}s..${startSec+30}s: bpm=${grid?.bpm}, phaseMs=${grid?.phaseMs}, confidence=${grid?.confidence}")
+        }
+    }
 }

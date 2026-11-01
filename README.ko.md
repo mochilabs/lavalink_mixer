@@ -110,22 +110,24 @@ mixer:
 
 ### 1. 비트 매칭 오토믹스 (Beat-Matched AutoMix)
 순수 Kotlin 고정밀 분석 엔진을 통해 독립된 백그라운드에서 분석을 수행합니다:
-- **Radix-2 Real FFT (N=2048, Hann Window)**: 힙 메모리 할당 없이 48kHz PCM을 10ms 홉 단위로 주파수 변환.
+- **Radix-2 Real FFT (N=1024, Hann Window)**: 힙 메모리 할당 없이 PCM을 10ms 홉 단위로 주파수 변환.
+  - 다중 채널 독립 FFT: 채널별로 FFT를 수행한 후 로그 크기($L_t(k) = \ln(1 + 10 \cdot |X_t(k)|)$)를 평균하여 위상 상쇄 방지.
+  - 가변 샘플레이트 지원: 48kHz, 44.1kHz 등 입력 샘플레이트에 맞춰 홉 크기(~10ms)와 주파수 대역 빈 경계를 동적 계산.
+  - 대역별 표준편차 정규화: 저음역 킥/베이스 에너지가 고음역 스네어/하이햇 어택을 가리지 않도록 대역별 표준편차($SF_{\text{band}} / \sigma_{\text{band}}$)로 균등 가중합.
   - **Low (30–150 Hz)**: 킥 드럼 및 서브베이스 어택 분리
   - **Mid (150–2,000 Hz)**: 스네어, 클랩, 악기 어택 분리
   - **High (2,000–10,000 Hz)**: 하이햇, 심벌, 셰이커 분리
 
 $$
-SF_{\text{band}}(t) = \sum_{k \in \text{band}} \max\left(0, |X_t(k)| - |X_{t-1}(k)|\right)
+SF_{\text{band}}(t) = \sum_{k \in \text{band}} \max\left(0, L_t(k) - L_{t-1}(k)\right)
 $$
 
-- **정규화 자기상관 (Normalized Autocorrelation)**: 윈도우 길이 편향 없는 60–200 BPM 래그 탐색과 고조파 점수화로 하프/더블타임 오인 방지.
-- **전역 위상 최적화 (Global Phase Optimization)**: 윈도우 전체의 온셋 에너지를 코사인 펄스 커널과 결합해 최적 위상 $\phi^* \in [0, T)$ 산출:
+- **정규화 자기상관 및 옥타브 판별**: 윈도우 길이 편향 없는 60–200 BPM 래그 탐색. 온셋 간격의 5% 상대오차(최소 1.5홉) 및 4개 이상 일치 검증, 8분음표 하이햇 세분화 교차 검증($2.2\times$ 에너지 비율 기준) 적용. 간격이 없을 경우 최대 신뢰도 대비 0.35 이내이면서 $\ge 0.35$인 빠른 템포 우선 채택.
+- **전역 위상 및 가중 최소제곱(WLS) 주기 최적화**: 코사인 펄스 커널($tolerance = \max(1.5\text{ hops}, T \times 0.10)$, $dist < tolerance$ 가드)로 최적 위상을 탐색한 뒤, 가중 최소제곱 회귀를 통해 주기 $T$와 위상 $\phi$를 동시 정밀화하여 30초 테일 구간 누적 드리프트 제거:
 
 $$
-\phi^* = \arg\max_{\phi \in [0, T)} \sum_i w_i \cdot K(d(t_i, \phi, T))
+K(d, tol) = \cos^2\left(\frac{\pi \cdot d}{2 \cdot tol}\right) \quad (d < tol), \quad 0 \quad (\text{otherwise})
 $$
-
 - **경계 무음 자동 트림 결합**: 인코딩 딜레이나 앞뒤 무음이 있어도 무음을 건너뛴 실제 음악 시작 지점부터 2/4/8박자 비트 매칭 수행.
 - **템포 스트레칭 및 복구**: 두 곡의 템포가 `maxTempoChange` 이내로 다를 경우(예: 124 BPM → 126 BPM), 크로스페이드 구간 동안 들어오는 곡의 속도를 임시 조절하고, 핸드오프가 완료되면 원래 1.0 템포로 점진적 복귀.
 

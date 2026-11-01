@@ -110,22 +110,24 @@ mixer:
 
 ### 1. Beat-Matched AutoMix
 The AutoMix engine runs an isolated, pure Kotlin analysis pass on incoming and outgoing tracks:
-- **Radix-2 Real FFT (N=2048)** with Hann windowing for zero-allocation spectral analysis.
+- **Radix-2 Real FFT (N=1024)** with Hann windowing for zero-allocation spectral analysis.
+  - Multi-channel processing: transforms each channel independently and averages log magnitudes ($L_t(k) = \ln(1 + 10 \cdot |X_t(k)|)$) to avoid stereo phase cancellation.
+  - Dynamic sample-rate support: dynamically scales hop size ($\sim 10\text{ms}$) and frequency bin boundaries for 48kHz, 44.1kHz, etc.
+  - Standardized band fusion: scales each band by its standard deviation ($SF_{\text{band}} / \sigma_{\text{band}}$) so low-end bass cannot bury snare or hi-hat attacks.
   - **Low (30–150 Hz)**: Isolates kick drums and sub-bass transients.
   - **Mid (150–2,000 Hz)**: Tracks snares, claps, and instrumental attacks.
   - **High (2,000–10,000 Hz)**: Tracks hi-hats, cymbals, and shakers.
 
 $$
-SF_{\text{band}}(t) = \sum_{k \in \text{band}} \max\left(0, |X_t(k)| - |X_{t-1}(k)|\right)
+SF_{\text{band}}(t) = \sum_{k \in \text{band}} \max\left(0, L_t(k) - L_{t-1}(k)\right)
 $$
 
-- **Normalized Autocorrelation**: Unbiased tempo candidate estimation (60–200 BPM) with harmonic octave scoring to prevent half/double-tempo errors.
-- **Global Phase Optimization**: Fits the entire onset energy pattern across the analysis window to locate the optimal beat phase $\phi^* \in [0, T)$, completely immune to rogue opening clicks, breath sounds, or trailing reverbs:
+- **Normalized Autocorrelation & Octave Disambiguation**: Unbiased tempo candidate estimation (60–200 BPM) with 5% relative interval tolerance, minimum 4 interval confirmations, and energy-weighted hi-hat subdivision cross-checking ($2.2\times$ energy ratio threshold). If intervals are absent, candidates within 0.35 of maximum confidence and $\ge 0.35$ confidence prefer the faster fundamental tempo.
+- **Global Phase & WLS Period Optimization**: Fits all detected onsets using a cosine pulse kernel ($tolerance = \max(1.5\text{ hops}, T \times 0.10)$) with $dist < tolerance$ guard, followed by Weighted Least Squares (WLS) regression to jointly optimize period $T$ and grid phase $\phi$, eliminating 30-second tail grid drift:
 
 $$
-\phi^* = \arg\max_{\phi \in [0, T)} \sum_i w_i \cdot K(d(t_i, \phi, T))
+K(d, tol) = \cos^2\left(\frac{\pi \cdot d}{2 \cdot tol}\right) \quad \text{for } d < tol, \quad 0 \text{ otherwise}
 $$
-
 - **Boundary Silence Awareness**: Automatically trims encoding delays and leading/trailing silence, aligning the beat grids directly across the audible portions of both tracks.
 - **Tempo Transition & Recovery**: If tempos differ within `maxTempoChange` (e.g. 124 BPM → 126 BPM), the secondary track's tempo is stretched using `lavadsp` timescale during the crossfade. Once the outgoing track fades out, the incoming track smoothly returns to its native 1.0 tempo.
 

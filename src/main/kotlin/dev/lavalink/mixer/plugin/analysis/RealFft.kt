@@ -6,11 +6,11 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 /**
- * Pure Kotlin in-place Radix-2 Real/Complex Fast Fourier Transform for fixed size N=2048.
+ * Pure Kotlin in-place Radix-2 Real/Complex Fast Fourier Transform for power-of-two size (default N=1024).
  * Zero heap allocations during [transform] and [magnitudes].
  * Thread-safe for distinct instances or when using per-call scratch buffers.
  */
-class RealFft(val size: Int = 2048) {
+class RealFft(val size: Int = 1024) {
     init {
         require(size > 0 && (size and (size - 1)) == 0) { "FFT size must be a power of two, got $size" }
     }

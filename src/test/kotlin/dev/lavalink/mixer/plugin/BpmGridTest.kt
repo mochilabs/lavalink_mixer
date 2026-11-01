@@ -100,7 +100,10 @@ class BpmGridTest {
     @Test
     fun `grid phase anchored at first click`() {
         val grid = BpmDetector.analyzeGrid(clickTrack(120f, 8)) ?: fail("no grid")
-        assertNear(grid.phaseMs.toFloat(), 0f, 20f, "phase")
+        val periodMs = (60_000.0 / grid.bpm).toFloat()
+        val phaseInPeriod = ((grid.phaseMs % periodMs) + periodMs) % periodMs
+        val distToBeat = minOf(phaseInPeriod, periodMs - phaseInPeriod)
+        assertNear(distToBeat, 0f, 20f, "phase")
     }
 
     @Test

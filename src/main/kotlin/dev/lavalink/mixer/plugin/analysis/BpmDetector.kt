@@ -39,6 +39,10 @@ import kotlin.math.sqrt
  * O(n * lagRange), trivially cheap at these sizes.
  */
 object BpmDetector {
+    private val log = org.slf4j.LoggerFactory.getLogger(BpmDetector::class.java)
+
+    internal data class Onset(val hop: Double, val weight: Double)
+
 
     /**
      * Legacy scalar view of [analyzeGrid] (kept for [TrackAnalysisService.measureBpmBlocking]).
@@ -67,15 +71,6 @@ object BpmDetector {
 
     /** Hop length of the envelope, in ms. */
     private const val HOP_MS = 1000.0 / FRAMES_PER_SECOND
-
-    /**
-     * Confidence band within which two octave lags count as an equally
-     * supported metrical level, and the faster tempo (smaller lag) wins.
-     * Sized so float noise between octaves (~3e-4 for a perfectly periodic
-     * pulse) is a tie, but real octave discrimination (~0.04+ with humanized
-     * timing) is not.
-     */
-    private const val OCTAVE_TIE_EPS = 0.02f
 
     /**
      * A tempo estimate below this confidence is reported as-is (legacy callers
@@ -108,8 +103,7 @@ object BpmDetector {
     ): BeatGrid? {
         val det = detect(frames, sampleRate, minBpm, maxBpm) ?: return null
         val periodMs = 60_000.0 / det.bpm
-        var localPhaseMs = ((det.phaseHops * HOP_MS % periodMs) + periodMs) % periodMs
-        if (localPhaseMs >= periodMs - HOP_MS) localPhaseMs = 0.0
+        val localPhaseMs = ((det.phaseHops * HOP_MS % periodMs) + periodMs) % periodMs
         val phaseMs = windowStartMs + round(localPhaseMs).toLong()
         return BeatGrid(
             bpm = det.bpm,
@@ -133,13 +127,18 @@ object BpmDetector {
 
         // Onset strength: fuse energy flux with 3-band spectral flux when available
         val energyFlux = FloatArray(n)
-        energyFlux[0] = env[0]
+        energyFlux[0] = 0f
         for (i in 1 until n) {
             val d = env[i] - env[i - 1]
             if (d > 0f) energyFlux[i] = d
         }
 
-        val specFlux = if (sampleRate == 48000) SpectralFluxAnalyzer.computeSpectralFlux(frames) else null
+        val specFlux = try {
+            SpectralFluxAnalyzer.computeSpectralFlux(frames, sampleRate)
+        } catch (e: Exception) {
+            log.warn("Spectral flux computation failed, falling back to energy flux: ${e.message}")
+            null
+        }
         val flux = if (specFlux != null) {
             val (_, eStd) = stats(energyFlux, 0, n)
             val (_, sStd) = stats(specFlux, 0, specFlux.size)
@@ -154,19 +153,52 @@ object BpmDetector {
             energyFlux
         }
 
-        // Adaptive onset threshold over the whole window (silence + sparse
-        // beats yields a low mean, so one sigma of headroom is enough to
-        // separate real onsets from decode noise).
-        val (mean, std) = stats(flux, 0, n)
-        val threshold = mean + 1.5f * std
-        if (threshold <= 0f) return null
+        val (gMean, gStd) = stats(flux, 0, n)
+        if (gStd <= 0f) return null
 
-        // First onset: detect from raw energy flux to preserve exact 10ms hop edge
-        val (eMean, eStd) = stats(energyFlux, 0, n)
-        val eThreshold = eMean + 1.5f * eStd
+        // 5-second sliding window adaptive threshold (local mean + 1.5 * local std)
+        val prefix = DoubleArray(n + 1)
+        val prefixSq = DoubleArray(n + 1)
+        for (i in 0 until n) {
+            val v = flux[i].toDouble()
+            prefix[i + 1] = prefix[i] + v
+            prefixSq[i + 1] = prefixSq[i] + v * v
+        }
+        val halfWindow = 250 // 2.5s on each side = 5.0s window
+        val minThreshold = gMean + 0.5f * gStd
+        val threshold = FloatArray(n) { i ->
+            val lo = maxOf(0, i - halfWindow)
+            val hi = minOf(n - 1, i + halfWindow)
+            val len = hi - lo + 1
+            val m = (prefix[hi + 1] - prefix[lo]) / len
+            val v = maxOf(0.0, (prefixSq[hi + 1] - prefixSq[lo]) / len - m * m)
+            val s = sqrt(v)
+            maxOf((m + 1.5 * s).toFloat(), minThreshold)
+        }
+
+        val (eGMean, eGStd) = stats(energyFlux, 0, n)
+        val ePrefix = DoubleArray(n + 1)
+        val ePrefixSq = DoubleArray(n + 1)
+        for (i in 0 until n) {
+            val v = energyFlux[i].toDouble()
+            ePrefix[i + 1] = ePrefix[i] + v
+            ePrefixSq[i + 1] = ePrefixSq[i] + v * v
+        }
+        val eMinThreshold = eGMean + 0.5f * eGStd
+        val eThreshold = FloatArray(n) { i ->
+            val lo = maxOf(0, i - halfWindow)
+            val hi = minOf(n - 1, i + halfWindow)
+            val len = hi - lo + 1
+            val m = (ePrefix[hi + 1] - ePrefix[lo]) / len
+            val v = maxOf(0.0, (ePrefixSq[hi + 1] - ePrefixSq[lo]) / len - m * m)
+            val s = sqrt(v)
+            maxOf((m + 1.5 * s).toFloat(), eMinThreshold)
+        }
+
+        // First onset detected from raw energy flux to preserve exact 10ms hop edge without FFT lookahead
         var firstBeatIdx = -1
         for (i in 0 until n) {
-            if (energyFlux[i] > eThreshold) {
+            if (energyFlux[i] > eThreshold[i]) {
                 firstBeatIdx = i
                 break
             }
@@ -198,88 +230,148 @@ object BpmDetector {
 
         val onsets = extractOnsets(flux, threshold)
 
-        val candidates = sortedSetOf(bestLag, bestLag * 2, round(bestLag / 2.0).toInt())
+        val candidateLags = sortedSetOf(bestLag, bestLag * 2, round(bestLag / 2.0).toInt())
             .filter { it in minLag..maxLag }
-            .map { it to sampleConfidence(detrended, variance, it) }
-        if (candidates.isEmpty()) return null
+        if (candidateLags.isEmpty()) return null
+
+        val candidates = candidateLags.map { it to sampleConfidence(detrended, variance, it) }
         val maxConf = candidates.maxOf { it.second }
-        val onsetPeriods = candidates.associate { (lag, _) -> lag to supportedOnsetPeriod(flux, threshold, lag) }
-        val chosenLag = candidates.firstOrNull { (lag, _) -> onsetPeriods[lag] != null }?.first
-            ?: candidates.firstOrNull { (_, conf) -> conf >= maxConf - 0.35f && conf >= 0.35f }?.first
-            ?: bestLag
+        val candidateSet = candidateLags.toSet()
+
+        val onsetSupport = candidates.associate { (lag, _) ->
+            val autoRefined = refineLag(detrended, variance, lag, minLag, maxLag, n)
+            lag to supportedOnsetPeriod(onsets, lag, autoRefined)
+        }
+
+        // Octave disambiguation:
+        // Evaluate candidate lags in ascending order (faster tempo first).
+        // If candidate lag L is supported, check if double lag 2L is also supported.
+        // If 2L has > 2.2x energy weight (e.g. 8th-note hi-hat vs quarter-note beat),
+        // then 2L is the true fundamental beat. Otherwise, L is confirmed as the beat period.
+        var chosenLag = -1
+        for ((lag, _) in candidates) {
+            val supp = onsetSupport[lag] ?: continue
+            val doubleLag = lag * 2
+            val doubleSupp = onsetSupport[doubleLag]
+            if (doubleSupp != null && doubleSupp.totalWeight > supp.totalWeight * 2.2) {
+                chosenLag = doubleLag
+                break
+            } else {
+                chosenLag = lag
+                break
+            }
+        }
+        if (chosenLag < 0) {
+            chosenLag = candidates.firstOrNull { (_, conf) -> conf >= maxConf - 0.35f && conf >= 0.35f }?.first
+                ?: bestLag
+        }
+
         val (eDetrended, eVariance) = detrend(energyFlux)
         val energyConf = sampleConfidence(eDetrended, eVariance, chosenLag)
         val specConf = sampleConfidence(detrended, variance, chosenLag)
         val rawConf = maxOf(energyConf, specConf)
         val chosenConf = if (onsets.size < 4) 0f else rawConf
-        val chosenRefined = onsetPeriods[chosenLag] ?: refineLag(detrended, variance, chosenLag, n)
-        val (phaseHops, _) = optimizePhaseFromOnsets(onsets, chosenRefined)
-        val bpm = (60_000.0 / (chosenRefined * HOP_MS)).toFloat()
+
+        val chosenRefined = onsetSupport[chosenLag]?.period ?: refineLag(detrended, variance, chosenLag, minLag, maxLag, n)
+        val (refinedPeriod, phaseHops, _) = optimizePhaseAndPeriod(onsets, chosenRefined)
+        val bpm = (60_000.0 / (refinedPeriod * HOP_MS)).toFloat()
         return Detection(bpm, chosenConf, firstBeatIdx, phaseHops)
     }
 
-    private fun supportedOnsetPeriod(flux: FloatArray, threshold: Float, lag: Int): Double? {
-        val onsets = mutableListOf<Double>()
-        var i = 0
-        while (i < flux.size) {
-            if (flux[i] <= threshold) { i++; continue }
-            var weight = 0.0
-            var position = 0.0
-            while (i < flux.size && flux[i] > threshold) {
-                weight += flux[i]
-                position += i * flux[i].toDouble()
-                i++
+    private data class SupportedPeriod(val period: Double, val totalWeight: Double)
+
+    private fun supportedOnsetPeriod(
+        onsets: List<Onset>,
+        lag: Int,
+        autoRefinedLag: Double,
+    ): SupportedPeriod? {
+        if (onsets.size < 4) return null
+        val tol = maxOf(1.5, lag * 0.05)
+
+        val matchedIntervals = mutableListOf<Double>()
+        val matchedWeights = mutableListOf<Double>()
+
+        for (i in onsets.indices) {
+            val o1 = onsets[i]
+            for (j in (i + 1) until onsets.size) {
+                val o2 = onsets[j]
+                val diff = o2.hop - o1.hop
+                if (diff > lag + tol) break
+                if (abs(diff - lag) <= tol) {
+                    matchedIntervals.add(diff)
+                    matchedWeights.add(minOf(o1.weight, o2.weight))
+                }
             }
-            onsets += position / weight
         }
-        val intervals = onsets.zipWithNext { first, second -> second - first }
-        val supported = intervals.filter { abs(it - lag) <= 3.0 }
-        if (supported.size < 4 || supported.size < intervals.size * 0.8) return null
-        return supported.average()
+
+        if (matchedIntervals.size < 4) return null
+        val totalSupportedWeight = matchedWeights.sum()
+
+        // Weighted median of matched intervals
+        val sortedPairs = matchedIntervals.indices.map { matchedIntervals[it] to matchedWeights[it] }
+            .sortedBy { it.first }
+        val halfWeight = totalSupportedWeight / 2.0
+        var acc = 0.0
+        var median = sortedPairs.first().first
+        for ((d, w) in sortedPairs) {
+            acc += w
+            if (acc >= halfWeight) {
+                median = d
+                break
+            }
+        }
+
+        val period = if (abs(median - autoRefinedLag) > autoRefinedLag * 0.05) {
+            autoRefinedLag
+        } else {
+            median
+        }
+        return SupportedPeriod(period, totalSupportedWeight)
     }
 
-    private fun extractOnsets(flux: FloatArray, threshold: Float): List<Pair<Double, Double>> {
-        val onsets = mutableListOf<Pair<Double, Double>>()
+
+    private fun extractOnsets(flux: FloatArray, threshold: FloatArray): List<Onset> {
+        val onsets = mutableListOf<Onset>()
         var i = 0
         while (i < flux.size) {
-            if (flux[i] <= threshold) {
+            if (flux[i] <= threshold[i]) {
                 i++
                 continue
             }
             var sumWeight = 0.0
             var sumPos = 0.0
-            while (i < flux.size && flux[i] > threshold) {
-                val w = (flux[i] - threshold).toDouble()
+            while (i < flux.size && flux[i] > threshold[i]) {
+                val w = (flux[i] - threshold[i]).toDouble()
                 sumWeight += w
                 sumPos += i * w
                 i++
             }
             if (sumWeight > 0.0) {
-                onsets.add((sumPos / sumWeight) to sumWeight)
+                onsets.add(Onset(sumPos / sumWeight, sumWeight))
             }
         }
         return onsets
     }
 
-    private fun optimizePhaseFromOnsets(onsets: List<Pair<Double, Double>>, periodHops: Double): Pair<Double, Float> {
-        if (onsets.isEmpty() || periodHops <= 0.0) return 0.0 to 0f
-        val totalWeight = onsets.sumOf { it.second }
-        if (totalWeight <= 0.0) return 0.0 to 0f
+    private fun optimizePhaseAndPeriod(onsets: List<Onset>, initialPeriod: Double): Triple<Double, Double, Float> {
+        if (onsets.isEmpty() || initialPeriod <= 0.0) return Triple(initialPeriod, 0.0, 0f)
+        val totalWeight = onsets.sumOf { it.weight }
+        if (totalWeight <= 0.0) return Triple(initialPeriod, 0.0, 0f)
 
-        val tolerance = maxOf(2.5, periodHops * 0.20)
+        val tolerance = maxOf(1.5, initialPeriod * 0.10)
         var bestPhi = 0.0
         var bestScore = -1.0
-        val steps = (periodHops * 10).toInt().coerceAtLeast(1)
+        val steps = (initialPeriod * 10).toInt().coerceAtLeast(1)
         for (step in 0 until steps) {
             val phi = step * 0.1
             var score = 0.0
-            for ((t, w) in onsets) {
-                val offset = (t - phi) % periodHops
-                val normOffset = (offset + periodHops) % periodHops
-                val dist = minOf(normOffset, periodHops - normOffset)
+            for (o in onsets) {
+                val offset = (o.hop - phi) % initialPeriod
+                val normOffset = (offset + initialPeriod) % initialPeriod
+                val dist = minOf(normOffset, initialPeriod - normOffset)
                 if (dist < tolerance) {
                     val cosVal = cos(Math.PI * dist / (2.0 * tolerance))
-                    score += w * cosVal * cosVal
+                    score += o.weight * cosVal * cosVal
                 }
             }
             if (score > bestScore) {
@@ -288,24 +380,82 @@ object BpmDetector {
             }
         }
         val alignmentRatio = (bestScore / totalWeight).coerceIn(0.0, 1.0).toFloat()
-        return bestPhi to alignmentRatio
+
+        // Jointly refine period and phase using weighted least squares (WLS) across the full window
+        val (refinedPeriod, refinedPhi) = refinePeriodAndPhaseWls(onsets, initialPeriod, bestPhi)
+        return Triple(refinedPeriod, refinedPhi, alignmentRatio)
+    }
+
+    private fun refinePeriodAndPhaseWls(
+        onsets: List<Onset>,
+        initialPeriod: Double,
+        initialPhase: Double,
+    ): Pair<Double, Double> {
+        if (onsets.size < 4 || initialPeriod <= 0.0) return initialPeriod to initialPhase
+        val tol = maxOf(1.5, initialPeriod * 0.15)
+
+        var sumW = 0.0
+        var sumK = 0.0
+        var sumT = 0.0
+        val valid = mutableListOf<Triple<Double, Double, Double>>() // (k, t, w)
+        val beatIndices = mutableSetOf<Long>()
+
+        for (onset in onsets) {
+            val k = round((onset.hop - initialPhase) / initialPeriod)
+            val expected = initialPhase + k * initialPeriod
+            if (abs(onset.hop - expected) <= tol) {
+                valid.add(Triple(k, onset.hop, onset.weight))
+                beatIndices.add(k.toLong())
+                sumW += onset.weight
+                sumK += onset.weight * k
+                sumT += onset.weight * onset.hop
+            }
+        }
+
+        if (valid.size < 4 || beatIndices.size < 3 || sumW <= 0.0) {
+            return initialPeriod to initialPhase
+        }
+
+        val meanK = sumK / sumW
+        val meanT = sumT / sumW
+
+        var num = 0.0
+        var den = 0.0
+        for ((k, t, w) in valid) {
+            val dk = k - meanK
+            val dt = t - meanT
+            num += w * dk * dt
+            den += w * dk * dk
+        }
+
+        if (den <= 1e-9) return initialPeriod to initialPhase
+        val refinedPeriod = num / den
+        // Allow up to 2% refinement from initial period
+        if (abs(refinedPeriod - initialPeriod) > initialPeriod * 0.02) {
+            return initialPeriod to initialPhase
+        }
+        val refinedPhase = meanT - refinedPeriod * meanK
+        val normPhase = ((refinedPhase % refinedPeriod) + refinedPeriod) % refinedPeriod
+        return refinedPeriod to normPhase
     }
 
     /**
      * Parabolic refinement of the autocorrelation peak at [bestLag]: the three
      * normalized neighbor scores are fitted with a parabola whose vertex gives the
-     * sub-hop peak position, `delta = 0.5(a-c)/(a-2b+c)` in [-1, 1].
-     * Requires strict concavity (denom < 0); falls back to integer lag when degenerate.
+     * sub-hop peak position, `delta = 0.5(a-c)/(a-2b+c)` in [-0.5, 0.5].
+     * Requires strict concavity (denom < 0); falls back to integer lag when degenerate
+     * or when [bestLag] sits on the boundary.
      */
-    private fun refineLag(x: DoubleArray, variance: Double, bestLag: Int, n: Int): Double {
+    private fun refineLag(x: DoubleArray, variance: Double, bestLag: Int, minLag: Int, maxLag: Int, n: Int): Double {
+        if (bestLag <= minLag || bestLag >= maxLag) return bestLag.toDouble()
         val b = normalizedCorrelation(x, variance, bestLag)
-        val a = if (bestLag > 1) normalizedCorrelation(x, variance, bestLag - 1) else b
-        val c = if (bestLag + 1 < n) normalizedCorrelation(x, variance, bestLag + 1) else b
+        val a = normalizedCorrelation(x, variance, bestLag - 1)
+        val c = normalizedCorrelation(x, variance, bestLag + 1)
         val denom = a - 2.0 * b + c
         val scale = maxOf(abs(a), abs(b), abs(c), 1.0)
         if (denom >= -1e-9 * scale) return bestLag.toDouble()
         val delta = 0.5 * (a - c) / denom
-        if (delta < -1.0 || delta > 1.0) return bestLag.toDouble()
+        if (delta < -0.5 || delta > 0.5) return bestLag.toDouble()
         return bestLag + delta
     }
 

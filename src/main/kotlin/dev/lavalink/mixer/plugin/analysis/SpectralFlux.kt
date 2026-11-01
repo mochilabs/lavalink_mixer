@@ -10,48 +10,58 @@ data class FluxWeights(
 )
 
 /**
- * 3-Band Spectral Flux analyzer using [RealFft] (N=2048, Hann window, 10ms hop @ 48kHz).
- * Bands:
- *   Low:  30 ~ 150 Hz   (Bins 2..6)   - Kick drum, sub/bass transients
- *   Mid:  150 ~ 2000 Hz (Bins 7..85)  - Snare, clap, vocal/synth attacks
- *   High: 2000 ~ 10000 Hz (Bins 86..426) - Hi-hats, cymbals, shakers
+ * 3-Band Spectral Flux analyzer using [RealFft] (N=1024, Hann window, ~10ms hop).
+ * To prevent stereo phase cancellation from time-domain downmixing, each channel
+ * is transformed independently and log-magnitudes are averaged across channels.
+ *
+ * Bands (dynamically scaled by sample rate):
+ *   Low:  30 ~ 150 Hz   - Kick drum, sub/bass transients
+ *   Mid:  150 ~ 2000 Hz - Snare, clap, vocal/synth attacks
+ *   High: 2000 ~ 10000 Hz - Hi-hats, cymbals, shakers
  */
 object SpectralFluxAnalyzer {
+    private val log = org.slf4j.LoggerFactory.getLogger(SpectralFluxAnalyzer::class.java)
     private const val FFT_SIZE = 1024
-    private const val HOP_SIZE = 480
-    private const val LOW_BIN_START = 1
-    private const val LOW_BIN_END = 3
-    private const val MID_BIN_START = 4
-    private const val MID_BIN_END = 42
-    private const val HIGH_BIN_START = 43
-    private const val HIGH_BIN_END = 213
 
     private val fft = RealFft(FFT_SIZE)
 
     fun computeSpectralFlux(
         frames: List<Array<FloatArray>>,
+        sampleRate: Int = 48000,
         weights: FluxWeights = FluxWeights(),
     ): FloatArray? {
         if (frames.isEmpty()) return null
         val totalSamples = frames.sumOf { it[0].size.toLong() }.toInt()
-        if (totalSamples < FFT_SIZE) return null
+        if (totalSamples < FFT_SIZE) {
+            log.debug("Frames too short for spectral flux: totalSamples=$totalSamples < FFT_SIZE=$FFT_SIZE")
+            return null
+        }
 
-        // Downmix to mono
-        val mono = FloatArray(totalSamples)
+        val channels = frames[0].size
+        if (channels == 0) return null
+
+        val channelPcm = Array(channels) { FloatArray(totalSamples) }
         var offset = 0
         for (f in frames) {
             val len = f[0].size
-            val channels = f.size
-            for (i in 0 until len) {
-                var s = 0f
-                for (c in 0 until channels) s += f[c][i]
-                mono[offset++] = s / channels
+            val chCount = minOf(channels, f.size)
+            for (c in 0 until chCount) {
+                System.arraycopy(f[c], 0, channelPcm[c], offset, len)
             }
+            offset += len
         }
 
-        val centerOffset = (FFT_SIZE - HOP_SIZE) / 2
-        val nHops = (totalSamples + HOP_SIZE - 1) / HOP_SIZE
+        val hopSize = (sampleRate / 100).coerceAtLeast(1)
+        val centerOffset = (FFT_SIZE - hopSize) / 2
+        val nHops = (totalSamples + hopSize - 1) / hopSize
         if (nHops <= 0) return null
+
+        val lowStart = kotlin.math.round(30.0 * FFT_SIZE / sampleRate).toInt().coerceAtLeast(1)
+        val lowEnd = kotlin.math.round(150.0 * FFT_SIZE / sampleRate).toInt().coerceAtLeast(lowStart)
+        val midStart = lowEnd + 1
+        val midEnd = kotlin.math.round(2000.0 * FFT_SIZE / sampleRate).toInt().coerceAtLeast(midStart)
+        val highStart = midEnd + 1
+        val highEnd = kotlin.math.round(10000.0 * FFT_SIZE / sampleRate).toInt().coerceIn(highStart, FFT_SIZE / 2 - 1)
 
         val lowFlux = FloatArray(nHops)
         val midFlux = FloatArray(nHops)
@@ -59,45 +69,49 @@ object SpectralFluxAnalyzer {
 
         val re = FloatArray(FFT_SIZE)
         val im = FloatArray(FFT_SIZE)
-        val currMags = FloatArray(FFT_SIZE / 2)
-        val currLog = FloatArray(FFT_SIZE / 2)
-        val prevLog = FloatArray(FFT_SIZE / 2)
+        val chMags = FloatArray(FFT_SIZE / 2)
+        val currLogAvg = FloatArray(FFT_SIZE / 2)
+        val prevLogAvg = FloatArray(FFT_SIZE / 2)
         val hann = fft.hannWindow
 
         for (h in 0 until nHops) {
-            val start = h * HOP_SIZE - centerOffset
-            for (i in 0 until FFT_SIZE) {
-                val idx = start + i
-                val s = if (idx in 0 until totalSamples) mono[idx] else 0f
-                re[i] = s * hann[i]
-                im[i] = 0f
-            }
+            val start = h * hopSize - centerOffset
+            java.util.Arrays.fill(currLogAvg, 0f)
 
-            fft.transform(re, im)
-            fft.magnitudes(re, im, currMags)
+            for (c in 0 until channels) {
+                val pcm = channelPcm[c]
+                for (i in 0 until FFT_SIZE) {
+                    val idx = start + i
+                    re[i] = if (idx in 0 until totalSamples) pcm[idx] * hann[i] else 0f
+                    im[i] = 0f
+                }
 
-            for (i in currMags.indices) {
-                currLog[i] = ln(1f + 10f * currMags[i])
+                fft.transform(re, im)
+                fft.magnitudes(re, im, chMags)
+
+                for (i in chMags.indices) {
+                    currLogAvg[i] += ln(1f + 10f * chMags[i]) / channels
+                }
             }
 
             if (h > 0) {
                 var low = 0f
-                for (k in LOW_BIN_START..LOW_BIN_END) {
-                    val d = currLog[k] - prevLog[k]
+                for (k in lowStart..lowEnd) {
+                    val d = currLogAvg[k] - prevLogAvg[k]
                     if (d > 0f) low += d
                 }
                 lowFlux[h] = low
 
                 var mid = 0f
-                for (k in MID_BIN_START..MID_BIN_END) {
-                    val d = currLog[k] - prevLog[k]
+                for (k in midStart..midEnd) {
+                    val d = currLogAvg[k] - prevLogAvg[k]
                     if (d > 0f) mid += d
                 }
                 midFlux[h] = mid
 
                 var high = 0f
-                for (k in HIGH_BIN_START..HIGH_BIN_END) {
-                    val d = currLog[k] - prevLog[k]
+                for (k in highStart..highEnd) {
+                    val d = currLogAvg[k] - prevLogAvg[k]
                     if (d > 0f) high += d
                 }
                 highFlux[h] = high
@@ -107,10 +121,10 @@ object SpectralFluxAnalyzer {
                 highFlux[0] = 0f
             }
 
-            System.arraycopy(currLog, 0, prevLog, 0, currLog.size)
+            System.arraycopy(currLogAvg, 0, prevLogAvg, 0, currLogAvg.size)
         }
 
-        // Standardize each band by its standard deviation
+        // Standardize each band by its standard deviation so low bass doesn't bury high attacks
         val lowStd = stdDev(lowFlux)
         val midStd = stdDev(midFlux)
         val highStd = stdDev(highFlux)

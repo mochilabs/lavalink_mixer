@@ -226,8 +226,8 @@ object BpmDetector {
 
         val onsetPeriods = candidateList.associateWith { lag -> supportedOnsetPeriod(flux, threshold, lag) }
 
-        // Multi-candidate ranking using perceptual tempo prior (centered ~120 BPM)
-        // and subharmonic validation to disambiguate half-tempo / double-tempo octave ties.
+        // Multi-candidate ranking using harmonic comb scoring, perceptual tempo prior
+        // (centered ~120 BPM), and subharmonic validation to disambiguate octave errors.
         fun candidateScore(lag: Int): Float {
             val conf = sampleConfidence(detrended, variance, lag)
             if (conf < 0.04f) return 0f
@@ -236,13 +236,17 @@ object BpmDetector {
             val directOnset = if (onsetPeriods[lag] != null) 0.15f else 0f
             val doubleOnset = if (onsetPeriods[lag * 2] != null) 0.12f else 0f
 
+            val doubleLag = lag * 2
+            val r2 = if (doubleLag < n) sampleConfidence(detrended, variance, doubleLag) else 0f
+            val combConf = conf + 0.40f * maxOf(0f, r2)
+
             // Sub-harmonic check: if half-lag has an active correlation peak,
-            // this lag is likely a 2-beat octave multiple (e.g. 62.5 BPM vs 125 BPM)
+            // this lag is a 2-beat octave multiple (e.g. 62.5 BPM vs 125 BPM)
             val halfLag = round(lag / 2.0).toInt()
             val halfConf = if (halfLag in minLag..maxLag) sampleConfidence(detrended, variance, halfLag) else 0f
-            val harmonicPenalty = if (halfConf >= 0.45f * conf && halfConf > 0.20f) 0.55f else 1.0f
+            val harmonicPenalty = if (halfConf >= 0.40f * conf && halfConf > 0.18f) 0.55f else 1.0f
 
-            return (conf * prior * harmonicPenalty) + directOnset + doubleOnset
+            return (combConf * prior * harmonicPenalty) + directOnset + doubleOnset
         }
 
         val chosenLag = candidateList.maxByOrNull { candidateScore(it) } ?: return null

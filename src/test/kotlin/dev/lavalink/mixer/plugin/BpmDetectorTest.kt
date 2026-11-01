@@ -56,6 +56,55 @@ class BpmDetectorTest {
         return buf
     }
 
+    private fun addSnare(buf: FloatArray, at: Int, amp: Float = 0.4f, seed: Int = 1) {
+        val r = Random(seed)
+        for (k in 0 until (0.08 * sr).toInt()) {
+            val i = at + k
+            if (i >= buf.size) break
+            val env = exp(-k / (0.02 * sr)).toFloat()
+            val tone = sin(2 * PI * 200.0 * k / sr).toFloat() * 0.3f
+            val noise = (r.nextFloat() * 2 - 1) * 0.7f
+            buf[i] += amp * env * (tone + noise)
+        }
+    }
+
+    private fun popDrumTrack(bpm: Double, seconds: Int = 10): FloatArray {
+        val total = seconds * sr
+        val buf = FloatArray(total)
+        val periodSamples = sr * 60.0 / bpm
+        var t = 0.0
+        var beat = 0
+        while (t < total - sr) {
+            val at = t.toInt().coerceIn(0, total - 1)
+            if (beat % 2 == 0) {
+                addKick(buf, at, 0.85f)
+            } else {
+                addSnare(buf, at, 0.40f, seed = beat)
+            }
+            beat++
+            t += periodSamples
+        }
+        return buf
+    }
+
+    @Test
+    fun `pop drum track at 120 bpm is detected as 120 bpm not 60 bpm`() {
+        val buf = popDrumTrack(120.0)
+        val result = BpmDetector.analyze(chunked(buf))
+        assertNotNull(result)
+        println("Detected BPM: ${result.bpm}, confidence: ${result.confidence}")
+        near(result.bpm, 120f, 1.5f)
+    }
+
+    @Test
+    fun `pop drum track at 128 bpm is detected as 128 bpm not 64 bpm`() {
+        val buf = popDrumTrack(128.0)
+        val result = BpmDetector.analyze(chunked(buf))
+        assertNotNull(result)
+        println("Detected BPM: ${result.bpm}, confidence: ${result.confidence}")
+        near(result.bpm, 128f, 1.5f)
+    }
+
     @Test
     fun `120 bpm click track detected`() {
         val r = BpmDetector.analyze(clickTrack(120f, 8))

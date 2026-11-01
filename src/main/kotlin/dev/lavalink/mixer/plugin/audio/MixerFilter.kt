@@ -49,6 +49,9 @@ class MixerFilter(
      * restore), and only one of them may advance mixer state.
      */
     private val feederId: Long = FILTER_SEQ.incrementAndGet()
+    private var subScratch = emptyArray<FloatArray>()
+    private var parallelScratch = emptyArray<FloatArray>()
+    private var overlayScratch = emptyArray<FloatArray>()
 
     override fun process(input: Array<FloatArray>, offset: Int, length: Int) {
         if (length <= 0) return
@@ -115,15 +118,20 @@ class MixerFilter(
             return
         }
 
-        val sub = Array(input.size) { FloatArray(length) }
+        subScratch = ensureScratch(subScratch, input.size, length)
+        val sub = subScratch
         val subSamples = mixer.takeSub(length, input.size, sub)
         mixer.noteSubOutput(subSamples)
         if (subSamples < length) mixer.noteUnderrun(length - subSamples, length)
 
         // Sum each parallel overlay's siphon at its fade-ramp gain.
-        val parallel = if (parallels.isEmpty()) null else Array(input.size) { FloatArray(length) }
+        val parallel = if (parallels.isEmpty()) null else {
+            parallelScratch = ensureScratch(parallelScratch, input.size, length)
+            parallelScratch.also { scratch -> scratch.forEach { it.fill(0f, 0, length) } }
+        }
         if (parallel != null) {
-            val buf = Array(input.size) { FloatArray(length) }
+            overlayScratch = ensureScratch(overlayScratch, input.size, length)
+            val buf = overlayScratch
             for (slot in parallels) {
                 slot.siphon.take(length, input.size, buf)
                 val g = slot.ramp.current
@@ -141,9 +149,16 @@ class MixerFilter(
             val end = offset + length
             for (i in offset until end) {
                 var sum = channel[i] * gains.main + subChannel[i - offset] * gains.sub
-                if (parallel != null) sum += parallel[c][i]
+                if (parallel != null) sum += parallel[c][i - offset]
                 channel[i] = softLimit(sum)
             }
+        }
+    }
+
+    private fun ensureScratch(buffer: Array<FloatArray>, channels: Int, samples: Int): Array<FloatArray> {
+        if (buffer.size == channels && buffer.all { it.size >= samples }) return buffer
+        return Array(channels) { channel ->
+            buffer.getOrNull(channel)?.takeIf { it.size >= samples } ?: FloatArray(samples)
         }
     }
 

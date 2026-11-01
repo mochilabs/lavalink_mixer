@@ -854,6 +854,9 @@ class GuildMixer(
 
     /** Test seam: count currently active parallel overlay slots. */
     internal fun parallelOverlayCountForTest(): Int = synchronized(lock) { parallelOverlays.size }
+    internal fun installParallelOverlayForTest(slot: OverlaySlot) {
+        synchronized(lock) { parallelOverlays[slot.id] = slot }
+    }
 
     /** Test seam: simulate [count] active parallel slots without players (for the limit check). */
     internal fun armParallelForTest(count: Int) {

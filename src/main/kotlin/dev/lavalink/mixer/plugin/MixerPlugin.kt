@@ -82,7 +82,7 @@ class MixerPlugin(
         identifier: String?,
         encodedTrack: String?,
         duck: Float?,
-        mode: GuildMixer.AnnounceMode = GuildMixer.AnnounceMode.SEQUENTIAL,
+        mode: AnnounceMode = AnnounceMode.SEQUENTIAL,
     ): Pair<Long, Int> {
         val mixer = getOrCreate(guildId)
         return mixer.enqueueAnnouncement(identifier, encodedTrack, duck ?: mixer.duckLevel, mode)

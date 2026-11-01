@@ -1,8 +1,12 @@
 package dev.lavalink.mixer.plugin
 
+import com.sedmelluq.discord.lavaplayer.track.AudioTrack
 import dev.arbjerg.lavalink.api.IPlayer
 import dev.arbjerg.lavalink.api.ISocketContext
 import dev.arbjerg.lavalink.api.PluginEventHandler
+import kotlinx.serialization.json.JsonObjectBuilder
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 
@@ -48,3 +52,51 @@ class MixerEvents(private val plugin: MixerPlugin) : PluginEventHandler() {
         private val log = LoggerFactory.getLogger(MixerEvents::class.java)
     }
 }
+
+internal fun idOf(track: AudioTrack): String? = try {
+    track.identifier
+} catch (e: Exception) {
+    null
+}
+
+internal fun titleOf(track: AudioTrack): String = try {
+    track.info.title ?: track.info.identifier
+} catch (e: Exception) {
+    "unknown"
+}
+
+internal fun JsonObjectBuilder.putTrack(track: AudioTrack?) {
+    if (track == null) return
+    put(
+        "track",
+        buildJsonObject {
+            put("identifier", idOf(track))
+            put("title", try { track.info.title } catch (e: Exception) { null })
+        },
+    )
+}
+
+/**
+ * Pushes a custom `{op: "mixer"}` websocket message to the client session
+ * owning the main player.
+ */
+internal fun sendMixerEvent(main: IPlayer?, guildId: Long, type: String, body: JsonObjectBuilder.() -> Unit) {
+    val context = try {
+        main?.socketContext
+    } catch (e: Exception) {
+        null
+    } ?: return
+    val payload = buildJsonObject {
+        put("op", "mixer")
+        put("type", type)
+        put("guildId", guildId.toString())
+        body()
+    }
+    try {
+        context.sendMessage(payload)
+    } catch (e: Exception) {
+        eventLog.debug("mixer event '{}' delivery failed on guild {}: {}", type, guildId, e.toString())
+    }
+}
+
+private val eventLog = LoggerFactory.getLogger("dev.lavalink.mixer.plugin.MixerEvents")

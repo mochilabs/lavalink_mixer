@@ -37,10 +37,12 @@ dependencies {
     compileOnly("dev.arbjerg.lavalink:plugin-api:4.2.2")
     // Must match the Lavaplayer version the server runs.
     compileOnly("dev.arbjerg:lavaplayer:2.2.6")
+    compileOnly("dev.arbjerg:lavadsp:0.7.8")
     // compileOnly is not inherited by tests in Gradle; tests also execute code
     // touching these APIs, so they need runtime presence too.
     testImplementation("dev.arbjerg.lavalink:plugin-api:4.2.2")
     testImplementation("dev.arbjerg:lavaplayer:2.2.6")
+    testImplementation("dev.arbjerg:lavadsp:0.7.8")
 
     testImplementation("org.jetbrains.kotlin:kotlin-test-junit5:2.1.20")
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.3")
@@ -58,6 +60,23 @@ kotlin {
 }
 
 tasks {
+    register<JavaExec>("bpmCalibration") {
+        group = "verification"
+        description = "Measure head/tail BPM grids for local WAV files (opt-in)."
+        dependsOn("testClasses")
+        classpath = sourceSets["test"].runtimeClasspath
+        mainClass.set("dev.lavalink.mixer.plugin.BpmCalibration")
+        doFirst {
+            val audioDir = providers.gradleProperty("audioDir").orNull
+                ?: throw GradleException("Provide -PaudioDir=/absolute/path/to/wavs")
+            args(
+                audioDir,
+                providers.gradleProperty("scanMs").getOrElse("30000"),
+                providers.gradleProperty("outputFile").getOrElse("build/bpm-measurements.tsv"),
+            )
+        }
+    }
+
     named<Test>("test") {
         useJUnitPlatform()
     }

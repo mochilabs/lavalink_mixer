@@ -121,8 +121,8 @@ class AnnounceQueueTest {
             plugin.getOrCreate(guildId).attachMain(iPlayer(guildId, player, socket.context))
 
             // Two parallel announcements: both may start concurrently.
-            plugin.announce(guildId, fileA.absolutePath, null, 0.2f, GuildMixer.AnnounceMode.PARALLEL)
-            plugin.announce(guildId, fileB.absolutePath, null, 0.2f, GuildMixer.AnnounceMode.PARALLEL)
+            plugin.announce(guildId, fileA.absolutePath, null, 0.2f, AnnounceMode.PARALLEL)
+            plugin.announce(guildId, fileB.absolutePath, null, 0.2f, AnnounceMode.PARALLEL)
 
             val mixer = plugin.find(guildId)!!
             try {
@@ -145,16 +145,16 @@ class AnnounceQueueTest {
     @Test
     fun `parallel mode respects the max overlay limit`() {
         val mixer = GuildMixer(52L, manager(), MixerConfig().apply { maxParallelOverlays = 2 }, java.util.concurrent.Executor { it.run() })
-        mixer.enqueueAnnouncement("a", null, 0.2f, GuildMixer.AnnounceMode.PARALLEL)
-        mixer.enqueueAnnouncement("b", null, 0.2f, GuildMixer.AnnounceMode.PARALLEL)
-        mixer.enqueueAnnouncement("c", null, 0.2f, GuildMixer.AnnounceMode.PARALLEL)
+        mixer.enqueueAnnouncement("a", null, 0.2f, AnnounceMode.PARALLEL)
+        mixer.enqueueAnnouncement("b", null, 0.2f, AnnounceMode.PARALLEL)
+        mixer.enqueueAnnouncement("c", null, 0.2f, AnnounceMode.PARALLEL)
 
         // Two parallel slots fit; the third waits (announcementResolving gates a single pop at a time).
         val first = mixer.takeNextAnnouncement()
-        assertEquals(GuildMixer.AnnounceMode.PARALLEL, first?.mode)
+        assertEquals(AnnounceMode.PARALLEL, first?.mode)
         mixer.onAnnouncementStarted(first!!)
         val second = mixer.takeNextAnnouncement()
-        assertEquals(GuildMixer.AnnounceMode.PARALLEL, second?.mode)
+        assertEquals(AnnounceMode.PARALLEL, second?.mode)
         mixer.onAnnouncementStarted(second!!)
         // Once the two slots are "active" (simulated), the third cannot pop.
         mixer.armParallelForTest(2)

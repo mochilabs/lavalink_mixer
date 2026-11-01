@@ -10,6 +10,7 @@ import java.io.DataOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
 import kotlin.math.PI
 import kotlin.math.sin
@@ -27,6 +28,45 @@ import kotlin.test.assertTrue
  */
 class DeferredAnalysisTest {
     private val sampleRate = 48000
+
+    @Test
+    fun `BPM-only scan deferred by baseline retries a ready track and accepts no beats as complete`() {
+        val manager = manager()
+        val baselineFile = toneFile("mixer-bpm-baseline", 440.0, 2)
+        val silentFile = toneFile("mixer-bpm-deferred-silent", 0.0, 8)
+        val tasks = ArrayDeque<Runnable>()
+        val mixer = GuildMixer(32L, manager, MixerConfig().apply {
+            bpmDetectionEnabled = true
+            beatmatchEnabled = true
+            bpmScanMs = 5000
+        }, Executor { tasks.addLast(it) })
+        try {
+            val baseline = loadTrack(manager, baselineFile)
+            val incoming = loadTrack(manager, silentFile)
+            mixer.queueNext(CompletableFuture.completedFuture(incoming))
+            assertEquals("ready", mixer.analysisState(), "BPM analysis must not block playback readiness")
+            mixer.scheduleBaselineAnalysis(baseline)
+            assertEquals(1, tasks.size, "baseline work must remain queued while incoming analysis is attempted")
+            mixer.analyzeBlocking(incoming.makeClone())
+            assertNull(mixer.maybeRetryAnalysis(), "another scan is still active")
+
+            tasks.removeFirst().run()
+            val retry = assertNotNull(mixer.maybeRetryAnalysis(), "the deferred BPM-only scan was lost after the track became ready")
+            assertEquals(incoming.identifier, retry.identifier)
+            mixer.analyzeBlocking(retry)
+
+            assertEquals("ready", mixer.analysisState())
+            assertNull(mixer.peekNextBeatGrid(), "silence must not acquire a fabricated beat grid")
+            // Wait past the 250 ms retry throttle so it cannot hide an endless retry.
+            Thread.sleep(300)
+            assertNull(mixer.maybeRetryAnalysis(), "a successful no-beat result must finish the scan")
+        } finally {
+            mixer.destroy()
+            manager.shutdown()
+            baselineFile.delete()
+            silentFile.delete()
+        }
+    }
 
     @Test
     fun `analysis completes and promotes the pending slot without a live overlap deferring it`() {

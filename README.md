@@ -110,7 +110,7 @@ mixer:
 
 ### 1. Beat-Matched AutoMix
 The AutoMix engine runs an isolated, pure Kotlin analysis pass on incoming and outgoing tracks:
-- **Radix-2 Real FFT (N=1024)** with Hann windowing for zero-allocation spectral analysis.
+- **Radix-2 Real FFT (N=2048)** with Hann windowing for zero-allocation spectral analysis.
   - Multi-channel processing: transforms each channel independently and averages log magnitudes ($L_t(k) = \ln(1 + 10 \cdot |X_t(k)|)$) to avoid stereo phase cancellation.
   - Dynamic sample-rate support: dynamically scales hop size ($\sim 10\text{ms}$) and frequency bin boundaries for 48kHz, 44.1kHz, etc.
   - Standardized band fusion: scales each band by its standard deviation ($SF_{\text{band}} / \sigma_{\text{band}}$) so low-end bass cannot bury snare or hi-hat attacks.

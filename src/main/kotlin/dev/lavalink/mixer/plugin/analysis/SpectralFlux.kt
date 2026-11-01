@@ -10,7 +10,7 @@ data class FluxWeights(
 )
 
 /**
- * 3-Band Spectral Flux analyzer using [RealFft] (N=1024, Hann window, ~10ms hop).
+ * 3-Band Spectral Flux analyzer using [RealFft] (N=2048, Hann window, ~10ms hop).
  * To prevent stereo phase cancellation from time-domain downmixing, each channel
  * is transformed independently and log-magnitudes are averaged across channels.
  *
@@ -21,7 +21,7 @@ data class FluxWeights(
  */
 object SpectralFluxAnalyzer {
     private val log = org.slf4j.LoggerFactory.getLogger(SpectralFluxAnalyzer::class.java)
-    private const val FFT_SIZE = 1024
+    private const val FFT_SIZE = 2048
 
     private val fft = RealFft(FFT_SIZE)
 

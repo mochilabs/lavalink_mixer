@@ -111,27 +111,46 @@ mixer:
 ### 1. Beat-Matched AutoMix
 The AutoMix engine runs an isolated, pure Kotlin analysis pass on incoming and outgoing tracks:
 - **Radix-2 Real FFT (N=2048)** with Hann windowing for zero-allocation spectral analysis.
-- **3-Band Spectral Flux**:
   - **Low (30–150 Hz)**: Isolates kick drums and sub-bass transients.
   - **Mid (150–2,000 Hz)**: Tracks snares, claps, and instrumental attacks.
   - **High (2,000–10,000 Hz)**: Tracks hi-hats, cymbals, and shakers.
+
+$$
+SF_{\text{band}}(t) = \sum_{k \in \text{band}} \max\left(0, |X_t(k)| - |X_{t-1}(k)|\right)
+$$
+
 - **Normalized Autocorrelation**: Unbiased tempo candidate estimation (60–200 BPM) with harmonic octave scoring to prevent half/double-tempo errors.
-- **Global Phase Optimization**: Fits the entire onset energy pattern across the analysis window to locate the exact beat phase within the period `[0, T)`, completely immune to rogue opening clicks, breath sounds, or trailing reverbs.
+- **Global Phase Optimization**: Fits the entire onset energy pattern across the analysis window to locate the optimal beat phase $\phi^* \in [0, T)$, completely immune to rogue opening clicks, breath sounds, or trailing reverbs:
+
+$$
+\phi^* = \arg\max_{\phi \in [0, T)} \sum_i w_i \cdot K(d(t_i, \phi, T))
+$$
+
 - **Boundary Silence Awareness**: Automatically trims encoding delays and leading/trailing silence, aligning the beat grids directly across the audible portions of both tracks.
 - **Tempo Transition & Recovery**: If tempos differ within `maxTempoChange` (e.g. 124 BPM → 126 BPM), the secondary track's tempo is stretched using `lavadsp` timescale during the crossfade. Once the outgoing track fades out, the incoming track smoothly returns to its native 1.0 tempo.
 
 ### 2. Equal-Power Crossfade with Soft-Knee Limiting
-During a crossfade, summing two full-scale audio sources can produce amplitudes up to +3 dB (1.41×). Rather than hard-clipping into distortion:
-- Follows equal-power gain curves: `g_out² + g_in² = 1`.
-- Any combined signal excursion above `0.9` is compressed smoothly with a soft-knee curve toward `1.0`. A 1.41× peak lands at ~0.98 (an inaudible ~0.14 dB compression), preserving natural transients without square-wave clipping.
+During a crossfade, summing two full-scale audio sources can produce amplitudes up to $+3\text{ dB}$ ($1.41\times$). Rather than hard-clipping into distortion:
+- Follows equal-power gain curves:
+
+$$
+g_{\text{out}}^2 + g_{\text{in}}^2 = 1
+$$
+
+- Any combined signal excursion above `0.9` is compressed smoothly with a soft-knee curve toward `1.0`. A $1.41\times$ peak lands at $\approx 0.98$ (an inaudible $\approx 0.14\text{ dB}$ compression), preserving natural transients without square-wave clipping.
 
 ### 3. Smart Silence Skipping
 - **Pre-Analysis Pass**: Traces audio forward from `0ms` to detect the true start of audio (skipping MP3/container delays) and backwards from the track end to identify where music terminates.
 - **Real-Time Detection**: Continuously monitors PCM peaks in the mixer filter. If a track (or unseekable live stream) goes silent for `tailConfirmMs`, playback advances immediately rather than playing silence.
 
 ### 4. EBU R128 Loudness Normalization
-- Implements ITU-R BS.1770-4 K-weighting filtering with 400ms momentary windows (75% overlap) and dual-gating (-70 LUFS absolute, -10 LU relative).
-- Computes integrated loudness and applies linear digital scaling to meet `targetLufs` (default -14.0 LUFS).
+- Implements ITU-R BS.1770-4 K-weighting filtering with 400ms momentary windows (75% overlap) and dual-gating ($-70\text{ LUFS}$ absolute, $-10\text{ LU}$ relative).
+- Computes integrated loudness and applies linear digital scaling to meet `targetLufs` (default $-14.0\text{ LUFS}$):
+
+$$
+G = \min\left(1.0, 10^{\frac{\text{targetLufs} - \text{measuredLufs}}{20}}\right)
+$$
+
 - Clamped to `MAX_GAIN = 1.0` by default to prevent digital clipping on quiet tracks.
 
 ### 5. TTS / Announcement Overlays

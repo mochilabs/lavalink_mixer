@@ -148,6 +148,16 @@ components:
           type: boolean
           default: false
           description: Set true if the client has no next track (server enters NO_NEXT state)
+        preserveTransition:
+          type: boolean
+          default: false
+          description: Explicit intent to preserve this track boundary (for example continuous album playback). Disables overlap, boundary trimming and incoming fade-in for this arm. Included in the idempotency fingerprint; cleared by replacement arm/invalidate/reset.
+    AnalyzeRequest:
+      type: object
+      required: [guildId, encodedTrack]
+      properties:
+        guildId: { type: string }
+        encodedTrack: { type: string }
     ArmResponse:
       type: object
       required: [state, epoch]
@@ -267,6 +277,17 @@ components:
         nextTrackGain: { type: [number, 'null'], format: float }
         nextTrackGainDb: { type: [number, 'null'], format: float }
         bpmDetectionEnabled: { type: boolean }
+        adaptiveTransitionsSupported: { type: boolean, const: true }
+        currentTrackBpm:
+          type: [number, 'null']
+          description: Cached original tempo of the current main track, not the temporarily stretched playback rate. Null when detection is disabled or no result exists.
+        currentTrackBpmIdentifier:
+          type: [string, 'null']
+          description: Track identifier captured atomically with currentTrackBpm. Clients must compare it to their confirmed current track before displaying the value.
+        transitionKind:
+          type: string
+          description: Most recently selected transition (none, preserve, silence_trim, short_crossfade, crossfade, beat_matched).
+        decisionReason: { type: [string, 'null'] }
         nextTrackBpm:
           type: [number, 'null']
           format: float
@@ -405,6 +426,12 @@ components:
         op: { type: string, const: mixer }
         type: { type: string }
         guildId: { type: string }
+        transitionKind:
+          type: string
+          description: Selected transition kind on overlap and advance events.
+        decisionReason:
+          type: string
+          description: Optional diagnostic reason on overlap and advance events; not a closed enum.
     BeatmatchFallbackReason:
       type: string
       description: |
@@ -470,6 +497,8 @@ components:
             type: { const: overlapStart }
             crossfadeMs: { type: integer, format: int64 }
             handoffInMs: { type: integer, format: int64, minimum: 0 }
+            overlapMs: { type: integer, format: int64, description: Duration of the two-track gain fade. }
+            recoveryMs: { type: integer, format: int64, description: Incoming-only tempo recovery after the outgoing gain reaches zero. }
             beatMatched: { type: boolean }
             fadeBeats: { type: integer, enum: [2, 4, 8], description: "Present when beatMatched is true." }
             targetBpm: { type: number, description: "Outgoing tempo; present when beatMatched is true." }
@@ -687,6 +716,34 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+  /mixer/analyze:
+    post:
+      operationId: preanalyze
+      summary: Warm BPM and adaptive feature caches without arming playback
+      description: |
+        Optional best-effort warmup before the normal JIT arm. Requires BPM detection
+        and a seekable, known-length track. At most one warmup is queued per guild;
+        busy, disabled, already cached or unsupported tracks return accepted=false.
+        A 202 receipt does not mean analysis succeeded. Normal JIT analysis remains
+        the fallback. No epoch or Idempotency-Key is required: results are track-keyed
+        cache metadata and never create or replace an armed slot.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AnalyzeRequest' }
+      responses:
+        '202':
+          description: Warmup receipt
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accepted]
+                properties:
+                  accepted: { type: boolean }
+        '400': { description: Invalid guild ID or encoded track }
+
   /mixer/state:
     get:
       operationId: getState

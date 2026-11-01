@@ -30,6 +30,8 @@ internal object AnalysisCaches {
     val bpm = BoundedCache<BpmDetector.BpmResult>()
     val bpmHead = BoundedCache<BeatGrid>()
     val bpmTail = BoundedCache<BeatGrid>()
+    val featuresHead = BoundedCache<TransitionFeatures>()
+    val featuresTail = BoundedCache<TransitionFeatures>()
 
     fun trimFor(track: AudioTrack): TrimPoints {
         val id = idOf(track) ?: return TrimPoints.NONE

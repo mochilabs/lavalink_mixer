@@ -60,6 +60,8 @@ internal class ProtocolController(
         internal set
     var armedEncodedTrack: String? = null
         internal set
+    var preserveTransition: Boolean = false
+        internal set
     var armedEpoch: Long = 0L
         internal set
     var armedHandoffId: String? = null
@@ -81,6 +83,7 @@ internal class ProtocolController(
 
     fun clearArmedLocked() {
         armedTrack = null
+        preserveTransition = false
         armedEncodedTrack = null
         armedHandoffId = null
     }
@@ -115,12 +118,13 @@ internal class ProtocolController(
         track: AudioTrack?,
         isEmpty: Boolean,
         rawEncodedTrack: String? = null,
+        preserveTransition: Boolean = false,
     ): ArmResult {
         if (!isEmpty && track == null) {
             return ArmResult.BadRequest("arm with isEmpty=false requires a non-null encodedTrack")
         }
         val canonicalEncoded = if (isEmpty) null else (rawEncodedTrack ?: track?.let { encodeTrackBase64(it) })
-        val fp = "arm|${canonicalEncoded ?: "empty"}"
+        val fp = "arm|${canonicalEncoded ?: "empty"}|preserve=$preserveTransition"
 
         val abortNeeded: Boolean
         synchronized(core.lock) {
@@ -154,6 +158,7 @@ internal class ProtocolController(
             }
 
             core.clearNextLocked()
+            this.preserveTransition = preserveTransition
             armedTrack = track
             armedEncodedTrack = canonicalEncoded
             armedEpoch = epoch

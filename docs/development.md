@@ -49,7 +49,7 @@ Use these existing tests as starting points:
 | Analysis ownership and retries | `AnalysisIsolatedFromLiveSubTest`, `DeferredAnalysisTest` |
 | Silence and trim | `SilenceAnalyzerTest`, `TailCutDeciderTest`, `TrimTransitionTest` |
 | Loudness | `NormalizationGainTest`, `NormalizationBaselineTest`, `NormalizationIntegrationTest` |
-| BPM and beat matching | `BpmDetectorTest`, `BpmGridTest`, `BpmIntegrationTest`, `BeatMatchPolicyTest`, `BeatMatchIntegrationTest`, `BeatMatchOutputTest`, `TempoStretcherTest` |
+| BPM and beat matching | `BpmDetectorTest`, `BpmGridTest`, `BpmIntegrationTest`, `BeatMatchPolicyTest`, `BeatMatchIntegrationTest`, `BeatMatchOutputTest`, `TempoStretcherTest`, `TempoEnvelopeTest`, `AdaptiveRecoveryIntegrationTest`, `AdaptiveRuntimeTest`, `AdaptiveTransitionRaceTest`, `TransitionFeaturesTest`, `AdaptiveTransitionPlannerTest` |
 
 Integration tests generate local WAV files and exercise Lavaplayer players.
 They do not require a running Discord bot. Some tests exercise native audio
@@ -62,6 +62,10 @@ selected tests. For documentation-only changes, check referenced symbols,
 commands, paths, and links against the repository.
 
 ## Verify live integration
+
+For adaptive pair decisions and analysis timing, use the
+[local pair evaluation runner](adaptive-calibration.md). It accepts an explicit
+WAV-pair manifest and preserves uncalibrated/unknown results in its report.
 
 For offline head/tail BPM measurements, use the
 [local calibration runner](bpm-calibration.md). Synthetic smoke checks validate

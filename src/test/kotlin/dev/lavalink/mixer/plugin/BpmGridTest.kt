@@ -61,6 +61,32 @@ class BpmGridTest {
     @Test
     fun `tempo resolution within half bpm at 150`() = assertBpm(150f)
 
+    @Test
+    fun `noninteger hop pulses use adjacent onset evidence instead of half tempo`() {
+        for (bpm in listOf(121f, 123f, 124f, 126f, 128f, 131f, 138f, 167f)) {
+            for (seconds in listOf(5, 8, 16)) {
+                val grid = BpmDetector.analyzeGrid(clickTrack(bpm, seconds)) ?: fail("no grid at $bpm")
+                assertNear(grid.bpm, bpm, 0.6f, "$bpm BPM over $seconds seconds")
+            }
+        }
+    }
+
+    @Test
+    fun `124 bpm pulse remains correct with a partial scan boundary`() {
+        for (offset in listOf(37L, 230L, 451L)) {
+            val grid = BpmDetector.analyzeGrid(clickTrack(124f, 5, offsetMs = offset)) ?: fail("no offset grid")
+            assertNear(grid.bpm, 124f, 0.6f, "offset pulse")
+        }
+    }
+
+    @Test
+    fun `true slow pulses do not acquire nonexistent intervening beats`() {
+        for (bpm in listOf(60f, 62f, 67f, 75f)) {
+            val grid = BpmDetector.analyzeGrid(clickTrack(bpm, 16, jitterMs = 3f)) ?: fail("no slow grid")
+            assertNear(grid.bpm, bpm, 0.5f, "slow pulse")
+        }
+    }
+
     private fun assertBpm(bpm: Float) {
         val grid = BpmDetector.analyzeGrid(clickTrack(bpm, 8))
             ?: fail("no beat grid for $bpm BPM")

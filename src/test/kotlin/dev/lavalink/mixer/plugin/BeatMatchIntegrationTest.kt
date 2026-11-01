@@ -96,12 +96,17 @@ class BeatMatchIntegrationTest {
             player.playTrack(trackA)
             mixer.queueNext(CompletableFuture.completedFuture(trackB))
             mixer.analyzeBlocking(trackB)
+            for (track in listOf(trackA, trackB)) {
+                val features = TransitionFeatures(0, track.duration, emptyList(), 0.2f, 1f,
+                    KeyEstimate.Unknown("synthetic_fixture"), emptyList())
+                AnalysisCaches.featuresHead[track.identifier] = features
+                AnalysisCaches.featuresTail[track.identifier] = features
+            }
 
             var sawOverlap = false
             var overlapStartSample = -1
             var handoffSample = -1
             var wasBeatMatchedDuringOverlap = false
-            var speedDuringOverlap = 1.0
             var handoffCompleted = false
             var subOutAtHandoff = 0L
             var subSrcAtHandoff = 0L
@@ -112,7 +117,6 @@ class BeatMatchIntegrationTest {
                     sawOverlap = true
                     if (mixer.isXfadeBeatMatchedForTest()) {
                         wasBeatMatchedDuringOverlap = true
-                        speedDuringOverlap = mixer.currentSubEffectiveSpeedForTest()
                     }
                 } else if (sawOverlap && !handoffCompleted) {
                     handoffCompleted = true
@@ -127,7 +131,9 @@ class BeatMatchIntegrationTest {
             assertTrue(sawOverlap, "crossfade overlap never armed")
             assertTrue(wasBeatMatchedDuringOverlap, "expected beat-matched overlap")
             // 120.0 / 125.0 = 0.96
-            assertTrue(abs(speedDuringOverlap - 0.96) < 0.01, "expected speed ~0.96 during overlap, got $speedDuringOverlap")
+            // Decoder prefill can already have reached recovery; inspect consumed source instead.
+            assertTrue(subSrcAtHandoff.toDouble() / subOutAtHandoff in 0.95..0.99,
+                "expected integrated source/output ratio between held0.96 and recovered1.0")
             assertEquals(1.0, mixer.currentSubEffectiveSpeedForTest(), 1e-4, "speed should reset to 1.0 after handoff")
             assertTrue(handoffCompleted, "handoff never completed")
             assertTrue(subOutAtHandoff > 0L, "sub output samples should be > 0")
@@ -135,7 +141,7 @@ class BeatMatchIntegrationTest {
             assertTrue(player.playingTrack !== trackA, "outgoing track was never handed off")
 
             val recorded = sink.snapshot()
-            val overlapEndSample = (overlapStartSample + subOutAtHandoff.toInt()).coerceAtMost(recorded.size)
+            val overlapEndSample = (overlapStartSample + subOutAtHandoff.toInt() - sampleRate).coerceAtMost(recorded.size)
             assertTrue(overlapStartSample in 0 until overlapEndSample, "invalid overlap sample bounds: $overlapStartSample..$overlapEndSample")
             val overlapSlice = recorded.copyOfRange(overlapStartSample, overlapEndSample)
             val overlapGrid = BpmDetector.analyzeGrid(listOf(arrayOf(overlapSlice)), sampleRate)
@@ -182,6 +188,12 @@ class BeatMatchIntegrationTest {
             player.playTrack(trackA)
             mixer.queueNext(CompletableFuture.completedFuture(trackB))
             mixer.analyzeBlocking(trackB)
+            for (track in listOf(trackA, trackB)) {
+                val features = TransitionFeatures(0, track.duration, emptyList(), 0.2f, 1f,
+                    KeyEstimate.Unknown("synthetic_fixture"), emptyList())
+                AnalysisCaches.featuresHead[track.identifier] = features
+                AnalysisCaches.featuresTail[track.identifier] = features
+            }
 
             var sawOverlap = false
             var everBeatMatched = false

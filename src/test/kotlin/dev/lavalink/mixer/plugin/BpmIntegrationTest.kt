@@ -27,6 +27,33 @@ class BpmIntegrationTest {
     private val sampleRate = 48000
 
     @Test
+    fun `real cache only scan does not populate normalization or arm playback`() {
+        val manager = manager()
+        val file = clickFile("mixer-cache-only", 124.0, 6)
+        val mixer = GuildMixer(44L, manager, MixerConfig().apply {
+            bpmDetectionEnabled = true
+            normalizationEnabled = true
+            silenceSkipEnabled = true
+            bpmScanMs = 5000
+        }, java.util.concurrent.Executor { it.run() })
+        try {
+            val track = loadTrack(manager, file)
+            mixer.normalizeForTest(0.4f)
+            mixer.analyzeBlocking(track, cacheOnly = true)
+            assertNotNull(AnalysisCaches.featuresHead[track.identifier])
+            assertNotNull(AnalysisCaches.bpmHead[track.identifier])
+            assertNull(AnalysisCaches.norm[track.identifier])
+            assertNull(AnalysisCaches.trim[track.identifier])
+            assertEquals(0.4f, mixer.currentTrackGain())
+            assertTrue(!mixer.hasNext())
+        } finally {
+            mixer.destroy()
+            manager.shutdown()
+            file.delete()
+        }
+    }
+
+    @Test
     fun `enabled bpm detection caches and exposes tempo for a click track`() {
         val manager = manager()
         val file = clickFile("mixer-bpm", 120.0, 8)

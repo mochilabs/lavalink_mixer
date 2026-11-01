@@ -21,7 +21,8 @@ import kotlin.math.sqrt
  *     argmax alone can lock onto a half/double-tempo octave multiple, so the
  *     x2 and x0.5 harmonics of that lag are rescored with the same
  *     normalized-autocorrelation confidence as the winner and the best-
- *     scoring in-range candidate is kept. [analyzeGrid] turns the refined
+ *     scoring in-range candidate is kept unless clustered adjacent onset spacing
+ *     independently supports a shorter octave (avoiding integer-hop bias). [analyzeGrid] turns the refined
  *     period + first onset into a phase-anchored [BeatGrid];
  *     [analyze] keeps the legacy scalar shape.
  *  4. The first onset that clears an adaptive threshold (mean + 1.5 sigma)
@@ -194,12 +195,38 @@ object BpmDetector {
             }
         if (candidates.isEmpty()) return null
         for ((_, conf) in candidates) maxConf = maxOf(maxConf, conf)
-        val chosenLag = candidates.first { (_, conf) -> conf >= maxConf - OCTAVE_TIE_EPS }.first
+        val onsetPeriods = candidates.associate { (lag, _) -> lag to supportedOnsetPeriod(flux, threshold, lag) }
+        // Quantization can favor two periods (e.g. 124 BPM: 48.39 hops vs
+        // 96.77 hops). Actual adjacent onsets disambiguate this octave without
+        // inventing intervening beats for a genuine slow pulse.
+        val chosenLag = candidates.firstOrNull { (lag, _) -> onsetPeriods[lag] != null }?.first
+            ?: candidates.first { (_, conf) -> conf >= maxConf - OCTAVE_TIE_EPS }.first
         val chosenConf = beatConfidence(flux, chosenLag)
-        val chosenRefined = refineLag(flux, chosenLag, n)
+        val chosenRefined = onsetPeriods[chosenLag] ?: refineLag(flux, chosenLag, n)
 
         val bpm = (60_000.0 / (chosenRefined * HOP_MS)).toFloat()
         return Detection(bpm, chosenConf, firstBeatIdx)
+    }
+
+    /** Strong adjacent onset spacings, independent of the autocorrelation octave score. */
+    private fun supportedOnsetPeriod(flux: FloatArray, threshold: Float, lag: Int): Double? {
+        val onsets = mutableListOf<Double>()
+        var i = 0
+        while (i < flux.size) {
+            if (flux[i] <= threshold) { i++; continue }
+            var weight = 0.0
+            var position = 0.0
+            while (i < flux.size && flux[i] > threshold) {
+                weight += flux[i]
+                position += i * flux[i].toDouble()
+                i++
+            }
+            onsets += position / weight
+        }
+        val intervals = onsets.zipWithNext { first, second -> second - first }
+        val supported = intervals.filter { abs(it - lag) <= 3.0 }
+        if (supported.size < 4 || supported.size < intervals.size * 0.8) return null
+        return supported.average()
     }
 
     /** Raw (unnormalized) autocorrelation of the onset signal at one lag. */

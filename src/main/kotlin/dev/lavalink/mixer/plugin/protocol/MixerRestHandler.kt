@@ -27,7 +27,11 @@ data class ArmRequest(
     val epoch: Long,
     val encodedTrack: String? = null,
     val isEmpty: Boolean = false,
+    val preserveTransition: Boolean = false,
 )
+
+@Serializable
+data class AnalyzeRequest(val guildId: String, val encodedTrack: String)
 
 @Serializable
 data class InvalidateRequest(val guildId: String, val epoch: Long)
@@ -184,6 +188,11 @@ data class MixerState(
     /** [nextTrackGain] in dB. */
     val nextTrackGainDb: Float? = null,
     val bpmDetectionEnabled: Boolean = false,
+    val adaptiveTransitionsSupported: Boolean = true,
+    val currentTrackBpm: Float? = null,
+    val currentTrackBpmIdentifier: String? = null,
+    val transitionKind: String = "none",
+    val decisionReason: String? = null,
     /** Detected tempo (BPM) of the queued next track; null while detection is pending or disabled. */
     val nextTrackBpm: Float? = null,
     /** Offset (ms) of the queued track's first detected downbeat; null with [nextTrackBpm]. */
@@ -225,7 +234,7 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
                 throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid encodedTrack: ${e.message}", e)
             }
         }
-        return when (val res = mixer.arm(body.epoch, key, track, body.isEmpty, body.encodedTrack)) {
+        return when (val res = mixer.arm(body.epoch, key, track, body.isEmpty, body.encodedTrack, body.preserveTransition)) {
             is ArmResult.Success -> ResponseEntity.ok(mapOf("state" to res.state.name, "epoch" to res.epoch))
             is ArmResult.Duplicate -> ResponseEntity.ok(mapOf("duplicate" to true))
             is ArmResult.BadRequest -> ResponseEntity.badRequest().body(mapOf("error" to res.message))
@@ -314,6 +323,14 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
     }
 
 
+    @PostMapping("/mixer/analyze")
+    fun analyze(@RequestBody body: AnalyzeRequest): ResponseEntity<Map<String, Boolean>> {
+        val guildId = gid(body.guildId)
+        val track = try { plugin.decodeTrack(body.encodedTrack) }
+        catch (e: Exception) { throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid encodedTrack", e) }
+        return ResponseEntity.accepted().body(mapOf("accepted" to plugin.getOrCreate(guildId).requestPreanalysis(track)))
+    }
+
     @GetMapping("/mixer/state")
     fun state(@RequestParam guildId: Long): ResponseEntity<MixerState> {
         return stateById(guildId.toString(), guildId)
@@ -321,6 +338,8 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
 
     private fun stateById(raw: String, guildId: Long): ResponseEntity<MixerState> {
         val mixer = plugin.getOrCreate(guildId)
+        val tempo = mixer.currentTempo()
+        val transition = mixer.transitionStatus
         return ResponseEntity.ok(
             MixerState(
                 guildId = raw,
@@ -352,6 +371,10 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
                 nextTrackGain = mixer.nextTrackGain(),
                 nextTrackGainDb = mixer.nextTrackGain()?.let { gainToDb(it) },
                 bpmDetectionEnabled = mixer.bpmDetectionEnabled,
+                currentTrackBpm = tempo?.bpm,
+                currentTrackBpmIdentifier = tempo?.identifier,
+                transitionKind = transition.kind,
+                decisionReason = transition.reason,
                 nextTrackBpm = mixer.peekNextBeatGrid()?.bpm ?: mixer.peekNextBpm()?.bpm,
                 nextTrackFirstBeatMs = mixer.peekNextBeatGrid()?.phaseMs ?: mixer.peekNextBpm()?.firstBeatMs,
                 nextTrackPhaseMs = mixer.peekNextBeatGrid()?.phaseMs ?: mixer.peekNextBpm()?.firstBeatMs,

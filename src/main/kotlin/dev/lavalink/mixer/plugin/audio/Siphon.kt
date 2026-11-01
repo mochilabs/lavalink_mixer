@@ -67,6 +67,9 @@ class SiphonQueue(
         }
     }
 
+    /** Furthest captured output position, including samples already read or discarded. */
+    fun capturedOutputEnd(): Long = synchronized(lock) { outputCursor + queuedSamples }
+
     /** Fills [out] (each channel exactly [samples]) from the queue, zero-filling shortfall.
      *  @return samples actually taken from queued audio (excluding zero-fill). */
     fun take(samples: Int, channels: Int, out: Array<FloatArray>): Int =
@@ -211,6 +214,15 @@ class SiphonFactory(
     @Volatile
     var targetSpeed: Double = 1.0
 
+    @Volatile private var tempoEnvelope: TempoEnvelope? = null
+
+    fun configureTempo(initialRate: Double, holdOutputSamples: Long, recoveryOutputSamples: Long) {
+        val profile = TempoEnvelope(initialRate, holdOutputSamples, recoveryOutputSamples)
+        tempoEnvelope = profile
+        targetSpeed = initialRate
+        currentStretcher?.configureTempo(initialRate, holdOutputSamples, recoveryOutputSamples)
+    }
+
     fun addTap(queue: SiphonQueue) {
         taps.addIfAbsent(queue)
     }
@@ -220,11 +232,13 @@ class SiphonFactory(
     }
 
     fun setSpeed(speed: Double) {
+        tempoEnvelope = null
         targetSpeed = speed
         currentStretcher?.updateSpeed(speed)
     }
 
     fun resetSpeed() {
+        tempoEnvelope = null
         targetSpeed = 1.0
         currentStretcher?.reset()
     }
@@ -247,12 +261,13 @@ class SiphonFactory(
             return mutableListOf(SiphonFilter(taps.toList(), output))
         }
         lateinit var stretcher: TempoStretcher
-        val siphonFilter = SiphonFilter(taps.toList(), output) { stretcher.effectiveSpeed }
+        val siphonFilter = SiphonFilter(taps.toList(), output) { stretcher.outputSourceSpeed }
         stretcher = if (timescaleFactory != null) {
             TempoStretcher(siphonFilter, format.channelCount, format.sampleRate, targetSpeed, timescaleFactory)
         } else {
             TempoStretcher(siphonFilter, format.channelCount, format.sampleRate, targetSpeed)
         }
+        tempoEnvelope?.let { stretcher.configureTempo(it.initialRate, it.holdOutputSamples, it.recoveryOutputSamples) }
         currentStretcher = stretcher
         return mutableListOf(stretcher, siphonFilter)
     }

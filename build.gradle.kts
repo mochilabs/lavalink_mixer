@@ -60,6 +60,20 @@ kotlin {
 }
 
 tasks {
+    register<JavaExec>("adaptiveCalibration") {
+        group = "verification"
+        description = "Evaluate adaptive transitions for an explicit local WAV pair manifest."
+        dependsOn("testClasses")
+        classpath = sourceSets["test"].runtimeClasspath
+        mainClass.set("dev.lavalink.mixer.plugin.AdaptiveCalibration")
+        doFirst {
+            args(
+                providers.gradleProperty("pairsFile").orNull ?: throw GradleException("Provide -PpairsFile=/absolute/path/to/pairs.tsv"),
+                providers.gradleProperty("scanMs").getOrElse("30000"),
+                providers.gradleProperty("outputFile").getOrElse("build/adaptive-measurements.tsv"),
+            )
+        }
+    }
     register<JavaExec>("bpmCalibration") {
         group = "verification"
         description = "Measure head/tail BPM grids for local WAV files (opt-in)."

@@ -160,4 +160,24 @@ class BpmDetectorTest {
     fun `too-short input yields no result rather than a low-confidence one`() {
         assertNull(BpmDetector.analyze(chunked(FloatArray(sr / 20))))
     }
+
+    @Test
+    fun `125 bpm track with alternating kick and snare detects true 125 bpm not half tempo 62_5`() {
+        val bpm = 125.0
+        val periodSamples = sr * 60.0 / bpm
+        val buf = FloatArray(samples)
+        var t = 0.0
+        var isKick = true
+        while (t < samples) {
+            val at = t.toInt().coerceIn(0, samples - 1)
+            // Kick on odd beats (loud, 0.9), Snare on even beats (moderate, 0.35)
+            val amp = if (isKick) 0.9f else 0.35f
+            addKick(buf, at, amp)
+            isKick = !isKick
+            t += periodSamples
+        }
+        val result = BpmDetector.analyze(chunked(buf))
+        assertNotNull(result, "should detect tempo")
+        assertTrue(abs(result.bpm - 125f) <= 2.0f, "expected ~125 BPM, got ${result.bpm}")
+    }
 }

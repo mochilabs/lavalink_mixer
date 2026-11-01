@@ -4,6 +4,7 @@ import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.exp
+import kotlin.math.ln
 import kotlin.math.round
 import kotlin.math.sqrt
 /**
@@ -223,24 +224,32 @@ object BpmDetector {
         }
         if (candidateList.isEmpty()) return null
 
-        var maxConf = 0f
-        for (lag in candidateList) {
-            val c = sampleConfidence(detrended, variance, lag)
-            if (c > maxConf) maxConf = c
-        }
         val onsetPeriods = candidateList.associateWith { lag -> supportedOnsetPeriod(flux, threshold, lag) }
 
-        // Multi-candidate ranking:
-        // 1. Supported adjacent onsets take first precedence (avoiding octave jumping)
-        // 2. Candidates within OCTAVE_TIE_EPS of maxConf pick the smallest lag (fastest tempo)
-        val chosenLag = candidateList.firstOrNull { lag -> onsetPeriods[lag] != null }
-            ?: candidateList.filter { lag -> sampleConfidence(detrended, variance, lag) >= maxConf - OCTAVE_TIE_EPS }
-                .minByOrNull { it }
-            ?: candidateList.maxByOrNull { lag -> sampleConfidence(detrended, variance, lag) }
-            ?: return null
+        // Multi-candidate ranking using perceptual tempo prior (centered ~120 BPM)
+        // and subharmonic validation to disambiguate half-tempo / double-tempo octave ties.
+        fun candidateScore(lag: Int): Float {
+            val conf = sampleConfidence(detrended, variance, lag)
+            if (conf < 0.04f) return 0f
+            val bpm = (60_000.0 / (lag * HOP_MS)).toFloat()
+            val prior = tempoPrior(bpm)
+            val directOnset = if (onsetPeriods[lag] != null) 0.15f else 0f
+            val doubleOnset = if (onsetPeriods[lag * 2] != null) 0.12f else 0f
 
+            // Sub-harmonic check: if half-lag has an active correlation peak,
+            // this lag is likely a 2-beat octave multiple (e.g. 62.5 BPM vs 125 BPM)
+            val halfLag = round(lag / 2.0).toInt()
+            val halfConf = if (halfLag in minLag..maxLag) sampleConfidence(detrended, variance, halfLag) else 0f
+            val harmonicPenalty = if (halfConf >= 0.45f * conf && halfConf > 0.20f) 0.55f else 1.0f
+
+            return (conf * prior * harmonicPenalty) + directOnset + doubleOnset
+        }
+
+        val chosenLag = candidateList.maxByOrNull { candidateScore(it) } ?: return null
         val chosenConf = sampleConfidence(detrended, variance, chosenLag)
-        val chosenRefined = onsetPeriods[chosenLag] ?: refineLag(detrended, variance, chosenLag, n)
+        val chosenRefined = onsetPeriods[chosenLag]
+            ?: onsetPeriods[chosenLag * 2]?.let { it / 2.0 }
+            ?: refineLag(detrended, variance, chosenLag, n)
         val (phaseHops, phaseAlignment) = optimizePhase(flux, threshold, chosenRefined)
         val ioiRatio = supportedOnsetRatio(flux, threshold, chosenLag)
         val calibratedConf = if (chosenConf < 0.15f) chosenConf else (chosenConf * (0.80f + 0.20f * phaseAlignment)).coerceIn(0f, 1f)
@@ -438,5 +447,10 @@ object BpmDetector {
         }
         val std = sqrt(varAcc / (to - from))
         return mean.toFloat() to std.toFloat()
+    }
+
+    private fun tempoPrior(bpm: Float): Float {
+        val logBpm = (ln(bpm.toDouble() / 120.0) / ln(2.0)).toFloat()
+        return exp(-0.5f * (logBpm / 0.70f) * (logBpm / 0.70f))
     }
 }

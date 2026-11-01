@@ -38,6 +38,11 @@ class MixerPlugin(
     private var tick: Long = 0
 
     init {
+        log.info(
+            "mixer-plugin loaded: version={} protocolVersion={}",
+            MixerVersion.version,
+            MixerVersion.PROTOCOL_VERSION,
+        )
         scheduler.scheduleAtFixedRate(::loop, 0, 20, TimeUnit.MILLISECONDS)
     }
 

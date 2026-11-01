@@ -217,7 +217,12 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
 
     @GetMapping("/mixer/info")
     fun info(): ResponseEntity<PluginInfoResponse> =
-        ResponseEntity.ok(PluginInfoResponse(protocolVersion = 2, version = "1.1.0"))
+        ResponseEntity.ok(
+            PluginInfoResponse(
+                protocolVersion = MixerVersion.PROTOCOL_VERSION,
+                version = MixerVersion.version,
+            )
+        )
 
     @PostMapping("/mixer/queue/arm")
     fun arm(

@@ -96,6 +96,10 @@ tasks {
     }
 
     processResources {
+        // The version token must invalidate this task when the version changes;
+        // otherwise an incremental build reuses stale @version@ output (the
+        // descriptor keeps the previous version while the JAR name changes).
+        inputs.property("version", project.version.toString())
         filter(ReplaceTokens::class, mapOf("tokens" to mapOf("version" to project.version.toString())))
     }
 

@@ -179,8 +179,9 @@ is clamped to 1–16 per guild.
   the arm before analysis finishes.
 - The README describes the engine as single-threaded. The state lock coordinates
   several callback and executor threads.
-- `/mixer/info` currently returns a hard-coded version of `1.1.0`.
-  The JAR descriptor uses the Gradle-resolved version instead.
+- `/mixer/info` returns the version resolved from the packaged plugin
+  descriptor, which Gradle fills from the build version; the value matches the
+  running JAR.
 - The Maven publication uses `dev.lavalink.mixer:mixer-plugin`, which differs
   from the README quickstart's `dev.lavalink.mixer:mixer:1.0.0` example.
 - The beat-matching plan describes work that is already implemented. Current

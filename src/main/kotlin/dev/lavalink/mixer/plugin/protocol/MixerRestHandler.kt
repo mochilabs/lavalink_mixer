@@ -153,55 +153,55 @@ data class MixerState(
     val fadeInMs: Long,
     val duckLevel: Float,
     /** Wire protocol version of this plugin's control plane. */
-    val protocolVersion: Int = 2,
+    val protocolVersion: Int,
     /** v2 state-machine name, identical to [playbackState] ("IDLE"|"PLAYING"|"ARMED"|"NO_NEXT"). */
-    val state: String = "IDLE",
+    val state: String,
     /** Raw PlaybackState enum name, kept for backward compatibility with v1 clients. */
-    val playbackState: String = "IDLE",
+    val playbackState: String,
     /** Highest epoch the mixer has accepted (v2 protocol bookkeeping). */
-    val lastKnownEpoch: Long = 0L,
-    val normalizationEnabled: Boolean = false,
+    val lastKnownEpoch: Long,
+    val normalizationEnabled: Boolean,
     val silenceEnabled: Boolean,
     val silenceThresholdDb: Float,
     val tailConfirmMs: Long,
     /** [leadMs, trailMs] of the queued track when already analyzed, else null. */
-    val nextTrimMs: List<Long>? = null,
+    val nextTrimMs: List<Long>?,
     /** Identifier of the queued next track (pending or ready), so clients can verify server-side ownership. */
-    val nextTrackIdentifier: String? = null,
-    val nextTrackTitle: String? = null,
+    val nextTrackIdentifier: String?,
+    val nextTrackTitle: String?,
     /** Silence-analysis progress of the queued next track: idle | pending | analyzing | ready. */
-    val analysisState: String = "idle",
+    val analysisState: String,
     /** Identifier of the armed overlay/overlap sub track, while the secondary decoder is in use. */
-    val subTrackIdentifier: String? = null,
+    val subTrackIdentifier: String?,
     /** False once the heartbeat probe proved the mixer filter never entered the running track's chain. */
-    val mixerFilterActive: Boolean = true,
+    val mixerFilterActive: Boolean,
     /** Milliseconds until an armed overlap hands off; null when no crossfade is running. */
-    val crossfadeHandoffInMs: Long? = null,
+    val crossfadeHandoffInMs: Long?,
     /** Announcements (TTS/overlay) waiting for the secondary player, in queue order. */
-    val announcementsQueued: Int = 0,
+    val announcementsQueued: Int,
     /** Applied gain of the currently playing main track (1 while unknown/disabled). */
-    val currentTrackGain: Float = 1f,
+    val currentTrackGain: Float,
     /** [currentTrackGain] in dB (negative = attenuated). */
-    val currentTrackGainDb: Float = 0f,
+    val currentTrackGainDb: Float,
     /** Analyzed gain of the queued next track; null while analysis is pending. */
-    val nextTrackGain: Float? = null,
+    val nextTrackGain: Float?,
     /** [nextTrackGain] in dB. */
-    val nextTrackGainDb: Float? = null,
-    val bpmDetectionEnabled: Boolean = false,
-    val adaptiveTransitionsSupported: Boolean = true,
-    val currentTrackBpm: Float? = null,
-    val currentTrackBpmIdentifier: String? = null,
-    val transitionKind: String = "none",
-    val decisionReason: String? = null,
+    val nextTrackGainDb: Float?,
+    val bpmDetectionEnabled: Boolean,
+    val adaptiveTransitionsSupported: Boolean,
+    val currentTrackBpm: Float?,
+    val currentTrackBpmIdentifier: String?,
+    val transitionKind: String,
+    val decisionReason: String?,
     /** Detected tempo (BPM) of the queued next track; null while detection is pending or disabled. */
-    val nextTrackBpm: Float? = null,
+    val nextTrackBpm: Float?,
     /** Offset (ms) of the queued track's first detected downbeat; null with [nextTrackBpm]. */
-    val nextTrackFirstBeatMs: Long? = null,
-    val nextTrackPhaseMs: Long? = null,
-    val nextTrackBpmConfidence: Float? = null,
-    val beatmatchEnabled: Boolean = false,
-    val maxTempoChange: Float = 0.06f,
-    val beatmatchMinConfidence: Float = 0.30f,
+    val nextTrackFirstBeatMs: Long?,
+    val nextTrackPhaseMs: Long?,
+    val nextTrackBpmConfidence: Float?,
+    val beatmatchEnabled: Boolean,
+    val maxTempoChange: Float,
+    val beatmatchMinConfidence: Float,
 )
 
 /**
@@ -376,6 +376,7 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
                 nextTrackGain = mixer.nextTrackGain(),
                 nextTrackGainDb = mixer.nextTrackGain()?.let { gainToDb(it) },
                 bpmDetectionEnabled = mixer.bpmDetectionEnabled,
+                adaptiveTransitionsSupported = true,
                 currentTrackBpm = tempo?.bpm,
                 currentTrackBpmIdentifier = tempo?.identifier,
                 transitionKind = transition.kind,

@@ -1,5 +1,7 @@
 # lavalink_mixer
 
+[English](README.md) | [한국어](README.ko.md)
+
 [![Release](https://img.shields.io/github/v/release/mochilabs/lavalink_mixer?color=blue&label=release)](https://github.com/mochilabs/lavalink_mixer/releases/latest)
 [![License](https://img.shields.io/badge/license-Unlicense-green)](UNLICENSE)
 [![Lavalink](https://img.shields.io/badge/Lavalink-v4-orange)](https://github.com/lavalink-devs/Lavalink)

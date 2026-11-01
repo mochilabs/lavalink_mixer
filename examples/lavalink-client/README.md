@@ -1,8 +1,14 @@
 # mixer-plugin × lavalink-client (Tomato6966) — bot wiring guide
 
-From zero to a working bot with **gapless queue + crossfade + silence
-skipping + TTS overlay**. `mixerPlugin.ts` is the drop-in wiring used in
-step 4/5; tested against lavalink-client v2.9+ API.
+The current server uses mixer protocol v2. The bundled `mixerPlugin.ts`
+helper still uses the removed v1 `/mixer/queue/next` endpoints and does not
+handle v2 JIT events or epochs. Do not use its queue and skip methods with
+the current plugin until the helper is migrated.
+
+The setup snippets below preserve the legacy helper API for reference.
+The [protocol-v2 event flow](#protocol-v2-event-flow) and AutoMix REST examples
+describe the current server contract. See the [REST specification](../../api/openapi.yaml)
+for request bodies and error handling.
 
 ## What you need
 
@@ -93,10 +99,47 @@ client.login(process.env.TOKEN);
 
 ## Step 5 — Play something
 
+### Optional: enable beat-matched AutoMix
+
+Before arming tracks for a guild, enable crossfade, BPM detection, and beat
+matching. The mixer filter must also be active for that guild.
+Both BPM detection and beat matching default to disabled.
+
+Send the following JSON bodies to the player's Lavalink node with its normal
+`Authorization` header and `Content-Type: application/json`. Replace `"123"`
+with the guild ID as a string:
+
+```http
+POST /mixer/crossfade
+{"guildId":"123","enabled":true,"durationMs":5000}
+
+POST /mixer/bpm
+{"guildId":"123","enabled":true,"beatmatchEnabled":true,"scanMs":30000,"maxTempoChange":0.06,"minConfidence":0.30}
+```
+
+These are plugin REST requests, not additional `attachMixer` options.
+They do not need an `Idempotency-Key`. Reapply per-guild settings when the
+server creates a new mixer after player destruction, unless server defaults
+already enable them.
+
+`POST /mixer/beatmatch` changes only beat-matching settings. It does not enable
+BPM analysis. Confirm `crossfadeEnabled`, `bpmDetectionEnabled`, and
+`beatmatchEnabled` through `mixer.state(player)` or `GET /mixer/state`.
+Keep `autoSkip: false`; the plugin still owns advancement.
+
+Listen for `overlapStart` and `overlapEnd` on the raw-message hook.
+`beatMatched: false` with `bpm_disabled` means analysis is off. Missing grids,
+low confidence, or incompatible tempos also fall back to ordinary crossfade
+when available. Configure the feature before playback and allow analysis time;
+the server does not hold playback until a beat grid is ready.
+
+### Start playback
+
 First track: play normally — `queue.add()` + `player.play()`. The
-`trackStart` handler (inside `attachMixer`) enables the mixer filter for
-the guild and preloads the successor automatically. Every track after that
-is started **by the server** — your code never sends `play` on trackEnd.
+legacy `attachMixer` handler enables the mixer filter but then calls the
+removed v1 preload endpoint. A protocol-v2 adapter must instead respond to
+`MixerNeedNextTrackEvent` as described below. Do not independently send
+`play` on `trackEnd` when the server owns the transition.
 
 ```ts
 client.on("interactionCreate", async (i) => {
@@ -146,67 +189,53 @@ client.on("interactionCreate", async (i) => {
 });
 ```
 
-That's the whole integration. From here the server owns transitions:
-current track ends → the preloaded next track starts instantly
-(lead-trimmed, crossfaded) → `trackStart` fires on the bot → the client
-queue is synced and the next successor is preloaded. No `play` sent by you.
-
-## Event flow (what happens under the hood)
+## Protocol-v2 event flow
 
 ```
-trackStart(A) → enable mixer filter (once) → POST /mixer/queue/next (B)
-A content ends → server starts B instantly (lead-trimmed, crossfaded)
-trackStart(B) → client queue synced (no play sent!) → POST /mixer/queue/next (C)
+Enable the mixer filter and start A
+MixerNeedNextTrackEvent → POST /mixer/queue/arm for B with epoch and Idempotency-Key
+Server advances to B → MixerAdvancedEvent → synchronize the client queue
+MixerNeedNextTrackEvent for B → arm C
 ```
 
-"Content ends" means `duration - trailingSilence`, not file end: detected
-trailing silence is never played or crossfaded. With crossfade enabled the
-overlap covers audible content only, and the handoff lands exactly at
-content end. Without crossfade (or for streams) the server cuts to B at the
-last audible sample.
+The JIT request normally arrives when `crossfadeMs + 7000` ms remain.
+Respond with `isEmpty: true` if no next track exists. On a queue change,
+send `/mixer/queue/invalidate` with a newer epoch. On a skip or stop,
+send `/mixer/queue/override` with `PLAY_NOW` or `STOP`.
+Each control request needs an `Idempotency-Key`; reuse a key only for retries
+of the same operation. Follow reset and conflict handling in the REST specification.
 
-- `trackEnd` → the wiring does nothing if we preloaded (server took over);
-  a watchdog resumes via `player.skip()` if no `trackStart` follows in ~5s
-  (`confirmTimeoutMs`).
-- `trackError`/`trackStuck` → same treatment (the server advances on
-  `LOAD_FAILED` too, and its own stuck failover hands off / advances before
-  the event even reaches you).
-- queue empty at `trackEnd` → normal `queueEnd` flow, untouched.
+The server can use analyzed trailing silence to advance before file end.
+Beat matching can place the handoff on an earlier beat. Keep the client queue
+in sync with `MixerAdvancedEvent` and retain `autoSkip: false`.
 
-## Trim timing: pending → ready
+## Analysis and playback readiness
 
-`POST /mixer/queue/next` returns as soon as the track loads; silence
-analysis finishes async. Check `GET /mixer/state` via `mixer.state(player)`:
+`POST /mixer/queue/arm` accepts the next track and schedules analysis.
+`ARMED` does not mean analysis has finished. Check `GET /mixer/state`:
 
-- `hasNext: true`, `nextTrimMs: null` → queued but still analyzing
-  ("pending"). The server still advances gaplessly, but without trim.
-- `nextTrimMs: [leadMs, trailMs]` → analysis done ("ready"). The upcoming
-  transition uses both ends.
+- `hasNext: true` means a next-track slot exists.
+- `nextTrimMs` reports cached trim points when available.
+- `nextTrackBpmConfidence` and `nextTrackPhaseMs` report available BPM analysis.
 
-Queue early (right after `trackStart`, which is what `attachMixer` does) so
-analysis usually finishes before the transition. If analysis is still
-running at content end, the server advances anyway (degraded, no trim)
-rather than playing silence. Crossfade overlap itself waits for analysis to
-release the sub player; a slow analysis degrades that one transition to a
-cut.
+Analysis uses a dedicated player, separate from the live crossfade and
+announcement player. Reply promptly to the JIT request to give analysis time.
+If measurements are unavailable at the transition, playback proceeds using
+the available trim and ordinary transition fallback. It does not wait for BPM analysis.
 
 First-track caveat: the track you start with plain `player.play()` never
 went through the preload slot, so its own leading silence is only skipped
 if its trim was already cached from an earlier preload. Every
 server-advanced track after that gets lead-trimmed automatically.
 
-## User skip — use the handle, not `player.skip()`
+## User skip in protocol v2
 
-```ts
-await mixer.skip(player);
-```
+Use `/mixer/queue/override` with a newer epoch and an `Idempotency-Key`.
+For `PLAY_NOW`, include the selected track's `encodedTrack`. The server
+clears its armed slot and replaces playback. Use `STOP` when stopping playback.
+The legacy `mixer.skip()` method below must be migrated before use with v2.
 
-Direct `player.skip()` leaves a stale preloaded track that the server would
-replay at the next track end. `mixer.skip()` clears the slot first
-(`DELETE /mixer/queue/next`), then skips; the coming `trackStart`
-re-preloads the new successor.
-
-## API of the returned handle
+## Legacy helper API
 
 | Call | Effect |
 |---|---|
@@ -220,7 +249,7 @@ re-preloads the new successor.
 search prefix). Prefer `encodedTrack` (the exact base64 you already have) —
 no re-resolution.
 
-## Rules you must not break
+## Legacy helper assumptions
 
 1. **`autoSkip: false`** — the server advances tracks itself.
 2. **Never send `play` on trackEnd** for server-advanced tracks — the
@@ -238,18 +267,15 @@ no re-resolution.
 
 ## Troubleshooting
 
-- **TrackStuck events**: with the current plugin build the server fails
-  over on its own (handoff during crossfade, gapless advance when a track
-  is queued) before the stuck event reaches you. A stuck event therefore
-  means: no queued track and no crossfade — the wiring's watchdog resumes
-  via `player.skip()` within ~5s. If it keeps happening, check the server
-  logs for the real stall (slow source / rate limit).
-- **409 on announce** — secondary player busy (crossfade overlap / overlay
-  / silence analysis running) → retry later, or
-  `mixer.cancelAnnounce(player)` + retry. `nextTrimMs` appearing in
-  `mixer.state()` means the sub player is free again.
-- **Preload failed silently** — the watchdog covers it, but check the
-  server logs; unreferenceable upcoming tracks are logged and skipped.
+- **TrackStuck events**: inspect server logs and `/mixer/state` before
+  issuing a recovery command. A protocol-v2 adapter must account for any
+  server-driven advance before it overrides playback. The legacy watchdog
+  is not a v2 recovery implementation.
+- **Announcement timing**: sequential announcements share the live secondary
+  player with crossfades. Analysis uses a separate player; `nextTrimMs` does
+  not indicate whether the live secondary player is free.
+- **Arming failed**: inspect the HTTP response, epoch, and reset window.
+  The legacy helper's `/mixer/queue/next` calls cannot arm a v2 track.
 - **No audible effect at all** — the mixer filter must be in the chain:
   check `player.filterManager.data.pluginFilters.mixer` exists (the wiring
   enables it on `playerCreate`/`trackStart`).
@@ -263,8 +289,8 @@ console.log(await mixer.state(player));
 ```
 
 `nextTrimMs` appears once silence analysis of the queued track finishes
-(see "Trim timing" above). `hasNext` is true from queue time, even while
+(see "Analysis and playback readiness" above). `hasNext` is true from queue time, even while
 `nextTrimMs` is still null.
 
-Server-side REST reference: [`api/openapi.yaml`](../api/openapi.yaml) ·
-plugin internals: [`../README.md`](../README.md)
+Server-side REST reference: [`api/openapi.yaml`](../../api/openapi.yaml) ·
+plugin internals: [`README.md`](../../README.md)

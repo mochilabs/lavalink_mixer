@@ -228,4 +228,39 @@ class TempoStretcherTest {
         assertEquals(1.0, factory.effectiveSpeed)
         assertFalse(factory.isTimescaleActive)
     }
+    @Test
+    fun `native processing failure preserves source progress of previously queued stretched PCM`() {
+        val queue = SiphonQueue()
+        var calls = 0
+        val factory = SiphonFactory(queue, enableTimescale = true, timescaleFactory = { downstream, _, _ ->
+            object : com.sedmelluq.discord.lavaplayer.filter.FloatPcmAudioFilter {
+                override fun process(input: Array<FloatArray>, offset: Int, length: Int) {
+                    if (++calls > 1) throw UnsatisfiedLinkError("processing failed after initial output")
+                    downstream.process(input, offset, length)
+                }
+                override fun seekPerformed(requestedTime: Long, providedTime: Long) = Unit
+                override fun flush() = Unit
+                override fun close() = Unit
+            }
+        })
+        factory.setSpeed(0.96)
+        val output = Proxy.newProxyInstance(
+            UniversalPcmAudioFilter::class.java.classLoader,
+            arrayOf(UniversalPcmAudioFilter::class.java),
+        ) { _, _, _ -> null } as UniversalPcmAudioFilter
+        val chain = factory.buildChain(null, StandardAudioDataFormats.DISCORD_PCM_S16_LE, output)
+        val input = chain.first() as com.sedmelluq.discord.lavaplayer.filter.FloatPcmAudioFilter
+        input.process(Array(2) { FloatArray(100) { 0.25f } }, 0, 100)
+        input.process(Array(2) { FloatArray(100) { 0.5f } }, 0, 100)
+        assertTrue(factory.nativeFailed)
+        assertEquals(1.0, factory.effectiveSpeed)
+
+        val mixed = Array(2) { FloatArray(200) }
+        val read = queue.takeWithSource(200, 2, mixed)
+        assertEquals(200, read.outputSamples)
+        assertEquals(196_000L, read.sourceMilliSamples)
+        assertContentEquals(FloatArray(100) { 0.25f } + FloatArray(100) { 0.5f }, mixed[0])
+        chain.forEach { it.close() }
+    }
+
 }

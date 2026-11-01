@@ -60,6 +60,23 @@ kotlin {
 }
 
 tasks {
+    register<JavaExec>("bpmCalibration") {
+        group = "verification"
+        description = "Measure head/tail BPM grids for local WAV files (opt-in)."
+        dependsOn("testClasses")
+        classpath = sourceSets["test"].runtimeClasspath
+        mainClass.set("dev.lavalink.mixer.plugin.BpmCalibration")
+        doFirst {
+            val audioDir = providers.gradleProperty("audioDir").orNull
+                ?: throw GradleException("Provide -PaudioDir=/absolute/path/to/wavs")
+            args(
+                audioDir,
+                providers.gradleProperty("scanMs").getOrElse("30000"),
+                providers.gradleProperty("outputFile").getOrElse("build/bpm-measurements.tsv"),
+            )
+        }
+    }
+
     named<Test>("test") {
         useJUnitPlatform()
     }

@@ -9,7 +9,10 @@ Built against `dev.arbjerg.lavalink:plugin-api:4.2.2` + `dev.arbjerg:lavaplayer:
 (Java 17). Protocol Version 2 (JIT Prefetch & Generation Epoch Fencing).
 
 - Machine-readable REST spec for agents/tools: [`api/openapi.yaml`](api/openapi.yaml)
-- Bot-side wiring for Tomato6966/lavalink-client: [`examples/lavalink-client/`](examples/lavalink-client/)
+- Protocol-v2 integration notes and legacy client helper: [`examples/lavalink-client/`](examples/lavalink-client/)
+- AI contributor instructions: [`AGENTS.md`](AGENTS.md)
+- Implementation reference: [`docs/architecture.md`](docs/architecture.md)
+- Build and verification guide: [`docs/development.md`](docs/development.md)
 
 ## Why Protocol v2 (JIT Prefetch & Epoch Fencing)
 
@@ -73,9 +76,42 @@ mixer:
   tailConfirmMs: 1000
   bpmDetectionEnabled: false
   bpmScanMs: 30000
+  beatmatchEnabled: false
+  maxTempoChange: 0.06
+  beatmatchMinConfidence: 0.30
   analysisThreads: 2
   maxParallelOverlays: 4
 ```
+
+### Enable beat-matched AutoMix
+
+Beat matching is opt-in. It requires the mixer filter and all three settings:
+`crossfadeEnabled`, `bpmDetectionEnabled`, and `beatmatchEnabled`.
+Enable these before arming tracks so analysis has time to finish.
+
+For one guild, send these requests to the Lavalink server with its normal
+`Authorization` header and `Content-Type: application/json`:
+
+```http
+POST /mixer/crossfade
+{"guildId":"123","enabled":true,"durationMs":5000}
+
+POST /mixer/bpm
+{"guildId":"123","enabled":true,"beatmatchEnabled":true,"scanMs":30000,"maxTempoChange":0.06,"minConfidence":0.30}
+```
+
+`POST /mixer/beatmatch` changes beat matching without changing BPM detection.
+Calling it with `enabled: true` alone does not enable analysis.
+These configuration requests do not require an `Idempotency-Key`.
+Check the three flags in `GET /mixer/state?guildId=123` after configuration.
+
+An enabled feature does not guarantee a beat-matched transition. Missing grids,
+low confidence, excessive tempo difference, or an unsuitable fade window use
+ordinary equal-power crossfade when available. For example, `bpm_disabled`
+means BPM detection is off, and `missing_outgoing_grid` means no outgoing grid
+was available when the transition was planned. Inspect `beatMatched` and
+`fallbackReason` on the overlap events. If crossfade is disabled or cannot be
+planned, playback uses the existing non-overlap advance path.
 
 ## How it works
 
@@ -174,10 +210,10 @@ If the same key is replayed with a different payload, the request is rejected wi
   measurement copy of PCM; the output signal is only scaled by the resulting
   linear gain.
 - **Beat-matched AutoMix & Tempo detection** (`/mixer/bpm`, `/mixer/beatmatch`):
-  A preloaded track decodes its head `bpmScanMs` window (default 30s) and runs a pure-Kotlin
+  A preloaded track decodes head and tail `bpmScanMs` windows (default 30s) and runs a pure-Kotlin
   energy-flux onset + lag autocorrelation to estimate tempo (BPM) and beat grid phase offset (ms),
   exposed via `/mixer/state` as `nextTrackBpm` / `nextTrackPhaseMs` (`nextTrackFirstBeatMs`).
-  When `beatmatchEnabled = true`, outgoing and incoming beat grids align kicks across 2, 4, or 8
+  With crossfade, BPM detection, and beat matching enabled, outgoing and incoming beat grids align kicks across 2, 4, or 8
   beats using producer-side timescale time-stretching (`SoundTouch` via `TempoStretcher`) within `maxTempoChange` (clamped up to 0.12).
   If tempo difference exceeds `maxTempoChange` or confidence is below `minConfidence`, it cleanly falls back
   to equal-power crossfading (`fallbackReason` reported on `overlapStart`/`overlapEnd`).

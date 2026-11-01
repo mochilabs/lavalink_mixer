@@ -5,34 +5,58 @@ info:
   description: |
     Control plane for the Lavalink mixer-plugin (gapless queue, overlap
     crossfade, TTS/announcement overlay with ducking, silence skipping,
-    volume normalization).
+    volume normalization, BPM analysis, and beat-matched AutoMix).
+    The info.version above identifies this API document; it is not the JAR version.
 
     PROTOCOL V2 — JIT PREFETCH & EPOCH FENCING.
     AGENT WORKFLOW (follow this order per guild):
     1. Enable audio output once per guild via the Lavalink WebSocket `filters`
        op: `{ "op": "filters", "guildId": "<id>",
        "pluginFilters": { "mixer": { "guildId": "<id>" } } }`.
-       Without this step every endpoint below still works, but nothing is audible.
+       Without this filter, mixer effects are not applied; ordinary main audio can still play.
     2. Optionally tune per-guild behavior: POST /mixer/crossfade,
        POST /mixer/fade-in, POST /mixer/normalization, POST /mixer/silence,
-       POST /mixer/bpm.
+       POST /mixer/bpm and POST /mixer/beatmatch.
+       Beat-matched AutoMix requires crossfadeEnabled, bpmDetectionEnabled,
+       and beatmatchEnabled. BPM detection and beat matching default to off.
+       POST /mixer/bpm can enable detection and beat matching together.
+       POST /mixer/beatmatch does not enable BPM detection.
     3. Track transitions are driven by the server: the plugin fires
        `MixerNeedNextTrackEvent` when ~7s + crossfadeMs remain. The client
        MUST respond by POSTing to `queue/arm` with the next track and the
        expected monotonic epoch. If the user changes the queue, the client
        sends `queue/invalidate`. On explicit user stops/skips, the client
        sends `queue/override`. No client `play()` calls are needed for
-       transition (Cold Start fallback is handled by plugin's standard FINISHED
-       propagation if the client has turned both crossfade and gapless off).
+       server-driven transitions. The client starts initial playback and keeps
+       its queue synchronized with MixerAdvancedEvent. Disable client auto-skip
+       to avoid racing the server. The bundled TypeScript helper is legacy v1.
     4. Inspect with GET /mixer/state.
 
     All guildIds are strings (snowflakes exceed 2^53, JSON numbers would lose precision).
-    All durations are milliseconds.
+    All durations are milliseconds. Configuration endpoints return the updated
+    MixerState. Omitted optional configuration values preserve the current setting;
+    supplied numeric values are clamped as documented, not rejected for range alone.
+
+    Only arm, invalidate, override, and reset require Idempotency-Key. Keys are
+    arbitrary strings, scoped per guild; UUIDs are a client convention, not a
+    validated format. The server retains 64 recent fingerprints in memory.
+    A retained matching key returns a duplicate response before epoch/window checks.
+    A mismatched fingerprint returns HTTP 422. Fingerprints are operation-specific,
+    not full JSON hashes: arm uses the encoded track or empty marker, invalidate
+    uses the operation name, override uses action plus encoded track, and reset
+    uses the supplied epoch. For arm, invalidate, and override, new keys with
+    equal epochs are accepted; lower epochs return HTTP 409. Use a new key for each new logical command.
+    Reset clears prior keys and retains its own key. This is not durable
+    exactly-once delivery across eviction, reset, or process restart.
+
+    Beat-match phase is a track-relative beat-grid coordinate, not a musical
+    downbeat. An ARMED or ready track may still lack BPM analysis. Missing or
+    unsuitable grids fall back without waiting for analysis to finish.
 
     WEBSOCKET EVENTS (push, custom `op: "mixer"`):
     The plugin pushes `{ "op": "mixer", ... }` frames to the Lavalink WebSocket
     session owning the guild's player. Consume them on the client's raw-message hook
-    (e.g. lavalink-client: `NodeManager.on("raw")`).
+    through a handler that supports protocol v2.
     - `{"op":"mixer","type":"MixerNeedNextTrackEvent","guildId":"<id>",
        "remainingMs":<ms>,"currentTrackEncoded":"<base64>"}`
       - JIT event fired at T_window (crossfadeMs + 7000ms) before track end.
@@ -40,7 +64,8 @@ info:
        "encodedTrack":"<base64>","handoffType":"CROSSFADE"|"GAPLESS",
        "handoffId":"<uuid>"}`
       - The server has handed off playback to the next track. The client
-        must call notifyQueueMutated to sync its queue.
+        must synchronize its local queue without starting the same track again.
+        handoffId is included only for CROSSFADE.
     - `{"op":"mixer","type":"MixerOverriddenEvent","guildId":"<id>","epoch":<n>,
        "requestId":"<idemKey>","action":"STOP"|"PLAY_NOW"}`
       - A user or admin stop/skip command has executed on the engine.
@@ -52,11 +77,16 @@ info:
        "beatMatched":<bool>,"fallbackReason":"...","detail":"<abort reason, when aborted>",
        "track":{"identifier":"...","title":"..."}}`
       - the overlap handed off, or was torn down (client replace/stop).
+        A native failure after overlapStart can make overlapEnd report
+        beatMatched=false and fallbackReason=timescale_native_failed.
     - `{"op":"mixer","type":"announceStart","guildId":"<id>","announcementId":<id>,
        "track":{"identifier":"...","title":"..."}}`
-      - a queued announcement started talking over the music.
+      - a queued announcement started. Parallel starts also include mode="parallel".
     - `{"op":"mixer","type":"announceEnd","guildId":"<id>"}`
       - the overlay ended (natural end, cancel, or sub failure).
+        Parallel end events include announcementId; sequential ends omit it.
+    WebSocket payload schemas are listed under components.schemas.MixerEvent.
+    These are messages on the existing Lavalink socket, not HTTP webhook routes.
 servers:
   - url: http://localhost:2333
     description: Lavalink server (same host/port/auth as the v4 API)
@@ -72,13 +102,13 @@ components:
   schemas:
     Error:
       type: object
-      required: [message]
+      description: Explicit protocol error body. Framework-generated errors may use a different shape.
+      required: [error]
       properties:
-        message: { type: string }
-        status: { type: integer }
+        error: { type: string }
     ConflictError:
       type: object
-      required: [error]
+      required: [error, lastKnownEpoch]
       properties:
         error:
           type: string
@@ -86,15 +116,20 @@ components:
         lastKnownEpoch:
           type: integer
           format: int64
-          description: The newest epoch the server has accepted. Only present for STALE_EPOCH errors.
+          description: The newest epoch the server has accepted. Present for both conflict kinds.
         windowOpenAt:
           type: integer
           format: int64
           description: The exact timestamp when the post-reset grace window opens on the server. Only present for PRE_RESET_ARRIVAL errors.
+        v2WindowOpenAt:
+          type: integer
+          format: int64
+          description: Compatibility alias of windowOpenAt, present on PRE_RESET_ARRIVAL.
     DuplicateResponse:
       type: object
+      required: [duplicate]
       properties:
-        duplicate: { type: boolean }
+        duplicate: { type: boolean, const: true }
     ArmRequest:
       type: object
       required: [guildId, epoch]
@@ -108,7 +143,7 @@ components:
           description: Monotonic client epoch (must be >= server lastKnownEpoch)
         encodedTrack:
           type: [string, 'null']
-          description: Exact Lavalink base64 track (preferred — no re-resolution). Null when arming an empty slot.
+          description: Exact Lavalink base64 track. Required when isEmpty is false; omit or use null for an empty slot. Supplied values are decoded even when isEmpty is true.
         isEmpty:
           type: boolean
           default: false
@@ -137,7 +172,7 @@ components:
         epoch: { type: integer, format: int64 }
         refiredNeedNext:
           type: boolean
-          description: True if the server refired a JIT event because the current track is in the handoff window.
+          description: True when a JIT refire was scheduled. Dispatch can be suppressed by deduplication or a superseding transition.
     OverrideRequest:
       type: object
       required: [guildId, epoch, action]
@@ -169,12 +204,14 @@ components:
           type: integer
           format: int64
           default: 1500
-          description: How long the server rejects incoming arm/invalidate/override calls after this reset (to prevent stale client replay).
+          description: Grace window for new arm/invalidate/override keys. Values <= 0 disable it. Retained duplicate keys are checked before this window.
     ResetResponse:
       type: object
-      required: [lastKnownEpoch]
+      required: [lastKnownEpoch, protocolVersion]
       properties:
         lastKnownEpoch: { type: integer, format: int64 }
+        protocolVersion: { type: integer, const: 2 }
+        duplicate: { type: boolean, const: true, description: "Present only for a retained duplicate reset." }
     TrackInfo:
       type: object
       properties:
@@ -188,9 +225,15 @@ components:
         source: { type: string }
     MixerState:
       type: object
+      description: Current configuration and playback snapshot; not an analysis-completion acknowledgement.
       properties:
+        protocolVersion: { type: integer, const: 2 }
+        state:
+          type: string
+          enum: [IDLE, PLAYING, ARMED, NO_NEXT]
+          description: Protocol state, identical to playbackState. ARMED does not mean analysis is complete.
         guildId: { type: string }
-        hasNext: { type: boolean, description: A preloaded next track is waiting (pending or ready) }
+        hasNext: { type: boolean, description: "A preloaded next track is waiting (pending or ready)" }
         overlayActive: { type: boolean }
         crossfadeActive: { type: boolean }
         crossfadeEnabled: { type: boolean }
@@ -203,14 +246,18 @@ components:
         tailConfirmMs: { type: integer, format: int64 }
         nextTrimMs:
           type: [array, 'null']
+          description: "[leading silence ms, trailing silence ms]; null if no nonzero trim result is available."
+          minItems: 2
+          maxItems: 2
           prefixItems:
-            - { type: integer }
-            - { type: integer }
+            - { type: integer, format: int64 }
+            - { type: integer, format: int64 }
         nextTrackIdentifier: { type: [string, 'null'] }
         nextTrackTitle: { type: [string, 'null'] }
         analysisState:
           type: string
           enum: [idle, pending, analyzing, ready]
+          description: Analysis activity and queue readiness. ready does not guarantee a BPM grid; analyzing can describe a baseline scan.
         subTrackIdentifier: { type: [string, 'null'] }
         mixerFilterActive: { type: boolean }
         crossfadeHandoffInMs: { type: [integer, 'null'], format: int64 }
@@ -223,21 +270,21 @@ components:
         nextTrackBpm:
           type: [number, 'null']
           format: float
-          description: Detected tempo (BPM) of the queued next track; null while detection is pending or disabled.
+          description: Detected tempo of the queued track; null when disabled, absent, pending, or no usable beat result was found.
         nextTrackFirstBeatMs:
           type: [integer, 'null']
           format: int64
-          description: Offset (ms) of the queued track's first detected downbeat; null with nextTrackBpm.
+          description: Compatibility alias of nextTrackPhaseMs. Not a musical downbeat; retained for existing clients.
         nextTrackPhaseMs:
           type: [integer, 'null']
           format: int64
-          description: Beat grid phase offset (ms), not musical downbeat.
+          description: Track-relative beat-grid phase in milliseconds, with legacy first-onset fallback when no grid is cached. Not a musical downbeat.
         nextTrackBpmConfidence:
           type: [number, 'null']
           format: float
         beatmatchEnabled: { type: boolean }
-        maxTempoChange: { type: number, format: float }
-        beatmatchMinConfidence: { type: number, format: float }
+        maxTempoChange: { type: number, format: float, minimum: 0, maximum: 0.12 }
+        beatmatchMinConfidence: { type: number, format: float, minimum: 0, maximum: 1 }
         playbackState:
           type: string
           enum: [IDLE, PLAYING, ARMED, NO_NEXT]
@@ -251,24 +298,26 @@ components:
       properties:
         guildId: { type: string }
         enabled: { type: boolean }
-        durationMs: { type: integer, format: int64 }
+        durationMs: { type: [integer, 'null'], format: int64, description: "Clamped to [500, 30000] ms when supplied." }
     FadeInRequest:
       type: object
       required: [guildId, durationMs]
       properties:
         guildId: { type: string }
-        durationMs: { type: integer, format: int64 }
+        durationMs: { type: integer, format: int64, description: "Clamped to [0, 10000] ms; zero disables fade-in." }
     AnnounceRequest:
+      description: Provide a nonblank identifier or encodedTrack. Encoded track takes precedence; loading occurs when the queued item starts.
       type: object
       required: [guildId]
       properties:
         guildId: { type: string }
-        identifier: { type: string }
-        encodedTrack: { type: string }
-        duckLevel: { type: number, format: float }
+        identifier: { type: [string, 'null'] }
+        encodedTrack: { type: [string, 'null'] }
+        duckLevel: { type: [number, 'null'], format: float }
         mode:
-          type: string
-          enum: [sequential, parallel]
+          type: [string, 'null']
+          examples: [sequential, parallel]
+          description: Case-insensitive; omitted, null, or empty uses sequential. Other values return 400.
           default: sequential
     AnnounceQueuedResponse:
       type: object
@@ -276,7 +325,7 @@ components:
       properties:
         guildId: { type: string }
         id: { type: integer, format: int64 }
-        position: { type: integer }
+        position: { type: integer, minimum: 1, description: "Queue position at enqueue time." }
         queueLength: { type: integer }
     AnnounceCancelRequest:
       type: object
@@ -289,11 +338,11 @@ components:
       properties:
         guildId: { type: string }
         enabled: { type: boolean }
-        thresholdDb: { type: number, format: float }
-        minSoundMs: { type: integer, format: int64 }
-        headScanMs: { type: integer, format: int64 }
-        tailScanMs: { type: integer, format: int64 }
-        tailConfirmMs: { type: integer, format: int64 }
+        thresholdDb: { type: [number, 'null'], format: float, description: "Clamped to [-90, -20] dB when supplied." }
+        minSoundMs: { type: [integer, 'null'], format: int64, description: "Clamped to [20, 2000] ms when supplied." }
+        headScanMs: { type: [integer, 'null'], format: int64, description: "Clamped to [1000, 60000] ms when supplied." }
+        tailScanMs: { type: [integer, 'null'], format: int64, description: "Clamped to [1000, 60000] ms when supplied." }
+        tailConfirmMs: { type: [integer, 'null'], format: int64, description: "Clamped to [300, 10000] ms when supplied." }
     NormalizationRequest:
       type: object
       required: [guildId, enabled]
@@ -301,7 +350,7 @@ components:
         guildId: { type: string }
         enabled: { type: boolean }
         targetLufs:
-          type: number
+          type: [number, 'null']
           format: float
           description: Target loudness in LUFS (default -14.0). Clamped to [-30.0, -6.0].
     BpmRequest:
@@ -309,22 +358,165 @@ components:
       required: [guildId, enabled]
       properties:
         guildId: { type: string }
-        enabled: { type: boolean }
+        enabled:
+          type: boolean
+          description: Enable BPM analysis. Defaults to false for a new mixer.
         scanMs:
-          type: integer
+          type: [integer, 'null']
           format: int64
-          description: Head window decoded for tempo analysis (default 30000). Clamped to [5000, 60000].
-        beatmatchEnabled: { type: boolean }
-        maxTempoChange: { type: number, format: float }
-        minConfidence: { type: number, format: float }
+          description: Head and tail window length for tempo analysis (default 30000). Clamped to [5000, 60000].
+        beatmatchEnabled:
+          type: [boolean, 'null']
+          description: Optional beat-matching toggle. Omission preserves the current setting. Crossfade must also be enabled.
+        maxTempoChange:
+          type: [number, 'null']
+          format: float
+          description: Maximum absolute deviation of the tempo ratio from 1.0. Default 0.06, clamped to [0, 0.12].
+        minConfidence:
+          type: [number, 'null']
+          format: float
+          description: Minimum confidence required for both beat grids. Default 0.30, clamped to [0, 1].
     BeatmatchRequest:
       type: object
       required: [guildId, enabled]
       properties:
         guildId: { type: string }
-        enabled: { type: boolean }
-        maxTempoChange: { type: number, format: float }
-        minConfidence: { type: number, format: float }
+        enabled:
+          type: boolean
+          description: Enable beat matching. Defaults to false for a new mixer. Does not change BPM detection or crossfade settings.
+        maxTempoChange:
+          type: [number, 'null']
+          format: float
+          description: Maximum absolute deviation of the tempo ratio from 1.0. Default 0.06, clamped to [0, 0.12].
+        minConfidence:
+          type: [number, 'null']
+          format: float
+          description: Minimum confidence required for both beat grids. Default 0.30, clamped to [0, 1].
+    EventTrack:
+      type: object
+      required: [identifier, title]
+      properties:
+        identifier: { type: [string, 'null'] }
+        title: { type: string }
+    MixerEventBase:
+      type: object
+      required: [op, type, guildId]
+      properties:
+        op: { type: string, const: mixer }
+        type: { type: string }
+        guildId: { type: string }
+    BeatmatchFallbackReason:
+      type: string
+      description: |
+        Diagnostic string, not a closed enum. Missing analysis never blocks playback.
+        A native failure after overlapStart can change the outcome reported by overlapEnd.
+      examples:
+        - beatmatch_disabled
+        - bpm_disabled
+        - missing_incoming_track
+        - incoming_unseekable
+        - missing_outgoing_grid
+        - missing_incoming_grid
+        - invalid_bpm
+        - low_confidence
+        - tempo_diff_exceeded
+        - fade_window_too_short
+        - incoming_track_too_short
+        - policy_error
+        - timescale_native_failed
+    MixerNeedNextTrackEvent:
+      allOf:
+        - { $ref: '#/components/schemas/MixerEventBase' }
+        - type: object
+          required: [remainingMs, currentTrackEncoded]
+          properties:
+            type: { const: MixerNeedNextTrackEvent }
+            remainingMs: { type: integer, format: int64 }
+            currentTrackEncoded:
+              type: string
+              description: Canonical position-zero encoded track when encoding succeeds; track identifier if encoding fails.
+    MixerAdvancedEvent:
+      allOf:
+        - { $ref: '#/components/schemas/MixerEventBase' }
+        - type: object
+          required: [epoch, encodedTrack, handoffType]
+          properties:
+            type: { const: MixerAdvancedEvent }
+            epoch: { type: integer, format: int64 }
+            encodedTrack:
+              type: string
+              description: Accepted encoded track when retained, otherwise re-encoded with an identifier fallback on failure.
+            handoffType: { type: string, enum: [CROSSFADE, GAPLESS] }
+            handoffId:
+              type: string
+              format: uuid
+              description: Present for a crossfade when the armed handoff ID is available; omitted for gapless.
+    MixerOverriddenEvent:
+      allOf:
+        - { $ref: '#/components/schemas/MixerEventBase' }
+        - type: object
+          required: [epoch, requestId, action]
+          properties:
+            type: { const: MixerOverriddenEvent }
+            epoch: { type: integer, format: int64 }
+            requestId: { type: string, description: "Accepted Idempotency-Key." }
+            action: { type: string, enum: [STOP, PLAY_NOW] }
+    OverlapStartEvent:
+      allOf:
+        - { $ref: '#/components/schemas/MixerEventBase' }
+        - type: object
+          required: [crossfadeMs, handoffInMs, beatMatched, track]
+          properties:
+            type: { const: overlapStart }
+            crossfadeMs: { type: integer, format: int64 }
+            handoffInMs: { type: integer, format: int64, minimum: 0 }
+            beatMatched: { type: boolean }
+            fadeBeats: { type: integer, enum: [2, 4, 8], description: "Present when beatMatched is true." }
+            targetBpm: { type: number, description: "Outgoing tempo; present when beatMatched is true." }
+            rateRatio:
+              type: number
+              description: Outgoing BPM divided by incoming BPM; present when beatMatched is true. Held during overlap, then reset on handoff.
+            fallbackReason: { $ref: '#/components/schemas/BeatmatchFallbackReason' }
+            track: { $ref: '#/components/schemas/EventTrack' }
+    OverlapEndEvent:
+      allOf:
+        - { $ref: '#/components/schemas/MixerEventBase' }
+        - type: object
+          required: [reason, beatMatched]
+          properties:
+            type: { const: overlapEnd }
+            reason: { type: string, enum: [handoff, aborted] }
+            beatMatched: { type: boolean }
+            detail: { type: string, description: "Present for an aborted overlap." }
+            fallbackReason: { $ref: '#/components/schemas/BeatmatchFallbackReason' }
+            track: { $ref: '#/components/schemas/EventTrack' }
+    AnnounceStartEvent:
+      allOf:
+        - { $ref: '#/components/schemas/MixerEventBase' }
+        - type: object
+          required: [track]
+          properties:
+            type: { const: announceStart }
+            announcementId: { type: integer, format: int64 }
+            mode: { type: string, const: parallel, description: "Present only for parallel announcements." }
+            track: { $ref: '#/components/schemas/EventTrack' }
+    AnnounceEndEvent:
+      allOf:
+        - { $ref: '#/components/schemas/MixerEventBase' }
+        - type: object
+          properties:
+            type: { const: announceEnd }
+            announcementId: { type: integer, format: int64, description: "Present for parallel announcements." }
+    MixerEvent:
+      description: Custom messages on the existing Lavalink WebSocket connection.
+      oneOf:
+        - { $ref: '#/components/schemas/MixerNeedNextTrackEvent' }
+        - { $ref: '#/components/schemas/MixerAdvancedEvent' }
+        - { $ref: '#/components/schemas/MixerOverriddenEvent' }
+        - { $ref: '#/components/schemas/OverlapStartEvent' }
+        - { $ref: '#/components/schemas/OverlapEndEvent' }
+        - { $ref: '#/components/schemas/AnnounceStartEvent' }
+        - { $ref: '#/components/schemas/AnnounceEndEvent' }
 paths:
   /mixer/info:
     get:
@@ -338,8 +530,11 @@ paths:
               schema:
                 type: object
                 properties:
-                  protocolVersion: { type: integer }
-                  version: { type: string }
+                  protocolVersion: { type: integer, const: 2 }
+                  version:
+                    type: string
+                    description: Currently hard-coded to 1.1.0 by the handler; may differ from the built JAR version.
+                    examples: ['1.1.0']
   /mixer/queue/arm:
     post:
       operationId: arm
@@ -348,13 +543,13 @@ paths:
         The core v2 transition. The client calls this in response to
         `MixerNeedNextTrackEvent`, or after a queue mutation, with the exact
         expected `epoch` and an `Idempotency-Key`. Transitions the mixer state
-        to `ARMED` (with track) or `NO_NEXT` (if empty). The same
+        to `ARMED` (with track; analysis may still be pending) or `NO_NEXT` (if empty). The same
         `Idempotency-Key` replayed with a different payload is rejected.
       parameters:
         - name: Idempotency-Key
           in: header
           required: true
-          schema: { type: string, description: Unique UUID for the request }
+          schema: { type: string, description: "Stable key for retries of this logical command; UUID format is not enforced." }
       requestBody:
         required: true
         content:
@@ -365,8 +560,11 @@ paths:
           description: Track armed or accepted as no-next
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ArmResponse' }
-        '400': { description: Bad request, missing Idempotency-Key, etc. }
+              schema:
+                oneOf:
+                  - { $ref: '#/components/schemas/ArmResponse' }
+                  - { $ref: '#/components/schemas/DuplicateResponse' }
+        '400': { description: "Bad request, missing Idempotency-Key, etc." }
         '409':
           description: Epoch mismatch or arrival too early post-reset
           content:
@@ -401,20 +599,31 @@ paths:
           description: Slot invalidated
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/InvalidateResponse' }
+              schema:
+                oneOf:
+                  - { $ref: '#/components/schemas/InvalidateResponse' }
+                  - { $ref: '#/components/schemas/DuplicateResponse' }
         '409':
-          description: Stale epoch
+          description: Stale epoch or pre-reset arrival
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ConflictError' }
+        '400': { description: "Missing header or invalid request." }
+        '422':
+          description: Retained request key has a different fingerprint
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   /mixer/queue/override:
     post:
       operationId: override
       summary: Force a state change on the audio engine (Stop or Play-now)
       description: |
-        Atomically clears any ARMED slot and executes the requested action on
-        the plugin's audio engine thread. STOP clears the state to IDLE;
-        PLAY_NOW plays the supplied track immediately.
+        Clears the ARMED slot and schedules the player mutation on the ordered
+        action executor. STOP sets protocol state to IDLE; PLAY_NOW sets PLAYING.
+        HTTP 200 acknowledges acceptance, not completed player mutation.
+        MixerOverriddenEvent reports execution. A superseded action can be skipped.
       parameters:
         - name: Idempotency-Key
           in: header
@@ -427,25 +636,35 @@ paths:
             schema: { $ref: '#/components/schemas/OverrideRequest' }
       responses:
         '200':
-          description: Engine mutated
+          description: Command accepted, or retained duplicate
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/OverrideResponse' }
-        '400': { description: Bad request, invalid action or missing track }
+              schema:
+                oneOf:
+                  - { $ref: '#/components/schemas/OverrideResponse' }
+                  - { $ref: '#/components/schemas/DuplicateResponse' }
+        '400': { description: "Bad request, invalid action or missing track" }
         '409':
           description: Stale epoch or pre-reset arrival
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ConflictError' }
+        '422':
+          description: Retained request key has a different fingerprint
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   /mixer/reset:
     post:
       operationId: reset
       summary: Synchronize the epoch baseline (bot boot/resume hook)
       description: |
         Called by the client when it starts up or resumes a session, to
-        guarantee that `epoch` aligns. Clears all Idempotency-Key fingerprints,
-        sets `windowOpenAt` to now + `windowOpenGraceMs` to block stale calls,
-        and resets the server epoch to `max(current, newEpoch)`.
+        resynchronize state. Clears prior request fingerprints, retains the reset
+        key, and sets the epoch to max(current, supplied). A positive grace sets
+        windowOpenAt to now + windowOpenGraceMs. Clears the next-track slot and
+        aborts an active overlap; current main playback is retained.
       parameters:
         - name: Idempotency-Key
           in: header
@@ -462,6 +681,12 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ResetResponse' }
+        '400': { description: "Missing header or invalid request." }
+        '422':
+          description: Retained request key has a different fingerprint
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /mixer/state:
     get:
       operationId: getState
@@ -477,6 +702,8 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/MixerState' }
+        '400': { description: "Invalid guild ID or request parameters; error body is provided by the host framework." }
+
   /mixer/crossfade:
     post:
       operationId: setCrossfade
@@ -492,6 +719,8 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/MixerState' }
+        '400': { description: "Invalid guild ID or request parameters; error body is provided by the host framework." }
+
   /mixer/fade-in:
     post:
       operationId: setFadeIn
@@ -507,6 +736,8 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/MixerState' }
+        '400': { description: "Invalid guild ID or request parameters; error body is provided by the host framework." }
+
   /mixer/announce:
     post:
       operationId: announce
@@ -522,6 +753,8 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/AnnounceQueuedResponse' }
+        '400': { description: "Invalid guild ID or request parameters; error body is provided by the host framework." }
+
   /mixer/announce/queue:
     delete:
       operationId: clearAnnounceQueue
@@ -540,6 +773,9 @@ paths:
                 type: object
                 properties:
                   cleared: { type: integer }
+        '404': { description: "No mixer exists for this guild." }
+        '400': { description: "Invalid guild ID or request parameters; error body is provided by the host framework." }
+
   /mixer/announce/cancel:
     post:
       operationId: cancelAnnounce
@@ -550,8 +786,10 @@ paths:
           application/json:
             schema: { $ref: '#/components/schemas/AnnounceCancelRequest' }
       responses:
-        '204': { description: Overlay stopped }
-        '404': { description: No active overlay }
+        '204': { description: "Overlay stopped" }
+        '404': { description: "No active overlay" }
+        '400': { description: "Invalid guild ID or request parameters; error body is provided by the host framework." }
+
   /mixer/normalization:
     post:
       operationId: setNormalization
@@ -567,6 +805,8 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/MixerState' }
+        '400': { description: "Invalid guild ID or request parameters; error body is provided by the host framework." }
+
   /mixer/silence:
     post:
       operationId: setSilenceSkipping
@@ -582,25 +822,48 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/MixerState' }
+        '400': { description: "Invalid guild ID or request parameters; error body is provided by the host framework." }
+
   /mixer/bpm:
     post:
       operationId: setBpmDetection
       summary: Configure tempo (BPM) detection for preloaded tracks
+      description: |
+        Enable before arming tracks to allow time for analysis. Set enabled and
+        beatmatchEnabled to true to enable analysis and beat matching together.
+        Crossfade must also be enabled. This endpoint does not require an
+        Idempotency-Key. Configuration success does not mean beat grids are ready.
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: '#/components/schemas/BpmRequest' }
+            example:
+              guildId: '123456789012345678'
+              enabled: true
+              beatmatchEnabled: true
+              scanMs: 30000
+              maxTempoChange: 0.06
+              minConfidence: 0.30
       responses:
         '200':
           description: Updated state
           content:
             application/json:
               schema: { $ref: '#/components/schemas/MixerState' }
+        '400': { description: "Invalid guild ID or request parameters; error body is provided by the host framework." }
+
   /mixer/beatmatch:
     post:
       operationId: setBeatmatch
       summary: Configure beat-matched automix
+      description: |
+        Changes beat-matching settings without changing BPM detection or crossfade.
+        Both must be enabled separately. This endpoint does not require an
+        Idempotency-Key. Missing grids, low confidence, or incompatible tempos
+        use ordinary equal-power crossfade when available. Overlap events report
+        beatMatched and fallbackReason, including bpm_disabled when analysis is off.
+        If crossfade cannot be planned, the existing non-overlap advance path remains.
       requestBody:
         required: true
         content:
@@ -612,3 +875,4 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/MixerState' }
+        '400': { description: "Invalid guild ID or request parameters; error body is provided by the host framework." }

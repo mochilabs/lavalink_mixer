@@ -38,6 +38,8 @@ internal class AnalysisState {
     /** Consecutive analysis failures for [failureId]; retries give up after 3. */
     var failures: Int = 0
     var failureId: String? = null
+    /** A completed scan with no beat grid is a valid result, not a retryable failure. */
+    var completedBpmIdentifier: String? = null
 
     fun noteFailureLocked(identifier: String) {
         if (failureId == identifier) {

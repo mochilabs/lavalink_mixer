@@ -601,7 +601,19 @@ class GuildMixer(
         return Gains(mainGain.current * mainNormGain, subGain.current * subNormGain)
     }
 
-    fun takeSub(samples: Int, channels: Int, out: Array<FloatArray>) = siphon.take(samples, channels, out)
+    fun takeSub(samples: Int, channels: Int, out: Array<FloatArray>): Int {
+        if (!xfadeActive) return siphon.take(samples, channels, out)
+        val start = xfadeStartSample
+        if (start < 0) {
+            val read = siphon.takeWithSource(samples, channels, out)
+            subSourceMilliSamples.addAndGet(read.sourceMilliSamples)
+            return read.outputSamples
+        }
+        val desired = (chainPos.get() - samples - start).coerceAtLeast(0L)
+        val read = siphon.takeAt(desired, samples, channels, out)
+        subSourceMilliSamples.set(read.sourcePositionMilliSamples)
+        return read.outputSamples
+    }
 
     /** Whether [feederId] currently owns the feed; settle [claimFeeder] (via [advance]) before reading. */
     fun isFeeder(feederId: Long): Boolean = electedFeeder.get() == feederId
@@ -665,9 +677,6 @@ class GuildMixer(
     fun noteSubOutput(samples: Int) {
         if (samples <= 0 || !xfadeActive) return
         subOutputSamples.addAndGet(samples.toLong())
-        val speed = siphonFactory?.effectiveSpeed ?: 1.0
-        val sourceMillis = kotlin.math.round(samples * speed * 1000.0).toLong()
-        subSourceMilliSamples.addAndGet(sourceMillis)
     }
 
     /** Heartbeat from the voice path: the mixer filter processed a chunk. */
@@ -888,6 +897,7 @@ class GuildMixer(
     }
 
     private fun decidePollLocked(): PollAction {
+        refreshBeatmatchStatusLocked()
         val audioPlayer = main?.audioPlayer ?: return PollAction.None
         val track = audioPlayer.playingTrack ?: run {
             lastMainTrack = null
@@ -968,6 +978,13 @@ class GuildMixer(
         } else {
             tailWatch = false
             return PollAction.None
+        }
+    }
+
+    private fun refreshBeatmatchStatusLocked() {
+        if (xfadeBeatMatched && siphonFactory?.nativeFailed == true) {
+            xfadeBeatMatched = false
+            xfadeFallbackReason = "timescale_native_failed"
         }
     }
 
@@ -1393,6 +1410,7 @@ class GuildMixer(
         } else {
             seekPastLead(next)
         }
+        val incomingStartPosition = safePosition(next)
         // Pre-warm the secondary decoder BEFORE arming the fade. playTrack()
         // returns after Lavaplayer fills the whole frame buffer; draining a
         // burst here lets the siphon bank up to a frame-buffer's worth of PCM
@@ -1401,6 +1419,7 @@ class GuildMixer(
         // dropped=22k+ frames, subOut lagging subPos by a full second).
         val sub = synchronized(lock) {
             val s = ensureSubLocked()
+            siphon.clear()
             if (plan.beatMatched) {
                 siphonFactory?.setSpeed(plan.rateRatio.toDouble())
             } else {
@@ -1442,9 +1461,8 @@ class GuildMixer(
             xfadeMainTrack = main?.audioPlayer?.playingTrack
             subOutputSamples.set(0L)
             subSourceMilliSamples.set(0L)
-            subStartPositionMs = safePosition(next)
+            subStartPositionMs = incomingStartPosition
             subStartMs = System.currentTimeMillis()
-            siphon.clear()
             xfadeTotal = msToSamples(plan.durationMs).coerceAtLeast(1)
             xfadeLeft = xfadeTotal
             xfadeStartSample = plan.startMs * SAMPLE_RATE / 1000
@@ -1584,6 +1602,7 @@ class GuildMixer(
             // second caller replays the whole transition and throws away the
             // mask ramp it just armed.
             if (!xfadeActive) return@doHandoff
+            refreshBeatmatchStatusLocked()
             val wasBeatMatched = xfadeBeatMatched
             val fallbackReason = xfadeFallbackReason
             xfadeBeatMatched = false
@@ -1742,12 +1761,15 @@ class GuildMixer(
 
     private fun abortXfade(reason: String) {
         var wasBeatMatched = false
+        var fallbackReason: String? = null
         val (sub, armedSub, subName) = synchronized(lock) {
             // Idempotent: nothing armed means a duplicate/late abort (e.g. a
             // deliberate sub.stopTrack() racing the listener) must not replay
             // teardown, clobber a handoff mask ramp, or spam overlapEnd.
             if (!xfadeActive && subTrack == null) return@abortXfade
+            refreshBeatmatchStatusLocked()
             wasBeatMatched = xfadeBeatMatched
+            fallbackReason = xfadeFallbackReason
             xfadeBeatMatched = false
             xfadeFallbackReason = null
             val subPosMs = subTrack?.let { safePosition(it) } ?: -1L
@@ -1785,6 +1807,7 @@ class GuildMixer(
             put("reason", "aborted")
             put("detail", reason)
             put("beatMatched", wasBeatMatched)
+            fallbackReason?.let { put("fallbackReason", it) }
             putTrack(armedSub)
         }
     }
@@ -2010,13 +2033,14 @@ class GuildMixer(
     fun maybeRetryAnalysis(): AudioTrack? {
         val now = System.currentTimeMillis()
         return synchronized(lock) {
-            val pending = pendingNextTrack ?: return null
+            val pending = pendingNextTrack ?: readyNextTrack ?: return null
             val id = idOf(pending) ?: return null
             val needSilence = silenceSkipEnabled && !AnalysisCaches.trim.contains(id)
             val needNorm = normalizationEnabled && !AnalysisCaches.norm.contains(id)
-            if (!needSilence && !needNorm) return null
+            val needBpm = bpmDetectionEnabled && needsBpmAnalysisLocked(id)
+            if (!needSilence && !needNorm && !needBpm) return null
             if (!analysisState.canRetryLocked(id, now)) return null
-            log.debug("retrying deferred silence analysis for '{}' on guild {}", titleOf(pending), guildId)
+            log.debug("retrying deferred analysis for '{}' on guild {}", titleOf(pending), guildId)
             try {
                 pending.makeClone()
             } catch (e: Exception) {
@@ -2026,14 +2050,11 @@ class GuildMixer(
         }
     }
 
-    /**
-     * Decodes [track] (a clone; the original is untouched) on the secondary
-     * player and measures leading/trailing silence into [trimCache].
-     * When [normalizationEnabled], also accumulates loudness for the whole
-     * track and stores the computed gain in [normCache].
-     * Runs on the shared analysis thread; safe to call from a future callback.
-     * Skipped while the sub player is otherwise in use.
-     */
+    private fun needsBpmAnalysisLocked(identifier: String): Boolean =
+        analysisState.completedBpmIdentifier != identifier &&
+            !(AnalysisCaches.bpm.contains(identifier) && AnalysisCaches.bpmHead.contains(identifier) && AnalysisCaches.bpmTail.contains(identifier))
+
+    /** Scans a clone on the isolated analysis player. A concurrent scan defers this work. */
     fun analyzeBlocking(track: AudioTrack) {
         val doSilence = silenceSkipEnabled
         val doNorm = normalizationEnabled
@@ -2049,7 +2070,7 @@ class GuildMixer(
         synchronized(lock) {
             val hasSilence = !doSilence || AnalysisCaches.trim.contains(identifier)
             val hasNorm = !doNorm || AnalysisCaches.norm.contains(identifier)
-            val hasBpm = !doBpm || (AnalysisCaches.bpm.contains(identifier) && AnalysisCaches.bpmHead.contains(identifier) && AnalysisCaches.bpmTail.contains(identifier))
+            val hasBpm = !doBpm || !needsBpmAnalysisLocked(identifier)
             if (hasSilence && hasNorm && hasBpm) {
                 promoteIfPendingLocked()
                 return
@@ -2067,7 +2088,7 @@ class GuildMixer(
         try {
             val hasSilence = doSilence && !AnalysisCaches.trim.contains(identifier)
             val hasNorm = doNorm && !AnalysisCaches.norm.contains(identifier)
-            val needBpm = doBpm && (!AnalysisCaches.bpm.contains(identifier) || !AnalysisCaches.bpmHead.contains(identifier) || !AnalysisCaches.bpmTail.contains(identifier))
+            val needBpm = doBpm && synchronized(lock) { needsBpmAnalysisLocked(identifier) }
             val result = analysisService.analyze(
                 track,
                 TrackAnalysisSettings(
@@ -2113,10 +2134,12 @@ class GuildMixer(
                 }
             }
             if (result.aborted) {
-                log.warn("silence analysis aborted on guild {}: sub decoder failed", guildId)
+                log.warn("analysis aborted on guild {}: analysis decoder failed", guildId)
+                synchronized(lock) { analysisState.noteFailureLocked(identifier) }
                 return
             }
             synchronized(lock) {
+                if (needBpm) analysisState.completedBpmIdentifier = identifier
                 if (hasSilence) {
                     AnalysisCaches.trim[identifier] = result.trim ?: TrimPoints.NONE
                 }

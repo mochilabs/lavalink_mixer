@@ -148,7 +148,7 @@ object BpmDetector {
             FloatArray(n) { i ->
                 val ef = energyFlux[i] * invE
                 val sf = if (i < specFlux.size) specFlux[i] * invS else 0f
-                0.35f * ef + 0.65f * sf
+                0.30f * ef + 0.70f * sf
             }
         } else {
             energyFlux
@@ -184,83 +184,40 @@ object BpmDetector {
             scores[lag] = normalizedCorrelation(detrended, variance, lag).toFloat()
         }
 
-        // Detect local peaks in normalized autocorrelation
-        val candidateLags = mutableSetOf<Int>()
+        // Global argmax of normalized autocorrelation
+        var bestLag = -1
+        var bestCorr = -1f
         for (lag in minLag..maxLag) {
             val s = scores[lag]
-            if (s > 0.04f) {
-                val left = if (lag > minLag) scores[lag - 1] else 0f
-                val right = if (lag < maxLag) scores[lag + 1] else 0f
-                if (s >= left && s >= right) {
-                    candidateLags.add(lag)
-                }
+            if (s > bestCorr) {
+                bestCorr = s
+                bestLag = lag
             }
         }
-        if (candidateLags.isEmpty()) {
-            var bestL = minLag
-            var bestS = scores[minLag]
-            for (l in (minLag + 1)..maxLag) {
-                if (scores[l] > bestS) {
-                    bestS = scores[l]
-                    bestL = l
-                }
-            }
-            candidateLags.add(bestL)
-        }
+        if (bestLag <= 0) return null
 
-        // Expand candidates with octave harmonics (x2 and x0.5)
-        val expanded = mutableSetOf<Int>()
-        for (lag in candidateLags) {
-            expanded.add(lag)
-            val half = round(lag / 2.0).toInt()
-            if (half in minLag..maxLag) expanded.add(half)
-            val double = lag * 2
-            if (double in minLag..maxLag) expanded.add(double)
-        }
+        val onsets = extractOnsets(flux, threshold)
 
-        val candidateList = expanded.filter { lag ->
-            val tempo = 60_000.0 / (lag * HOP_MS)
-            tempo in minBpm..maxBpm
-        }
-        if (candidateList.isEmpty()) return null
-
-        val onsetPeriods = candidateList.associateWith { lag -> supportedOnsetPeriod(flux, threshold, lag) }
-
-        // Multi-candidate ranking using harmonic comb scoring, perceptual tempo prior
-        // (centered ~120 BPM), and subharmonic validation to disambiguate octave errors.
-        fun candidateScore(lag: Int): Float {
-            val conf = sampleConfidence(detrended, variance, lag)
-            if (conf < 0.04f) return 0f
-            val bpm = (60_000.0 / (lag * HOP_MS)).toFloat()
-            val prior = tempoPrior(bpm)
-            val directOnset = if (onsetPeriods[lag] != null) 0.15f else 0f
-            val doubleOnset = if (onsetPeriods[lag * 2] != null) 0.12f else 0f
-
-            val doubleLag = lag * 2
-            val r2 = if (doubleLag < n) sampleConfidence(detrended, variance, doubleLag) else 0f
-            val combConf = conf + 0.40f * maxOf(0f, r2)
-
-            // Sub-harmonic check: if half-lag has an active correlation peak,
-            // this lag is a 2-beat octave multiple (e.g. 62.5 BPM vs 125 BPM)
-            val halfLag = round(lag / 2.0).toInt()
-            val halfConf = if (halfLag in minLag..maxLag) sampleConfidence(detrended, variance, halfLag) else 0f
-            val harmonicPenalty = if (halfConf >= 0.40f * conf && halfConf > 0.18f) 0.55f else 1.0f
-
-            return (combConf * prior * harmonicPenalty) + directOnset + doubleOnset
-        }
-
-        val chosenLag = candidateList.maxByOrNull { candidateScore(it) } ?: return null
-        val chosenConf = sampleConfidence(detrended, variance, chosenLag)
-        val chosenRefined = onsetPeriods[chosenLag]
-            ?: onsetPeriods[chosenLag * 2]?.let { it / 2.0 }
-            ?: refineLag(detrended, variance, chosenLag, n)
-        val (phaseHops, phaseAlignment) = optimizePhase(flux, threshold, chosenRefined)
-        val ioiRatio = supportedOnsetRatio(flux, threshold, chosenLag)
-        val calibratedConf = if (chosenConf < 0.15f) chosenConf else (chosenConf * (0.80f + 0.20f * phaseAlignment)).coerceIn(0f, 1f)
+        val candidates = sortedSetOf(bestLag, bestLag * 2, round(bestLag / 2.0).toInt())
+            .filter { it in minLag..maxLag }
+            .map { it to sampleConfidence(detrended, variance, it) }
+        if (candidates.isEmpty()) return null
+        val maxConf = candidates.maxOf { it.second }
+        val onsetPeriods = candidates.associate { (lag, _) -> lag to supportedOnsetPeriod(flux, threshold, lag) }
+        val chosenLag = candidates.firstOrNull { (lag, _) -> onsetPeriods[lag] != null }?.first
+            ?: candidates.firstOrNull { (_, conf) -> conf >= maxConf - 0.35f && conf >= 0.35f }?.first
+            ?: bestLag
+        val (eDetrended, eVariance) = detrend(energyFlux)
+        val energyConf = sampleConfidence(eDetrended, eVariance, chosenLag)
+        val specConf = sampleConfidence(detrended, variance, chosenLag)
+        val rawConf = maxOf(energyConf, specConf)
+        val chosenConf = if (onsets.size < 4) 0f else rawConf
+        val chosenRefined = onsetPeriods[chosenLag] ?: refineLag(detrended, variance, chosenLag, n)
+        val (phaseHops, _) = optimizePhaseFromOnsets(onsets, chosenRefined)
         val bpm = (60_000.0 / (chosenRefined * HOP_MS)).toFloat()
-        return Detection(bpm, calibratedConf, firstBeatIdx, phaseHops)
+        return Detection(bpm, chosenConf, firstBeatIdx, phaseHops)
     }
-    /** Strong adjacent onset spacings, independent of the autocorrelation octave score. */
+
     private fun supportedOnsetPeriod(flux: FloatArray, threshold: Float, lag: Int): Double? {
         val onsets = mutableListOf<Double>()
         var i = 0
@@ -281,53 +238,9 @@ object BpmDetector {
         return supported.average()
     }
 
-    private fun supportedOnsetRatio(flux: FloatArray, threshold: Float, lag: Int): Float {
-        val onsets = mutableListOf<Double>()
+    private fun extractOnsets(flux: FloatArray, threshold: Float): List<Pair<Double, Double>> {
+        val onsets = mutableListOf<Pair<Double, Double>>()
         var i = 0
-        while (i < flux.size) {
-            if (flux[i] <= threshold) { i++; continue }
-            var weight = 0.0
-            var position = 0.0
-            while (i < flux.size && flux[i] > threshold) {
-                weight += flux[i]
-                position += i * flux[i].toDouble()
-                i++
-            }
-            onsets += position / weight
-        }
-        val intervals = onsets.zipWithNext { first, second -> second - first }
-        if (intervals.isEmpty()) return 0f
-        val supported = intervals.count { abs(it - lag) <= 3.0 || abs(it - lag / 2.0) <= 2.0 }
-        return (supported.toFloat() / intervals.size).coerceIn(0f, 1f)
-    }
-
-    /**
-     * Parabolic refinement of the autocorrelation peak at [bestLag]: the three
-     * normalized neighbor scores are fitted with a parabola whose vertex gives the
-     * sub-hop peak position, `delta = 0.5(a-c)/(a-2b+c)` in [-1, 1].
-     * Requires strict concavity (denom < 0); falls back to integer lag when degenerate.
-     */
-    private fun refineLag(x: DoubleArray, variance: Double, bestLag: Int, n: Int): Double {
-        val b = normalizedCorrelation(x, variance, bestLag)
-        val a = if (bestLag > 1) normalizedCorrelation(x, variance, bestLag - 1) else b
-        val c = if (bestLag + 1 < n) normalizedCorrelation(x, variance, bestLag + 1) else b
-        val denom = a - 2.0 * b + c
-        val scale = maxOf(abs(a), abs(b), abs(c), 1.0)
-        if (denom >= -1e-9 * scale) return bestLag.toDouble()
-        val delta = 0.5 * (a - c) / denom
-        if (delta < -1.0 || delta > 1.0) return bestLag.toDouble()
-        return bestLag + delta
-    }
-
-    /**
-     * Global phase optimization: finds the beat phase phi in [0, periodHops) that maximizes
-     * the energy-weighted alignment of all threshold-crossing onsets to the periodic pulse grid.
-     * Returns a pair of (optimalPhaseHops, alignmentConfidenceRatio).
-     */
-    private fun optimizePhase(flux: FloatArray, threshold: Float, periodHops: Double): Pair<Double, Float> {
-        val onsets = mutableListOf<Pair<Double, Double>>() // (centerOfMassHops, weight)
-        var i = 0
-        var totalWeight = 0.0
         while (i < flux.size) {
             if (flux[i] <= threshold) {
                 i++
@@ -343,10 +256,15 @@ object BpmDetector {
             }
             if (sumWeight > 0.0) {
                 onsets.add((sumPos / sumWeight) to sumWeight)
-                totalWeight += sumWeight
             }
         }
-        if (onsets.isEmpty() || periodHops <= 0.0 || totalWeight <= 0.0) return 0.0 to 0f
+        return onsets
+    }
+
+    private fun optimizePhaseFromOnsets(onsets: List<Pair<Double, Double>>, periodHops: Double): Pair<Double, Float> {
+        if (onsets.isEmpty() || periodHops <= 0.0) return 0.0 to 0f
+        val totalWeight = onsets.sumOf { it.second }
+        if (totalWeight <= 0.0) return 0.0 to 0f
 
         val tolerance = maxOf(2.5, periodHops * 0.20)
         var bestPhi = 0.0
@@ -371,6 +289,24 @@ object BpmDetector {
         }
         val alignmentRatio = (bestScore / totalWeight).coerceIn(0.0, 1.0).toFloat()
         return bestPhi to alignmentRatio
+    }
+
+    /**
+     * Parabolic refinement of the autocorrelation peak at [bestLag]: the three
+     * normalized neighbor scores are fitted with a parabola whose vertex gives the
+     * sub-hop peak position, `delta = 0.5(a-c)/(a-2b+c)` in [-1, 1].
+     * Requires strict concavity (denom < 0); falls back to integer lag when degenerate.
+     */
+    private fun refineLag(x: DoubleArray, variance: Double, bestLag: Int, n: Int): Double {
+        val b = normalizedCorrelation(x, variance, bestLag)
+        val a = if (bestLag > 1) normalizedCorrelation(x, variance, bestLag - 1) else b
+        val c = if (bestLag + 1 < n) normalizedCorrelation(x, variance, bestLag + 1) else b
+        val denom = a - 2.0 * b + c
+        val scale = maxOf(abs(a), abs(b), abs(c), 1.0)
+        if (denom >= -1e-9 * scale) return bestLag.toDouble()
+        val delta = 0.5 * (a - c) / denom
+        if (delta < -1.0 || delta > 1.0) return bestLag.toDouble()
+        return bestLag + delta
     }
 
     private const val DETREND_HALF_WINDOW = 50
@@ -453,8 +389,4 @@ object BpmDetector {
         return mean.toFloat() to std.toFloat()
     }
 
-    private fun tempoPrior(bpm: Float): Float {
-        val logBpm = (ln(bpm.toDouble() / 120.0) / ln(2.0)).toFloat()
-        return exp(-0.5f * (logBpm / 0.70f) * (logBpm / 0.70f))
-    }
 }

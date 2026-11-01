@@ -1,11 +1,12 @@
 package dev.lavalink.mixer.plugin
 
+import kotlin.math.ln
 import kotlin.math.sqrt
 
 data class FluxWeights(
-    val low: Float = 0.50f,
-    val mid: Float = 0.35f,
-    val high: Float = 0.15f,
+    val low: Float = 0.40f,
+    val mid: Float = 0.40f,
+    val high: Float = 0.20f,
 )
 
 /**
@@ -16,14 +17,14 @@ data class FluxWeights(
  *   High: 2000 ~ 10000 Hz (Bins 86..426) - Hi-hats, cymbals, shakers
  */
 object SpectralFluxAnalyzer {
-    private const val FFT_SIZE = 2048
+    private const val FFT_SIZE = 1024
     private const val HOP_SIZE = 480
-    private const val LOW_BIN_START = 2
-    private const val LOW_BIN_END = 6
-    private const val MID_BIN_START = 7
-    private const val MID_BIN_END = 85
-    private const val HIGH_BIN_START = 86
-    private const val HIGH_BIN_END = 426
+    private const val LOW_BIN_START = 1
+    private const val LOW_BIN_END = 3
+    private const val MID_BIN_START = 4
+    private const val MID_BIN_END = 42
+    private const val HIGH_BIN_START = 43
+    private const val HIGH_BIN_END = 213
 
     private val fft = RealFft(FFT_SIZE)
 
@@ -59,7 +60,8 @@ object SpectralFluxAnalyzer {
         val re = FloatArray(FFT_SIZE)
         val im = FloatArray(FFT_SIZE)
         val currMags = FloatArray(FFT_SIZE / 2)
-        val prevMags = FloatArray(FFT_SIZE / 2)
+        val currLog = FloatArray(FFT_SIZE / 2)
+        val prevLog = FloatArray(FFT_SIZE / 2)
         val hann = fft.hannWindow
 
         for (h in 0 until nHops) {
@@ -74,42 +76,38 @@ object SpectralFluxAnalyzer {
             fft.transform(re, im)
             fft.magnitudes(re, im, currMags)
 
+            for (i in currMags.indices) {
+                currLog[i] = ln(1f + 10f * currMags[i])
+            }
+
             if (h > 0) {
                 var low = 0f
                 for (k in LOW_BIN_START..LOW_BIN_END) {
-                    val d = currMags[k] - prevMags[k]
+                    val d = currLog[k] - prevLog[k]
                     if (d > 0f) low += d
                 }
                 lowFlux[h] = low
 
                 var mid = 0f
                 for (k in MID_BIN_START..MID_BIN_END) {
-                    val d = currMags[k] - prevMags[k]
+                    val d = currLog[k] - prevLog[k]
                     if (d > 0f) mid += d
                 }
                 midFlux[h] = mid
 
                 var high = 0f
                 for (k in HIGH_BIN_START..HIGH_BIN_END) {
-                    val d = currMags[k] - prevMags[k]
+                    val d = currLog[k] - prevLog[k]
                     if (d > 0f) high += d
                 }
                 highFlux[h] = high
             } else {
-                var low = 0f
-                for (k in LOW_BIN_START..LOW_BIN_END) low += currMags[k]
-                lowFlux[0] = low
-
-                var mid = 0f
-                for (k in MID_BIN_START..MID_BIN_END) mid += currMags[k]
-                midFlux[0] = mid
-
-                var high = 0f
-                for (k in HIGH_BIN_START..HIGH_BIN_END) high += currMags[k]
-                highFlux[0] = high
+                lowFlux[0] = 0f
+                midFlux[0] = 0f
+                highFlux[0] = 0f
             }
 
-            System.arraycopy(currMags, 0, prevMags, 0, currMags.size)
+            System.arraycopy(currLog, 0, prevLog, 0, currLog.size)
         }
 
         // Standardize each band by its standard deviation

@@ -104,7 +104,23 @@ class BpmDetectorTest {
         println("Detected BPM: ${result.bpm}, confidence: ${result.confidence}")
         near(result.bpm, 128f, 1.5f)
     }
+    @Test
+    fun `pop drum track at 80 bpm is detected as 80 bpm not 160 bpm`() {
+        val buf = popDrumTrack(80.0)
+        val result = BpmDetector.analyze(chunked(buf))
+        assertNotNull(result)
+        println("Detected 80 BPM track as: ${result.bpm}, confidence: ${result.confidence}")
+        near(result.bpm, 80f, 1.5f)
+    }
 
+    @Test
+    fun `pop drum track at 90 bpm is detected as 90 bpm not 180 bpm`() {
+        val buf = popDrumTrack(90.0)
+        val result = BpmDetector.analyze(chunked(buf))
+        assertNotNull(result)
+        println("Detected 90 BPM track as: ${result.bpm}, confidence: ${result.confidence}")
+        near(result.bpm, 90f, 1.5f)
+    }
     @Test
     fun `120 bpm click track detected`() {
         val r = BpmDetector.analyze(clickTrack(120f, 8))

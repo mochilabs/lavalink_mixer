@@ -151,4 +151,59 @@ class BpmGridTest {
         ) ?: fail("no shifted grid")
         assertNear(shiftedGrid.phaseMs.toFloat(), 15_000f + baseGrid.phaseMs, 5f, "shifted phase")
     }
+
+    @Test
+    fun `tail phase preserves global grid alignment across arbitrary window start`() {
+        val bpm = 128f
+        val periodMs = 60_000.0 / bpm
+        // Global track has clicks anchored at t = 100ms + k * periodMs
+        val baseOffsetMs = 100L
+        val track = clickTrack(bpm, seconds = 10, offsetMs = 0L) // first click at 0 + jitter 0
+        // Simulate tail extraction starting at an arbitrary non-beat-aligned timestamp
+        val tailStartMs = 182_345L
+        val tailGrid = BpmDetector.analyzeGrid(track, windowStartMs = tailStartMs) ?: fail("no tail grid")
+
+        // Any beat predicted by tailGrid should land at tailGrid.phaseMs + k * tailGrid.periodMs
+        // In global track coordinates, this must be an integer multiple of periodMs (mod periodMs == 0)
+        val errorMs = ((tailGrid.phaseMs % periodMs) + periodMs) % periodMs
+        val distanceToGrid = minOf(errorMs, periodMs - errorMs)
+        assertTrue(distanceToGrid <= 20.0, "tail grid error=$distanceToGrid ms (expected <= 20ms)")
+    }
+
+    @Test
+    fun `tail phase with leading silence inside window preserves grid phase`() {
+        val bpm = 120f
+        val periodMs = 500.0
+        // First click is at 1500ms into the tail window
+        val track = clickTrack(bpm, seconds = 10, offsetMs = 1500L)
+        val tailStartMs = 90_000L
+        val tailGrid = BpmDetector.analyzeGrid(track, windowStartMs = tailStartMs) ?: fail("no tail grid")
+
+        // In global track timeline, the first beat was at 90_000 + 1500 = 91,500ms
+        // modulo periodMs (500ms), 91,500 % 500 == 0.
+        val errorMs = ((tailGrid.phaseMs % periodMs) + periodMs) % periodMs
+        val distanceToGrid = minOf(errorMs, periodMs - errorMs)
+        assertTrue(distanceToGrid <= 20.0, "tail grid with leading silence error=$distanceToGrid ms")
+    }
+
+    @Test
+    fun `global phase optimization ignores spurious early onset`() {
+        val bpm = 120f
+        val periodSamples = (sr * 60.0 / bpm).toInt()
+        val total = 10 * sr
+        val buf = FloatArray(total)
+        // Spurious non-beat click at 60ms
+        val spuriousPos = (0.060 * sr).toInt()
+        for (i in 0 until 64) buf[spuriousPos + i] = 1f
+        // True regular beat starts at 250ms and repeats every 500ms
+        var pos = (0.250 * sr).toInt()
+        while (pos + 64 < total) {
+            for (i in 0 until 64) buf[pos + i] = 1f
+            pos += periodSamples
+        }
+        val grid = BpmDetector.analyzeGrid(listOf(arrayOf(buf)), sampleRate = sr) ?: fail("no grid")
+        assertNear(grid.bpm, 120f, 0.5f, "bpm")
+        // Phase should align with the true 250ms pulse, not the 60ms rogue click
+        assertNear(grid.phaseMs.toFloat(), 250f, 25f, "phase anchored to periodic beats")
+    }
 }

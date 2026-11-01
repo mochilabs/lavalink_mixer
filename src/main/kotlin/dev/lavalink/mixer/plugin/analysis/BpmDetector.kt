@@ -1,9 +1,11 @@
 package dev.lavalink.mixer.plugin
 
+import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.exp
 import kotlin.math.round
 import kotlin.math.sqrt
-
 /**
  * Pure Kotlin tempo (BPM) + beat-grid detection from decoded float PCM.
  * Operates on the same planar chunks the rest of the analysis pipeline
@@ -105,12 +107,8 @@ object BpmDetector {
     ): BeatGrid? {
         val det = detect(frames, sampleRate, minBpm, maxBpm) ?: return null
         val periodMs = 60_000.0 / det.bpm
-        val firstOnsetMs = if (det.firstBeatIdx >= 0) det.firstBeatIdx * HOP_MS else 0.0
-        // Grid phase: the pulse's first landing within one period. Anchoring the
-        // grid at `firstOnsetMs mod period` makes a grid beat land exactly on
-        // the first onset (and every period thereafter). NOT a musical downbeat:
-        // no bar/section awareness, just the phase where the periodic pulse sits.
-        val localPhaseMs = ((firstOnsetMs % periodMs) + periodMs) % periodMs
+        var localPhaseMs = ((det.phaseHops * HOP_MS % periodMs) + periodMs) % periodMs
+        if (localPhaseMs >= periodMs - HOP_MS) localPhaseMs = 0.0
         val phaseMs = windowStartMs + round(localPhaseMs).toLong()
         return BeatGrid(
             bpm = det.bpm,
@@ -120,8 +118,7 @@ object BpmDetector {
     }
 
     /** Scalar result of one detection pass, shared by both public entry points. */
-    private class Detection(val bpm: Float, val confidence: Float, val firstBeatIdx: Int)
-
+    private class Detection(val bpm: Float, val confidence: Float, val firstBeatIdx: Int, val phaseHops: Double = 0.0)
     private fun detect(
         frames: List<Array<FloatArray>>,
         sampleRate: Int,
@@ -133,14 +130,27 @@ object BpmDetector {
         // Need at least one full beat period of the slowest tempo to correlate.
         if (n < 8) return null
 
-        // Onset strength: half-wave-rectified first difference. Seed flux[0]
-        // with the opening envelope so a track that starts on its downbeat
-        // (no lead-in silence) still registers a rise at t=0.
-        val flux = FloatArray(n)
-        flux[0] = env[0]
+        // Onset strength: fuse energy flux with 3-band spectral flux when available
+        val energyFlux = FloatArray(n)
+        energyFlux[0] = env[0]
         for (i in 1 until n) {
             val d = env[i] - env[i - 1]
-            if (d > 0f) flux[i] = d
+            if (d > 0f) energyFlux[i] = d
+        }
+
+        val specFlux = if (sampleRate == 48000) SpectralFluxAnalyzer.computeSpectralFlux(frames) else null
+        val flux = if (specFlux != null) {
+            val (_, eStd) = stats(energyFlux, 0, n)
+            val (_, sStd) = stats(specFlux, 0, specFlux.size)
+            val invE = if (eStd > 1e-6f) 1f / eStd else 0f
+            val invS = if (sStd > 1e-6f) 1f / sStd else 0f
+            FloatArray(n) { i ->
+                val ef = energyFlux[i] * invE
+                val sf = if (i < specFlux.size) specFlux[i] * invS else 0f
+                0.35f * ef + 0.65f * sf
+            }
+        } else {
+            energyFlux
         }
 
         // Adaptive onset threshold over the whole window (silence + sparse
@@ -150,64 +160,93 @@ object BpmDetector {
         val threshold = mean + 1.5f * std
         if (threshold <= 0f) return null
 
+        // First onset: detect from raw energy flux to preserve exact 10ms hop edge
+        val (eMean, eStd) = stats(energyFlux, 0, n)
+        val eThreshold = eMean + 1.5f * eStd
         var firstBeatIdx = -1
         for (i in 0 until n) {
-            if (flux[i] > threshold) {
+            if (energyFlux[i] > eThreshold) {
                 firstBeatIdx = i
                 break
             }
         }
-
         val minLag = ((60_000.0 / maxBpm) / HOP_MS).toInt().coerceAtLeast(1)
         val maxLag = ((60_000.0 / minBpm) / HOP_MS).toInt().coerceAtMost(n / 2)
         if (minLag > maxLag) return null
 
-        var bestLag = -1
-        var bestScore = -1.0
+        val (detrended, variance) = detrend(flux)
+        if (variance <= 0.0) return null
+
+        // Normalized autocorrelation across the lag range
+        val scores = FloatArray(maxLag + 1)
         for (lag in minLag..maxLag) {
-            val score = rawScore(flux, lag, n)
-            if (score > bestScore) {
-                bestScore = score
-                bestLag = lag
+            scores[lag] = normalizedCorrelation(detrended, variance, lag).toFloat()
+        }
+
+        // Detect local peaks in normalized autocorrelation
+        val candidateLags = mutableSetOf<Int>()
+        for (lag in minLag..maxLag) {
+            val s = scores[lag]
+            if (s > 0.04f) {
+                val left = if (lag > minLag) scores[lag - 1] else 0f
+                val right = if (lag < maxLag) scores[lag + 1] else 0f
+                if (s >= left && s >= right) {
+                    candidateLags.add(lag)
+                }
             }
         }
-        if (bestLag <= 0) return null
-
-        // Octave pass: multiples of the true period correlate just as strongly,
-        // so a raw argmax can lock onto the half-tempo (or double-tempo) octave.
-        // Rescore base / x2 / x0.5 with the same normalized autocorrelation used
-        // for confidence and keep the best-scoring in-range candidate. For a
-        // strictly periodic pulse the score is near-identical across octaves
-        // (float noise would otherwise flip the winner), so when candidates sit
-        // within [OCTAVE_TIE_EPS] of the best score the SMALLEST lag — the
-        // fastest tempo — wins: a true 120 BPM pulse then keeps lag 50 over
-        // 100, while a true 60 BPM pulse keeps 100 because conf at half the
-        // lag is ~0 (no onset pair correlates there). Confidence always uses
-        // the integer lag (it already samples lag-1..lag+1); the reported
-        // tempo comes from the interpolated refinement of the chosen lag.
-        var maxConf = 0f
-        val candidates = sortedSetOf(bestLag, bestLag * 2, round(bestLag / 2.0).toInt())
-            .filter { it >= 1 && it < n }
-            .map { it to beatConfidence(flux, it) }
-            .filter { (lag, _) ->
-                val tempo = 60_000.0 / (lag * HOP_MS)
-                tempo in minBpm..maxBpm
+        if (candidateLags.isEmpty()) {
+            var bestL = minLag
+            var bestS = scores[minLag]
+            for (l in (minLag + 1)..maxLag) {
+                if (scores[l] > bestS) {
+                    bestS = scores[l]
+                    bestL = l
+                }
             }
-        if (candidates.isEmpty()) return null
-        for ((_, conf) in candidates) maxConf = maxOf(maxConf, conf)
-        val onsetPeriods = candidates.associate { (lag, _) -> lag to supportedOnsetPeriod(flux, threshold, lag) }
-        // Quantization can favor two periods (e.g. 124 BPM: 48.39 hops vs
-        // 96.77 hops). Actual adjacent onsets disambiguate this octave without
-        // inventing intervening beats for a genuine slow pulse.
-        val chosenLag = candidates.firstOrNull { (lag, _) -> onsetPeriods[lag] != null }?.first
-            ?: candidates.first { (_, conf) -> conf >= maxConf - OCTAVE_TIE_EPS }.first
-        val chosenConf = beatConfidence(flux, chosenLag)
-        val chosenRefined = onsetPeriods[chosenLag] ?: refineLag(flux, chosenLag, n)
+            candidateLags.add(bestL)
+        }
 
+        // Expand candidates with octave harmonics (x2 and x0.5)
+        val expanded = mutableSetOf<Int>()
+        for (lag in candidateLags) {
+            expanded.add(lag)
+            val half = round(lag / 2.0).toInt()
+            if (half in minLag..maxLag) expanded.add(half)
+            val double = lag * 2
+            if (double in minLag..maxLag) expanded.add(double)
+        }
+
+        val candidateList = expanded.filter { lag ->
+            val tempo = 60_000.0 / (lag * HOP_MS)
+            tempo in minBpm..maxBpm
+        }
+        if (candidateList.isEmpty()) return null
+
+        var maxConf = 0f
+        for (lag in candidateList) {
+            val c = sampleConfidence(detrended, variance, lag)
+            if (c > maxConf) maxConf = c
+        }
+        val onsetPeriods = candidateList.associateWith { lag -> supportedOnsetPeriod(flux, threshold, lag) }
+
+        // Multi-candidate ranking:
+        // 1. Supported adjacent onsets take first precedence (avoiding octave jumping)
+        // 2. Candidates within OCTAVE_TIE_EPS of maxConf pick the smallest lag (fastest tempo)
+        val chosenLag = candidateList.firstOrNull { lag -> onsetPeriods[lag] != null }
+            ?: candidateList.filter { lag -> sampleConfidence(detrended, variance, lag) >= maxConf - OCTAVE_TIE_EPS }
+                .minByOrNull { it }
+            ?: candidateList.maxByOrNull { lag -> sampleConfidence(detrended, variance, lag) }
+            ?: return null
+
+        val chosenConf = sampleConfidence(detrended, variance, chosenLag)
+        val chosenRefined = onsetPeriods[chosenLag] ?: refineLag(detrended, variance, chosenLag, n)
+        val (phaseHops, phaseAlignment) = optimizePhase(flux, threshold, chosenRefined)
+        val ioiRatio = supportedOnsetRatio(flux, threshold, chosenLag)
+        val calibratedConf = if (chosenConf < 0.15f) chosenConf else (chosenConf * (0.80f + 0.20f * phaseAlignment)).coerceIn(0f, 1f)
         val bpm = (60_000.0 / (chosenRefined * HOP_MS)).toFloat()
-        return Detection(bpm, chosenConf, firstBeatIdx)
+        return Detection(bpm, calibratedConf, firstBeatIdx, phaseHops)
     }
-
     /** Strong adjacent onset spacings, independent of the autocorrelation octave score. */
     private fun supportedOnsetPeriod(flux: FloatArray, threshold: Float, lag: Int): Double? {
         val onsets = mutableListOf<Double>()
@@ -229,52 +268,101 @@ object BpmDetector {
         return supported.average()
     }
 
-    /** Raw (unnormalized) autocorrelation of the onset signal at one lag. */
-    private fun rawScore(flux: FloatArray, lag: Int, n: Int): Double {
-        var s = 0.0
-        for (i in 0 until n - lag) {
-            s += flux[i] * flux[i + lag].toDouble()
+    private fun supportedOnsetRatio(flux: FloatArray, threshold: Float, lag: Int): Float {
+        val onsets = mutableListOf<Double>()
+        var i = 0
+        while (i < flux.size) {
+            if (flux[i] <= threshold) { i++; continue }
+            var weight = 0.0
+            var position = 0.0
+            while (i < flux.size && flux[i] > threshold) {
+                weight += flux[i]
+                position += i * flux[i].toDouble()
+                i++
+            }
+            onsets += position / weight
         }
-        return s
+        val intervals = onsets.zipWithNext { first, second -> second - first }
+        if (intervals.isEmpty()) return 0f
+        val supported = intervals.count { abs(it - lag) <= 3.0 || abs(it - lag / 2.0) <= 2.0 }
+        return (supported.toFloat() / intervals.size).coerceIn(0f, 1f)
     }
 
     /**
      * Parabolic refinement of the autocorrelation peak at [bestLag]: the three
-     * raw neighbour scores are fitted with a parabola whose vertex gives the
-     * sub-hop peak position, `delta = 0.5(a-c)/(a-2b+c)` in [-1, 1]. Falls back
-     * to the untouched integer lag when the peak is degenerate (flat or
-     * monotonically rising edge) — interpolation must never *worsen* the
-     * argmax estimate.
+     * normalized neighbor scores are fitted with a parabola whose vertex gives the
+     * sub-hop peak position, `delta = 0.5(a-c)/(a-2b+c)` in [-1, 1].
+     * Requires strict concavity (denom < 0); falls back to integer lag when degenerate.
      */
-    private fun refineLag(flux: FloatArray, bestLag: Int, n: Int): Double {
-        val b = rawScore(flux, bestLag, n)
-        val a = if (bestLag > 1) rawScore(flux, bestLag - 1, n) else b
-        val c = if (bestLag + 1 < n) rawScore(flux, bestLag + 1, n) else b
+    private fun refineLag(x: DoubleArray, variance: Double, bestLag: Int, n: Int): Double {
+        val b = normalizedCorrelation(x, variance, bestLag)
+        val a = if (bestLag > 1) normalizedCorrelation(x, variance, bestLag - 1) else b
+        val c = if (bestLag + 1 < n) normalizedCorrelation(x, variance, bestLag + 1) else b
         val denom = a - 2.0 * b + c
         val scale = maxOf(abs(a), abs(b), abs(c), 1.0)
-        if (abs(denom) < 1e-9 * scale) return bestLag.toDouble()
+        if (denom >= -1e-9 * scale) return bestLag.toDouble()
         val delta = 0.5 * (a - c) / denom
         if (delta < -1.0 || delta > 1.0) return bestLag.toDouble()
         return bestLag + delta
     }
 
     /**
-     * Half-width (frames) of the local-mean window removed from the onset
-     * signal before scoring: +-0.5s. Slow loudness swells (pads, ambient)
-     * make a smooth onset signal that correlates with itself at *every* short
-     * lag; subtracting a local mean leaves only energy changes faster than
-     * that, i.e. actual pulses.
+     * Global phase optimization: finds the beat phase phi in [0, periodHops) that maximizes
+     * the energy-weighted alignment of all threshold-crossing onsets to the periodic pulse grid.
+     * Returns a pair of (optimalPhaseHops, alignmentConfidenceRatio).
      */
+    private fun optimizePhase(flux: FloatArray, threshold: Float, periodHops: Double): Pair<Double, Float> {
+        val onsets = mutableListOf<Pair<Double, Double>>() // (centerOfMassHops, weight)
+        var i = 0
+        var totalWeight = 0.0
+        while (i < flux.size) {
+            if (flux[i] <= threshold) {
+                i++
+                continue
+            }
+            var sumWeight = 0.0
+            var sumPos = 0.0
+            while (i < flux.size && flux[i] > threshold) {
+                val w = (flux[i] - threshold).toDouble()
+                sumWeight += w
+                sumPos += i * w
+                i++
+            }
+            if (sumWeight > 0.0) {
+                onsets.add((sumPos / sumWeight) to sumWeight)
+                totalWeight += sumWeight
+            }
+        }
+        if (onsets.isEmpty() || periodHops <= 0.0 || totalWeight <= 0.0) return 0.0 to 0f
+
+        val tolerance = maxOf(2.5, periodHops * 0.20)
+        var bestPhi = 0.0
+        var bestScore = -1.0
+        val steps = (periodHops * 10).toInt().coerceAtLeast(1)
+        for (step in 0 until steps) {
+            val phi = step * 0.1
+            var score = 0.0
+            for ((t, w) in onsets) {
+                val offset = (t - phi) % periodHops
+                val normOffset = (offset + periodHops) % periodHops
+                val dist = minOf(normOffset, periodHops - normOffset)
+                if (dist < tolerance) {
+                    val cosVal = cos(Math.PI * dist / (2.0 * tolerance))
+                    score += w * cosVal * cosVal
+                }
+            }
+            if (score > bestScore) {
+                bestScore = score
+                bestPhi = phi
+            }
+        }
+        val alignmentRatio = (bestScore / totalWeight).coerceIn(0.0, 1.0).toFloat()
+        return bestPhi to alignmentRatio
+    }
+
     private const val DETREND_HALF_WINDOW = 50
 
-    /**
-     * Normalized autocorrelation of the detrended onset signal at [lag]
-     * (best of lag-1..lag+1: a 10ms-quantised lag cannot hold a human-timed
-     * pulse exactly), clamped to 0..1. Each side is divided by its own term
-     * count so a longer lag (fewer overlapping frames) is not penalised, and
-     * variance is normalised out so loudness never changes the score.
-     */
-    private fun beatConfidence(flux: FloatArray, lag: Int): Float {
+    private fun detrend(flux: FloatArray): Pair<DoubleArray, Double> {
         val n = flux.size
         val prefix = DoubleArray(n + 1)
         for (i in 0 until n) prefix[i + 1] = prefix[i] + flux[i]
@@ -287,16 +375,24 @@ object BpmDetector {
             x[i] = flux[i] - localMean
             variance += x[i] * x[i]
         }
-        if (variance <= 0.0) return 0f
+        return x to variance
+    }
+
+    private fun normalizedCorrelation(x: DoubleArray, variance: Double, lag: Int): Double {
+        val n = x.size
+        val overlap = n - lag
+        if (lag < 1 || overlap <= 0 || variance <= 0.0) return 0.0
+        var cross = 0.0
+        for (i in 0 until overlap) cross += x[i] * x[i + lag]
+        return ((cross / overlap) / (variance / n)).coerceIn(0.0, 1.0)
+    }
+
+    private fun sampleConfidence(x: DoubleArray, variance: Double, lag: Int): Float {
         var best = 0.0
         for (l in (lag - 1)..(lag + 1)) {
-            val overlap = n - l
-            if (l < 1 || overlap <= 0) continue
-            var cross = 0.0
-            for (i in 0 until overlap) cross += x[i] * x[i + l]
-            best = maxOf(best, (cross / overlap) / (variance / n))
+            best = maxOf(best, normalizedCorrelation(x, variance, l))
         }
-        return best.coerceIn(0.0, 1.0).toFloat()
+        return best.toFloat()
     }
 
     /** Mono mean-square envelope, one value per ~10ms hop. */

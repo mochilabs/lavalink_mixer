@@ -13,8 +13,12 @@ class AdaptiveTransitionPlannerTest {
         windowStartMs = 0, windowEndMs = 10000, energyEnvelope = emptyList(), rms = 0.15f,
         rhythmicStability = 0.9f, key = key, candidates = emptyList(),
     )
-    private fun decide(out: TransitionFeatures? = features(), inc: TransitionFeatures? = features(), preserve: Boolean = false) =
-        AdaptiveTransitionPlanner.decide(out, inc, grid, grid, 10000, 5000, preserveContext = preserve)
+    private fun decide(
+        out: TransitionFeatures? = features(),
+        inc: TransitionFeatures? = features(),
+        preserve: Boolean = false,
+        crossfadeEnabled: Boolean = true,
+    ) = AdaptiveTransitionPlanner.decide(out, inc, grid, grid, 10000, 5000, preserveContext = preserve, crossfadeEnabled = crossfadeEnabled)
 
     @Test
     fun `explicit preserve context bypasses even compatible beat matching`() {
@@ -55,9 +59,10 @@ class AdaptiveTransitionPlannerTest {
     }
 
     @Test
-    fun `measured silence trims boundaries without inventing a beat`() {
+    fun `measured silence trims boundaries when crossfade is disabled`() {
         val result = assertIs<AdaptiveTransitionDecision.SilenceTrim>(decide(
             features().copy(trailingSilenceMs = 800), features().copy(leadingSilenceMs = 400),
+            crossfadeEnabled = false,
         ))
         assertEquals(9200L, result.outgoingContentEndMs)
         assertEquals(400L, result.incomingStartMs)
@@ -65,9 +70,22 @@ class AdaptiveTransitionPlannerTest {
 
         val longSilence = assertIs<AdaptiveTransitionDecision.SilenceTrim>(decide(
             features().copy(trailingSilenceMs = 4200), features().copy(leadingSilenceMs = 3100),
+            crossfadeEnabled = false,
         ))
         assertEquals(5800L, longSilence.outgoingContentEndMs)
         assertEquals(3100L, longSilence.incomingStartMs)
+    }
+
+    @Test
+    fun `measured silence trims boundaries and performs beat matching when crossfade is enabled`() {
+        val result = assertIs<AdaptiveTransitionDecision.BeatMatched>(decide(
+            features().copy(trailingSilenceMs = 800), features().copy(leadingSilenceMs = 400),
+            crossfadeEnabled = true,
+        ))
+        assertTrue(result.transition.handoffMs <= 9200L, "handoff must not exceed trimmed trailing silence")
+        assertTrue(result.transition.incomingStartMs >= 400L, "incoming start must skip leading silence")
+        val plan = assertNotNull(AdaptiveTransitionPlanner.toCrossfadePlan(result, 10000))
+        assertTrue(plan.beatMatched)
     }
     @Test
     fun `bounded candidate with smoother boundary wins without a long skip`() {

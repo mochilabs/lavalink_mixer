@@ -27,26 +27,57 @@ object AdaptiveTransitionPlanner {
         incomingDurationMs: Long = -1L,
     ): AdaptiveTransitionDecision {
         if (preserveContext) return AdaptiveTransitionDecision.Preserve("preserve_context")
-        if (!crossfadeEnabled || contentEndMs <= 0 || requestedCrossfadeMs <= 0) return AdaptiveTransitionDecision.Preserve("crossfade_disabled")
         var selectedEnd = contentEndMs
         var selectedStart = incomingLeadMs.coerceAtLeast(0L)
-        fun short(reason: String) = AdaptiveTransitionDecision.ShortCrossfade(minOf(1500L, requestedCrossfadeMs, selectedEnd), reason, selectedEnd, selectedStart)
+
+        fun short(reason: String) = AdaptiveTransitionDecision.ShortCrossfade(
+            when (reason) {
+                "missing_features", "unknown_features" -> minOf(1500L, requestedCrossfadeMs, selectedEnd)
+                else -> minOf(requestedCrossfadeMs, selectedEnd)
+            },
+            reason,
+            selectedEnd,
+            selectedStart,
+        )
+
         if (outgoingFeatures == null || incomingFeatures == null) return short("missing_features")
         if (outgoingFeatures.unknownReason != null || incomingFeatures.unknownReason != null) return short("unknown_features")
+
+        val hasBeatGrids = beatmatchEnabled &&
+            outgoingGrid != null && incomingGrid != null &&
+            outgoingGrid.bpm.isFinite() && incomingGrid.bpm.isFinite() &&
+            outgoingGrid.bpm > 0f && incomingGrid.bpm > 0f &&
+            outgoingGrid.confidence >= minConfidence && incomingGrid.confidence >= minConfidence
+
         if (outgoingFeatures.trailingSilenceMs >= 100 || incomingFeatures.leadingSilenceMs >= 100) {
             val end = if (outgoingFeatures.trailingSilenceMs > 0) {
                 minOf(contentEndMs, outgoingFeatures.windowEndMs - outgoingFeatures.trailingSilenceMs)
                     .coerceIn(1L, contentEndMs)
             } else contentEndMs
             val start = maxOf(incomingLeadMs, incomingFeatures.windowStartMs + incomingFeatures.leadingSilenceMs)
-            if (end > 0 && (incomingDurationMs <= 0 || start < incomingDurationMs - 500)) {
-                return AdaptiveTransitionDecision.SilenceTrim(end, start, "boundary_silence")
+
+            // If crossfade is disabled or no beat grids exist to mix, trim silence directly
+            if (!crossfadeEnabled || requestedCrossfadeMs <= 0 || !hasBeatGrids) {
+                if (end > 0 && (incomingDurationMs <= 0 || start < incomingDurationMs - 500)) {
+                    return AdaptiveTransitionDecision.SilenceTrim(end, start, "boundary_silence")
+                }
             }
+
+            // When crossfade + beat matching are active on valid beat grids,
+            // trim silence from boundaries so beat matching connects the audible music
+            selectedEnd = end
+            selectedStart = start
         }
+
+        if (!crossfadeEnabled || contentEndMs <= 0 || requestedCrossfadeMs <= 0) {
+            return AdaptiveTransitionDecision.Preserve("crossfade_disabled")
+        }
+
         val selected = selectBoundaries(outgoingFeatures, incomingFeatures, outgoingGrid, incomingGrid,
-            contentEndMs, incomingLeadMs, incomingDurationMs, maxTempoChange)
+            selectedEnd, selectedStart, incomingDurationMs, maxTempoChange)
         selectedEnd = selected.first
         selectedStart = selected.second
+
         if (outgoingFeatures.rms < 0.008f || incomingFeatures.rms < 0.008f) return short("low_energy")
         val energyRatio = maxOf(outgoingFeatures.rms, incomingFeatures.rms) / minOf(outgoingFeatures.rms, incomingFeatures.rms)
         if (energyRatio > 3.16f) return short("energy_mismatch")
@@ -54,12 +85,14 @@ object AdaptiveTransitionPlanner {
         val inStability = incomingFeatures.rhythmicStability ?: return short("unknown_rhythm")
         if (minOf(outStability, inStability) < 0.45f) return short("unstable_rhythm")
         if (keyClash(outgoingFeatures.key, incomingFeatures.key)) return short("key_clash")
+
+        val skipLimitMs = maxOf(4000L, requestedCrossfadeMs)
         return when (val result = BeatMatchPolicy.decide(
             outgoingGrid, incomingGrid, selectedEnd, requestedCrossfadeMs,
             crossfadeEnabled, beatmatchEnabled, maxTempoChange, minConfidence, selectedStart, incomingDurationMs,
         )) {
-            is TransitionDecision.BeatMatched -> if (result.incomingStartMs > incomingLeadMs.coerceAtLeast(0L) + 2000 ||
-                result.handoffMs < contentEndMs - 2000) short("boundary_skip_limit")
+            is TransitionDecision.BeatMatched -> if (result.incomingStartMs > selectedStart + skipLimitMs ||
+                result.handoffMs < selectedEnd - skipLimitMs) short("boundary_skip_limit")
                 else AdaptiveTransitionDecision.BeatMatched(result)
             is TransitionDecision.EqualPower -> short(result.fallbackReason)
             is TransitionDecision.Gapless -> AdaptiveTransitionDecision.Preserve(result.fallbackReason)

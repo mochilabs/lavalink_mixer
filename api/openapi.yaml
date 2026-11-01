@@ -553,7 +553,7 @@ paths:
                   version:
                     type: string
                     description: Resolved from the packaged plugin descriptor (Gradle build version), matching the running JAR.
-                    examples: ['0.3.3']
+                    examples: ['0.3.4']
   /mixer/queue/arm:
     post:
       operationId: arm

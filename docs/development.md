@@ -49,7 +49,7 @@ Use these existing tests as starting points:
 | Analysis ownership and retries | `AnalysisIsolatedFromLiveSubTest`, `DeferredAnalysisTest` |
 | Silence and trim | `SilenceAnalyzerTest`, `TailCutDeciderTest`, `TrimTransitionTest` |
 | Loudness | `NormalizationGainTest`, `NormalizationBaselineTest`, `NormalizationIntegrationTest` |
-| BPM and beat matching | `BpmDetectorTest`, `BpmGridTest`, `BpmIntegrationTest`, `BeatMatchPolicyTest`, `BeatMatchIntegrationTest`, `BeatMatchOutputTest`, `TempoStretcherTest`, `TempoEnvelopeTest`, `AdaptiveRecoveryIntegrationTest`, `AdaptiveRuntimeTest`, `AdaptiveTransitionRaceTest`, `TransitionFeaturesTest`, `AdaptiveTransitionPlannerTest` |
+| BPM and beat matching | `RealFftTest`, `BpmDetectorTest`, `BpmGridTest`, `BpmIntegrationTest`, `BeatMatchPolicyTest`, `BeatMatchIntegrationTest`, `BeatMatchOutputTest`, `TempoStretcherTest`, `TempoEnvelopeTest`, `AdaptiveRecoveryIntegrationTest`, `AdaptiveRuntimeTest`, `AdaptiveTransitionRaceTest`, `TransitionFeaturesTest`, `AdaptiveTransitionPlannerTest` |
 
 Integration tests generate local WAV files and exercise Lavaplayer players.
 They do not require a running Discord bot. Some tests exercise native audio

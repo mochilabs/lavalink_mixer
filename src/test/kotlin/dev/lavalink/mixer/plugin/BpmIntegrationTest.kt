@@ -105,6 +105,29 @@ class BpmIntegrationTest {
         assertTrue(!mixer.bpmDetectionEnabled)
         mixer.destroy()
     }
+    @Test
+    fun `smart retry detects tempo when head is drumless intro and projects head phase`() {
+        val manager = manager()
+        val file = introThenBeatFile("mixer-smart-retry", introSec = 6, bpm = 120.0, totalSec = 20)
+        val mixer = GuildMixer(45L, manager, MixerConfig().apply {
+            bpmDetectionEnabled = true
+            bpmScanMs = 5000
+        }, java.util.concurrent.Executor { it.run() })
+        try {
+            val track = loadTrack(manager, file)
+            mixer.analyzeBlocking(track, cacheOnly = true)
+            val headGrid = AnalysisCaches.bpmHead[track.identifier]
+            assertNotNull(headGrid, "bpmHead should be recovered by smart retry")
+            assertTrue(kotlin.math.abs(headGrid.bpm - 120f) < 1.5f, "recovered bpm=${headGrid.bpm}")
+            assertTrue(headGrid.confidence > 0.25f, "recovered confidence=${headGrid.confidence}")
+            // Phase should be projected into the period [0..500ms)
+            assertTrue(headGrid.phaseMs in 0L..500L, "projected phase=${headGrid.phaseMs}")
+        } finally {
+            mixer.destroy()
+            manager.shutdown()
+            file.delete()
+        }
+    }
 
     private fun manager(): DefaultAudioPlayerManager {
         val m = DefaultAudioPlayerManager()
@@ -158,6 +181,38 @@ class BpmIntegrationTest {
             for (pos in 0 until total) {
                 val click = (pos % period) < 100
                 out.writeShortLE(if (click) 25000 else 0)
+            }
+        }
+        return file
+    }
+    private fun introThenBeatFile(prefix: String, introSec: Int, bpm: Double, totalSec: Int): File {
+        val file = File.createTempFile(prefix, ".wav")
+        val total = sampleRate * totalSec
+        val introSamples = sampleRate * introSec
+        val period = (sampleRate * 60.0 / bpm).toInt()
+        val dataLen = total * 2
+        DataOutputStream(FileOutputStream(file).buffered()).use { out ->
+            out.writeBytes("RIFF")
+            out.writeIntLE(36 + dataLen)
+            out.writeBytes("WAVE")
+            out.writeBytes("fmt ")
+            out.writeIntLE(16)
+            out.writeShortLE(1)
+            out.writeShortLE(1)
+            out.writeIntLE(sampleRate)
+            out.writeIntLE(sampleRate * 2)
+            out.writeShortLE(2)
+            out.writeShortLE(16)
+            out.writeBytes("data")
+            out.writeIntLE(dataLen)
+            for (pos in 0 until total) {
+                if (pos < introSamples) {
+                    val tone = (Math.sin(2 * Math.PI * 440.0 * pos / sampleRate) * 1000).toInt()
+                    out.writeShortLE(tone)
+                } else {
+                    val click = ((pos - introSamples) % period) < 100
+                    out.writeShortLE(if (click) 25000 else 0)
+                }
             }
         }
         return file

@@ -155,6 +155,27 @@ internal class TrackAnalysisService(
                     bpmHead = BpmDetector.analyzeGrid(headFrames, sampleRate = SAMPLE_RATE, windowStartMs = 0L)
                     featuresHead = TransitionFeatureAnalyzer.analyze(headFrames, grid = bpmHead)
                 }
+                if (bpmHead == null && seekable && duration > settings.bpmScanMs * 1.5) {
+                    // Head had no discernible rhythm (e.g. ambient or acoustic intro).
+                    // Smart retry: seek forward to ~25% of the track (up to 60s) where the chorus / drop / main beat is active.
+                    val candidateStartMs = minOf(duration / 4, 60_000L).coerceAtLeast(settings.bpmScanMs)
+                    val retryStartMs = maxOf(candidateStartMs, lead).coerceAtLeast(0L)
+                    if (retryStartMs + 10_000L < duration) {
+                        val retryFrames = collectFrom(track, factory, retryStartMs, msToSamples(settings.bpmScanMs + 2000))
+                        if (retryFrames.isNotEmpty()) {
+                            val retryGrid = BpmDetector.analyzeGrid(retryFrames, sampleRate = SAMPLE_RATE, windowStartMs = retryStartMs)
+                            if (retryGrid != null && retryGrid.periodMs.isFinite() && retryGrid.periodMs > 0) {
+                                val periodMs = retryGrid.periodMs
+                                val headPhaseMs = Math.round(((retryGrid.phaseMs % periodMs) + periodMs) % periodMs).toLong()
+                                bpmHead = BeatGrid(bpm = retryGrid.bpm, phaseMs = headPhaseMs, confidence = retryGrid.confidence)
+                                if (bpm == null) bpm = BpmDetector.BpmResult(bpmHead.bpm, headPhaseMs, bpmHead.confidence)
+                                if (featuresHead != null && headFrames.isNotEmpty()) {
+                                    featuresHead = TransitionFeatureAnalyzer.analyze(headFrames, grid = bpmHead)
+                                }
+                            }
+                        }
+                    }
+                }
                 if (seekable && duration > 0 && duration < Long.MAX_VALUE / 2) {
                     val contentEndMs = if (tail > 0) (duration - tail).coerceAtLeast(0L) else duration
                     val tailStartMs = (contentEndMs - settings.bpmScanMs).coerceAtLeast(0L)
@@ -169,6 +190,17 @@ internal class TrackAnalysisService(
                             featuresTail = TransitionFeatureAnalyzer.analyze(tailFrames, tailStartMs, bpmTail)
                         }
                     }
+                }
+                if (bpmHead == null && bpmTail != null && bpmTail.periodMs.isFinite() && bpmTail.periodMs > 0) {
+                    val periodMs = bpmTail.periodMs
+                    val headPhaseMs = Math.round(((bpmTail.phaseMs % periodMs) + periodMs) % periodMs).toLong()
+                    bpmHead = BeatGrid(bpm = bpmTail.bpm, phaseMs = headPhaseMs, confidence = bpmTail.confidence * 0.85f)
+                    if (bpm == null) bpm = BpmDetector.BpmResult(bpmHead.bpm, headPhaseMs, bpmHead.confidence)
+                    if (featuresHead != null && headFrames.isNotEmpty()) {
+                        featuresHead = TransitionFeatureAnalyzer.analyze(headFrames, grid = bpmHead)
+                    }
+                } else if (bpmTail == null && bpmHead != null) {
+                    bpmTail = BeatGrid(bpm = bpmHead.bpm, phaseMs = bpmHead.phaseMs, confidence = bpmHead.confidence * 0.85f)
                 }
             }
             val guardedLead = if (duration > 0 && lead >= duration - 500) 0 else lead.coerceAtLeast(0)

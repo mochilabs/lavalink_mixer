@@ -198,9 +198,10 @@ internal class TrackAnalysisService(
 
     data class TailAnalysis(val grid: BeatGrid?, val features: TransitionFeatures)
 
-    fun measureTailGrid(track: AudioTrack, bpmScanMs: Long): BeatGrid? = measureTailAnalysis(track, bpmScanMs)?.grid
+    fun measureTailGrid(track: AudioTrack, bpmScanMs: Long, tailSilenceMs: Long = 0L): BeatGrid? =
+        measureTailAnalysis(track, bpmScanMs, tailSilenceMs)?.grid
 
-    fun measureTailAnalysis(track: AudioTrack, bpmScanMs: Long): TailAnalysis? {
+    fun measureTailAnalysis(track: AudioTrack, bpmScanMs: Long, tailSilenceMs: Long = 0L): TailAnalysis? {
         val factory = ensureAnalysisPlayer().second
         return try {
             val duration = try {
@@ -216,7 +217,15 @@ internal class TrackAnalysisService(
             if (!seekable || duration <= 0 || duration >= Long.MAX_VALUE / 2) {
                 return null
             }
-            val tailStartMs = (duration - bpmScanMs).coerceAtLeast(0L)
+            val effectiveTailSilence = if (tailSilenceMs > 0L) tailSilenceMs else {
+                try {
+                    track.identifier?.let { AnalysisCaches.trim[it]?.trailMs } ?: 0L
+                } catch (_: Exception) {
+                    0L
+                }
+            }
+            val contentEndMs = if (effectiveTailSilence > 0L) (duration - effectiveTailSilence).coerceAtLeast(0L) else duration
+            val tailStartMs = (contentEndMs - bpmScanMs).coerceAtLeast(0L)
             // Collect +2000ms buffer to compensate for decoder seek imprecision and ensure full scan window
             val collected = collectFrom(track, factory, tailStartMs, msToSamples(bpmScanMs + 2000))
             if (collected.isEmpty()) null else {

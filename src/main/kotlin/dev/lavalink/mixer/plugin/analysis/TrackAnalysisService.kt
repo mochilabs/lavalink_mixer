@@ -151,12 +151,13 @@ internal class TrackAnalysisService(
             if (settings.bpm && !bpmAttempted) {
                 val headFrames = collectFrom(track, factory, 0, msToSamples(settings.bpmScanMs))
                 if (headFrames.isNotEmpty()) {
-                    bpm = BpmDetector.analyze(headFrames)
-                    bpmHead = BpmDetector.analyzeGrid(headFrames, windowStartMs = 0L)
+                    bpm = BpmDetector.analyze(headFrames, sampleRate = SAMPLE_RATE)
+                    bpmHead = BpmDetector.analyzeGrid(headFrames, sampleRate = SAMPLE_RATE, windowStartMs = 0L)
                     featuresHead = TransitionFeatureAnalyzer.analyze(headFrames, grid = bpmHead)
                 }
                 if (seekable && duration > 0 && duration < Long.MAX_VALUE / 2) {
-                    val tailStartMs = (duration - settings.bpmScanMs).coerceAtLeast(0L)
+                    val contentEndMs = if (tail > 0) (duration - tail).coerceAtLeast(0L) else duration
+                    val tailStartMs = (contentEndMs - settings.bpmScanMs).coerceAtLeast(0L)
                     if (tailStartMs == 0L) {
                         bpmTail = bpmHead
                         featuresTail = featuresHead
@@ -164,7 +165,7 @@ internal class TrackAnalysisService(
                         // Collect +2000ms buffer to compensate for decoder seek imprecision and ensure full scan window
                         val tailFrames = collectFrom(track, factory, tailStartMs, msToSamples(settings.bpmScanMs + 2000))
                         if (tailFrames.isNotEmpty()) {
-                            bpmTail = BpmDetector.analyzeGrid(tailFrames, windowStartMs = tailStartMs)
+                            bpmTail = BpmDetector.analyzeGrid(tailFrames, sampleRate = SAMPLE_RATE, windowStartMs = tailStartMs)
                             featuresTail = TransitionFeatureAnalyzer.analyze(tailFrames, tailStartMs, bpmTail)
                         }
                     }
@@ -219,7 +220,7 @@ internal class TrackAnalysisService(
             // Collect +2000ms buffer to compensate for decoder seek imprecision and ensure full scan window
             val collected = collectFrom(track, factory, tailStartMs, msToSamples(bpmScanMs + 2000))
             if (collected.isEmpty()) null else {
-                val grid = BpmDetector.analyzeGrid(collected, windowStartMs = tailStartMs)
+                val grid = BpmDetector.analyzeGrid(collected, sampleRate = SAMPLE_RATE, windowStartMs = tailStartMs)
                 TailAnalysis(grid, guardFeatureWindow(TransitionFeatureAnalyzer.analyze(collected, tailStartMs, grid), duration))
             }
         } finally {
@@ -435,7 +436,7 @@ internal class TrackAnalysisService(
     ): BpmDetector.BpmResult? {
         val collected = collectFrom(track, factory, 0, msToSamples(bpmScanMs))
         if (collected.isEmpty()) return null
-        return BpmDetector.analyze(collected)
+        return BpmDetector.analyze(collected, sampleRate = SAMPLE_RATE)
     }
 
     private fun collectFrom(

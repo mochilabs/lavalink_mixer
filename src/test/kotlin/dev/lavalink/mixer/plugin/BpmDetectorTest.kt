@@ -282,6 +282,36 @@ class BpmDetectorTest {
     }
 
     @Test
+    fun `pop drum track with hats sweep from 0_3 to 0_8 amplitude detects 70 bpm`() {
+        val bpm = 70.0
+        val periodSamples = sr * 60.0 / bpm
+        val kickAmp = 0.85f
+
+        // Sweep hi-hat amplitude from 0.3x to 0.8x of kick amplitude
+        for (ratio in listOf(0.3f, 0.45f, 0.6f, 0.75f, 0.8f)) {
+            val hatAmp = kickAmp * ratio
+            val buf = FloatArray(samples)
+            var t = 0.0
+            var beat = 0
+            while (t < samples - sr) {
+                val at = t.toInt().coerceIn(0, samples - 1)
+                if (beat % 2 == 0) {
+                    addKick(buf, at, kickAmp)
+                } else {
+                    addSnare(buf, at, 0.40f, seed = beat)
+                }
+                val hatAt = (at + periodSamples / 2).toInt().coerceIn(0, samples - 1)
+                addHiHat(buf, hatAt, hatAmp, seed = beat * 10)
+                beat++
+                t += periodSamples
+            }
+            val result = BpmDetector.analyze(chunked(buf))
+            assertNotNull(result, "no BPM detected for hat ratio $ratio")
+            near(result.bpm, 70f, 1.5f)
+        }
+    }
+
+    @Test
     fun `mid-song window with continuous audio reports true first onset not 0ms`() {
         val buf = FloatArray(samples)
         // Background continuous pad/drone playing from sample 0 (amplitude 0.25)

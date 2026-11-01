@@ -89,8 +89,9 @@ object SpectralFluxAnalyzer {
                 fft.transform(re, im)
                 fft.magnitudes(re, im, chMags)
 
+                val normFactor = 1024f / FFT_SIZE
                 for (i in chMags.indices) {
-                    currLogAvg[i] += ln(1f + 10f * chMags[i]) / channels
+                    currLogAvg[i] += ln(1f + 10f * chMags[i] * normFactor) / channels
                 }
             }
 
@@ -124,15 +125,20 @@ object SpectralFluxAnalyzer {
             System.arraycopy(currLogAvg, 0, prevLogAvg, 0, currLogAvg.size)
         }
 
-        // Standardize each band by its standard deviation so low bass doesn't bury high attacks
+        // Standardize active bands by their standard deviation so low bass doesn't bury high attacks.
+        // Inactive bands (stdDev < 0.05f, pure tone or static drone) receive zero weight to prevent noise amplification.
         val lowStd = stdDev(lowFlux)
         val midStd = stdDev(midFlux)
         val highStd = stdDev(highFlux)
 
+        if (lowStd < 0.05f && midStd < 0.05f && highStd < 0.05f) {
+            return null
+        }
+
         val combined = FloatArray(nHops)
-        val invLow = if (lowStd > 1e-6f) weights.low / lowStd else 0f
-        val invMid = if (midStd > 1e-6f) weights.mid / midStd else 0f
-        val invHigh = if (highStd > 1e-6f) weights.high / highStd else 0f
+        val invLow = if (lowStd >= 0.05f) weights.low / lowStd else 0f
+        val invMid = if (midStd >= 0.05f) weights.mid / midStd else 0f
+        val invHigh = if (highStd >= 0.05f) weights.high / highStd else 0f
 
         for (i in 0 until nHops) {
             combined[i] = lowFlux[i] * invLow + midFlux[i] * invMid + highFlux[i] * invHigh

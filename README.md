@@ -30,8 +30,9 @@ client must keep `autoSkip: false` and synchronize its queue from
    ```bash
    ./gradlew jar   # -> build/libs/lavalink_mixer-<version>.jar
    ```
-   Copy the jar into the server's `plugins/` dir (or declare
-   `dev.lavalink.mixer:mixer:1.0.0` in `application.yml`) and restart Lavalink.
+   Copy the JAR into the server's `plugins/` directory, or declare
+   `dev.lavalink.mixer:mixer-plugin:0.3.3` in Lavalink's plugin dependency
+   configuration, then restart Lavalink.
 2. Enable the filter **once per guild** (required for any audible effect):
    ```json
    { "op": "filters", "guildId": "123", "pluginFilters": { "mixer": { "guildId": "123" } } }

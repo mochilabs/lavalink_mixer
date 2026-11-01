@@ -40,7 +40,7 @@ class BeatMatchOutputTest {
 
     private fun verifyOutput(incomingBpm: Float, fadeBeats: Int, incomingPhaseMs: Long) {
         val outgoingBpm = 120f
-        val outgoingSeconds = 9
+        val outgoingSeconds = 12
         val fileA = clickFile(outgoingBpm, 0L, outgoingSeconds, 0)
         val fileB = clickFile(incomingBpm, incomingPhaseMs, 12, 1)
         val manager = DefaultAudioPlayerManager().apply {
@@ -48,7 +48,7 @@ class BeatMatchOutputTest {
             configuration.outputFormat = format
         }
         val config = MixerConfig().apply {
-            crossfadeMs = fadeBeats * 500L
+            crossfadeMs = fadeBeats * 500L + if (incomingBpm == outgoingBpm) 0L else 1000L
             crossfadeEnabled = true
             fadeInMs = 0
             maskMs = 0
@@ -108,11 +108,15 @@ class BeatMatchOutputTest {
 
             val outgoingOnsets = onsets(left)
             val incomingOnsets = onsets(right)
-            val overlapOnsets = incomingOnsets.filter { it < handoffOutputSample }
+            val decision = BeatMatchPolicy.decide(
+                BeatGrid(outgoingBpm, 0L, 1f), BeatGrid(incomingBpm, incomingPhaseMs, 1f),
+                outgoingSeconds * 1000L, config.crossfadeMs,
+            ) as TransitionDecision.BeatMatched
+            val fadeEndSample = ((decision.startMs + decision.fadeMs) * sampleRate / 1000).toInt()
+            val overlapOnsets = incomingOnsets.filter { it < minOf(handoffOutputSample, fadeEndSample) }
             assertTrue(overlapOnsets.size >= fadeBeats - 1,
                 "expected at least ${fadeBeats - 1} incoming clicks during overlap; got ${overlapOnsets.map(::ms)}")
             val outgoingPeriodSamples = sampleRate / 2
-            val outgoingEndSample = outgoingSeconds * sampleRate
             assertTrue(outgoingOnsets.isNotEmpty(), "outgoing source clicks missing")
             for (outgoingOnset in outgoingOnsets) {
                 val expected = (outgoingOnset.toDouble() / outgoingPeriodSamples).roundToInt() * outgoingPeriodSamples
@@ -124,15 +128,15 @@ class BeatMatchOutputTest {
                 val gridErrorMs = ms(abs(incomingOnset - expected))
                 assertTrue(gridErrorMs <= 20.0,
                     "incoming click ${ms(incomingOnset)}ms differs from generated outgoing grid ${ms(expected)}ms by ${gridErrorMs}ms; bpm=$incomingBpm beats=$fadeBeats")
-                // At the file-end beat the outgoing source is silent. Verify that beat against
-                // the generated grid above, and compare both emitted sources for earlier beats.
-                if (expected < outgoingEndSample) {
+                // The boundary beat belongs to recovery, where outgoing gain is zero.
+                // Its slightly earlier native onset still needs the generated-grid assertion.
+                if (expected < fadeEndSample) {
                     val nearestOutgoing = outgoingOnsets.minBy { abs(it - incomingOnset) }
                     val errorMs = ms(abs(nearestOutgoing - incomingOnset))
                     assertTrue(errorMs <= 20.0,
                         "source clicks differ by ${errorMs}ms at incoming=${ms(incomingOnset)}ms, outgoing=${ms(nearestOutgoing)}ms; bpm=$incomingBpm beats=$fadeBeats")
                 } else {
-                    assertTrue(expected == outgoingEndSample,
+                    assertTrue(expected == fadeEndSample,
                         "incoming overlap continued beyond outgoing end: ${ms(incomingOnset)}ms")
                 }
             }
@@ -145,7 +149,7 @@ class BeatMatchOutputTest {
                     "post-handoff interval ${ms(next - first)}ms differs from native ${nativePeriodMs}ms")
             }
             // A repeated/skipped source interval at the boundary must not hide behind a correct later BPM.
-            val lastOverlap = overlapOnsets.last()
+            val lastOverlap = incomingOnsets.last { it < handoffOutputSample }
             val firstNative = postOnsets.first()
             val boundaryMs = ms(firstNative - lastOverlap)
             assertTrue(boundaryMs >= minOf(500.0, nativePeriodMs) - 20.0 &&
@@ -178,6 +182,10 @@ class BeatMatchOutputTest {
         AnalysisCaches.bpm[track.identifier] = BpmDetector.BpmResult(grid.bpm, grid.phaseMs, grid.confidence)
         AnalysisCaches.bpmHead[track.identifier] = grid
         AnalysisCaches.bpmTail[track.identifier] = grid
+        val features = TransitionFeatures(0, track.duration, emptyList(), 0.2f, 1f,
+            KeyEstimate.Unknown("synthetic_fixture"), emptyList())
+        AnalysisCaches.featuresHead[track.identifier] = features
+        AnalysisCaches.featuresTail[track.identifier] = features
     }
 
     private fun iPlayer(guildId: Long, player: AudioPlayer): IPlayer = Proxy.newProxyInstance(

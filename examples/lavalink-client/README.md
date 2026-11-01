@@ -294,3 +294,22 @@ console.log(await mixer.state(player));
 
 Server-side REST reference: [`api/openapi.yaml`](../../api/openapi.yaml) ·
 plugin internals: [`README.md`](../../README.md)
+
+
+### Adaptive AutoMix and current BPM
+
+On servers reporting `adaptiveTransitionsSupported: true`, optionally call
+`POST /mixer/analyze` with `{guildId, encodedTrack}` when the next queue candidate
+changes. Do not wait for it before sending JIT arm/invalidate commands. A busy or
+cached warmup returns `accepted:false`; the normal arm path still handles analysis.
+
+Use `currentTrackBpm` only when `currentTrackBpmIdentifier` equals the bot's
+confirmed now-playing identifier. Missing fields, null values, and older servers
+mean no BPM display. Do not label `nextTrackBpm` as the current track's tempo.
+
+`preserveTransition:true` on an arm expresses explicit continuous-playback intent.
+It belongs to that arm's epoch/track and idempotency fingerprint. It suppresses
+crossfade, boundary trim and incoming fade-in; omit it for normal AutoMix.
+AutoMix is not an album classifier: a client without reliable album provenance
+must not guess this flag. Transition events report `transitionKind` and
+`decisionReason`; overlap start also reports `overlapMs` and `recoveryMs`.

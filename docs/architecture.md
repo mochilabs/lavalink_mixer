@@ -65,7 +65,9 @@ Closing a filter retires its feeder ID.
 `SiphonQueue` is bounded by samples per channel, rather than decoder chunks.
 Overflow removes old queued audio, and underflow fills the missing portion
 with zeroes. Its production capacity accounts for Lavaplayer frame-buffer prefill.
-Each queued frame records its production speed. Reads and discards use that
+Each queued frame records the source-rate span attributed to its output. Native
+output can be delayed, so the stretcher maintains a FIFO of submitted rate spans
+rather than reading the most recently requested rate. Reads and discards use that
 speed, so a later native failure does not reinterpret already queued audio
 at the fallback speed.
 
@@ -140,7 +142,25 @@ Measurement filtering does not replace output PCM. Normalization defaults to
 attenuation only. Silence detection combines offline trim points with a realtime
 tail detector on raw main PCM before gain application.
 
+`TransitionFeatureAnalyzer` extracts bounded energy, rhythm stability, local chroma
+key candidates and boundary candidates from the existing BPM PCM scans.
+`AdaptiveTransitionPlanner` compares candidate pairs within a 2-second nonsilent
+skip budget, and selects preserve, silence trim, short crossfade or beat matching.
+The thresholds are conservative heuristics awaiting representative music calibration.
 `BeatMatchPolicy` chooses compatible beat grids and a 2-, 4-, or 8-beat fade.
+`CrossfadePlan.overlapMs` controls gain fading; `recoveryMs` reserves an incoming-only
+speed recovery inside the total window. `TempoEnvelope` runs on projected output
+sample coordinates in the secondary producer, so decoding ahead does not shift
+its schedule. Keeping the native delegate alive at unity avoids discarding its tail.
+Exact native per-output input positions are unavailable: FIFO source integration
+is tested to a tolerance, not claimed sample-exact WSOLA correspondence.
+
+`requestPreanalysis` bounds queued warmup to one per guild and writes only BPM and
+feature caches. It never arms, promotes or changes live gain. Current-track BPM
+analysis can run without a queued next track. Results are track-keyed; normal JIT
+arming and epoch checks remain the authority for playback. Explicit preservation
+is an optional arm field included in the idempotency fingerprint, never a global
+sticky album mode.
 `TempoStretcher` applies producer-side speed changes using lavadsp. Low confidence,
 incompatible tempos, and unavailable grids can fall back to ordinary crossfade.
 Native stretching failures fall back to forwarding unstretched PCM.

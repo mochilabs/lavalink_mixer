@@ -12,6 +12,10 @@ data class CrossfadePlan(
     val fadeBeats: Int = 0,
     val targetBpm: Float = 0f,
     val fallbackReason: String? = null,
+    val overlapMs: Long = durationMs,
+    val recoveryMs: Long = 0L,
+    val transitionKind: String = if (beatMatched) "beat_matched" else "crossfade",
+    val reason: String? = fallbackReason,
 )
 
 /** Timing rules for silence-trimmed transitions. */

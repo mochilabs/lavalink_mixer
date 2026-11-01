@@ -9,6 +9,24 @@ import kotlin.test.assertTrue
 
 class BeatMatchPolicyTest {
 
+    @Test
+    fun `recovery is reserved inside budget and begins after beat overlap`() {
+        val decision = assertIs<TransitionDecision.BeatMatched>(BeatMatchPolicy.decide(
+            grid(120f), grid(115f), 60_000, 5000,
+        ))
+        val plan = assertNotNull(BeatMatchPolicy.toCrossfadePlan(decision, 60_000, 5000))
+        assertTrue(plan.recoveryMs >= 500)
+        assertEquals(plan.durationMs, plan.overlapMs + plan.recoveryMs)
+        assertEquals(plan.handoffMs, plan.startMs + plan.durationMs)
+        assertTrue(plan.durationMs <= 5000)
+        assertTrue(plan.startMs + plan.overlapMs < plan.handoffMs)
+    }
+
+    @Test
+    fun `insufficient recovery space falls back rather than abrupt tempo reset`() {
+        assertIs<TransitionDecision.EqualPower>(BeatMatchPolicy.decide(grid(120f), grid(115f), 60_000, 1100))
+    }
+
     private fun grid(bpm: Float = 120f, phaseMs: Long = 0L, confidence: Float = 0.8f) =
         BeatGrid(bpm = bpm, phaseMs = phaseMs, confidence = confidence)
 

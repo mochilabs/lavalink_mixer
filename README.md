@@ -83,6 +83,37 @@ mixer:
   maxParallelOverlays: 4
 ```
 
+### Adaptive transitions
+
+AutoMix evaluates bounded head/tail candidates using energy, rhythm stability,
+local key candidates, beat phase and tempo cost. It chooses boundary preservation,
+silence trimming, a short crossfade, or beat matching. Unknown analysis falls back
+conservatively; these are inspectable heuristics, not Apple's proprietary model.
+Alternate nonsilent candidate points skip at most 2 seconds at either boundary.
+Key confidence and energy thresholds still need real-music calibration.
+
+A beat-matched plan reserves time inside `crossfadeMs` for incoming-only tempo
+recovery. The outgoing gain reaches zero before recovery begins; incoming speed
+smoothly returns to 1.0 before main-player handoff. The envelope follows generated
+audio coordinates rather than a wall timer, including decoder prefill. Native
+buffering means source-position accounting is an integrated estimate; failure
+falls back without replaying an already emitted block, but a hidden native tail
+cannot be recovered through the current lavadsp API.
+
+`GET /mixer/state` advertises `adaptiveTransitionsSupported` and reports
+`transitionKind`, `decisionReason`, and nullable `currentTrackBpm` with
+`currentTrackBpmIdentifier`. Match that identifier to the client's confirmed
+current track. BPM describes cached original audio, not the temporary playback speed.
+
+Clients can warm the next candidate with `POST /mixer/analyze` and
+`{"guildId":"123","encodedTrack":"..."}`. A 202 `accepted` receipt is best-effort;
+arming remains on the protocol-v2 JIT path. Queue changes never arm warmed tracks.
+For explicit continuous album playback, add `preserveTransition:true` to
+`/mixer/queue/arm`. This boundary uses no overlap, trim, or incoming fade-in.
+Do not infer album intent from matching artist/title strings.
+
+See [adaptive calibration](docs/adaptive-calibration.md) for local pair reports.
+
 ### Enable beat-matched AutoMix
 
 Beat matching is opt-in. It requires the mixer filter and all three settings:
@@ -148,6 +179,7 @@ If the same key is replayed with a different payload, the request is rejected wi
 
 | Method | Path | Headers | Body | Effect |
 |---|---|---|---|---|
+| POST | `/mixer/analyze` | `{guildId, encodedTrack}` | – | Best-effort cache-only warmup, 202 `{accepted}` |
 | GET | `/mixer/info` | — | – | Returns `{ protocolVersion: 2, version }` |
 | POST | `/mixer/queue/arm` | `Idempotency-Key` | `{guildId, epoch, encodedTrack?, isEmpty}` | Arms the next track; advances state to `ARMED` or `NO_NEXT` |
 | POST | `/mixer/queue/invalidate` | `Idempotency-Key` | `{guildId, epoch}` | Clears the `ARMED` slot; if still `PLAYING`, tells server to re-evaluate JIT (fires `refiredNeedNext`) |

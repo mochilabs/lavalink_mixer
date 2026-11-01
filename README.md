@@ -39,11 +39,11 @@ Add the plugin to your Lavalink `application.yml`:
 ```yaml
 lavalink:
   plugins:
-    - dependency: "dev.lavalink.mixer:mixer-plugin:0.3.4"
+    - dependency: "io.github.mochilabs.mixer:mixer-plugin:0.3.6"
       repository: "https://maven.pkg.github.com/mochilabs/lavalink_mixer"
 ```
 
-Or manually download `lavalink_mixer-0.3.4.jar` from [Releases](https://github.com/mochilabs/lavalink_mixer/releases) and place it into Lavalink's `plugins/` directory, then restart Lavalink.
+Or manually download `lavalink_mixer-0.3.6.jar` from [Releases](https://github.com/mochilabs/lavalink_mixer/releases) and place it into Lavalink's `plugins/` directory, then restart Lavalink.
 
 ### 2. Enable Filter (Required Once Per Guild)
 
@@ -202,7 +202,7 @@ All endpoints accept standard Lavalink `Authorization` headers.
 
 | Method | Path | Header | Body | Description |
 |---|---|---|---|---|
-| `GET` | `/mixer/info` | — | — | Returns `{ protocolVersion: 2, version: "0.3.4" }` |
+| `GET` | `/mixer/info` | — | — | Returns `{ protocolVersion: 2, version: "0.3.6" }` |
 | `GET` | `/mixer/state?guildId=` | — | — | Returns current state, config, transition status, and BPM |
 | `POST` | `/mixer/analyze` | — | `{ guildId, encodedTrack }` | Pre-warms analysis cache before arming (returns 202) |
 | `POST` | `/mixer/queue/arm` | `Idempotency-Key` | `{ guildId, epoch, encodedTrack?, isEmpty, preserveTransition? }` | Arms the next track for JIT transition |
@@ -326,7 +326,7 @@ Requirements: **JDK 17+**
 ./gradlew build
 ```
 
-Artifact output: `build/libs/lavalink_mixer-0.3.4.jar`.
+Artifact output: `build/libs/lavalink_mixer-0.3.6.jar`.
 
 ---
 

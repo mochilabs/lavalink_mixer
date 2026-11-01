@@ -19,9 +19,9 @@ Beat matching already exists.
 
 ## Find the implementation
 
-Production code is under `src/main/kotlin/dev/lavalink/mixer/plugin/`.
+Production code is under `src/main/kotlin/io/github/mochilabs/mixer/`.
 The `audio/`, `analysis/`, and `protocol/` directories all use the same Kotlin
-package, `dev.lavalink.mixer.plugin`. Preserve that convention when adding files.
+package, `io.github.mochilabs.mixer`. Preserve that convention when adding files.
 
 - `MixerPlugin.kt`: guild registry, shared scheduler, analysis executor, track loading.
 - `GuildMixer.kt`: player ownership, queue slots, crossfade lifecycle, gains, overlays.
@@ -30,7 +30,7 @@ package, `dev.lavalink.mixer.plugin`. Preserve that convention when adding files
 - `audio/`: PCM mixing, queues, gain ramps, and tempo stretching.
 - `analysis/`: isolated analysis decoding, caches, silence, loudness, and beat grids.
 - `MixerConfig.kt`: startup defaults bound under `mixer:` in Lavalink configuration.
-- `src/test/kotlin/dev/lavalink/mixer/plugin/`: unit and local audio integration tests.
+- `src/test/kotlin/io/github/mochilabs/mixer/`: unit and local audio integration tests.
 
 ## Preserve these constraints
 

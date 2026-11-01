@@ -33,8 +33,8 @@ but does not configure automatic JDK provisioning.
 Run a test class by its fully qualified name:
 
 ```bash
-./gradlew test --tests 'dev.lavalink.mixer.plugin.GuildMixerProtocolTest'
-./gradlew test --tests 'dev.lavalink.mixer.plugin.*BeatMatch*'
+./gradlew test --tests 'io.github.mochilabs.mixer.GuildMixerProtocolTest'
+./gradlew test --tests 'io.github.mochilabs.mixer.*BeatMatch*'
 ```
 
 Use these existing tests as starting points:

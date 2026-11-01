@@ -4,7 +4,7 @@
 
 `lavalink_mixer` is a plugin loaded by a Lavalink server. There is no standalone
 application entry point. Spring discovers the services in
-`dev.lavalink.mixer.plugin` through the plugin descriptor at
+`io.github.mochilabs.mixer` through the plugin descriptor at
 `src/main/resources/lavalink-plugins/mixer-plugin.properties`.
 
 The build uses Kotlin 2.1.20 and targets JVM 17. Its host dependencies are

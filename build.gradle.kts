@@ -8,7 +8,7 @@ plugins {
     `maven-publish`
 }
 
-group = "dev.lavalink.mixer"
+group = "io.github.mochilabs.mixer"
 
 // Version follows the release tag. GitHub Releases pass it via `-Pversion=`
 // (release.yml); local/dev builds without a tag fall back to a snapshot so
@@ -65,7 +65,7 @@ tasks {
         description = "Evaluate adaptive transitions for an explicit local WAV pair manifest."
         dependsOn("testClasses")
         classpath = sourceSets["test"].runtimeClasspath
-        mainClass.set("dev.lavalink.mixer.plugin.AdaptiveCalibration")
+        mainClass.set("io.github.mochilabs.mixer.AdaptiveCalibration")
         doFirst {
             args(
                 providers.gradleProperty("pairsFile").orNull ?: throw GradleException("Provide -PpairsFile=/absolute/path/to/pairs.tsv"),
@@ -79,7 +79,7 @@ tasks {
         description = "Measure head/tail BPM grids for local WAV files (opt-in)."
         dependsOn("testClasses")
         classpath = sourceSets["test"].runtimeClasspath
-        mainClass.set("dev.lavalink.mixer.plugin.BpmCalibration")
+        mainClass.set("io.github.mochilabs.mixer.BpmCalibration")
         doFirst {
             val audioDir = providers.gradleProperty("audioDir").orNull
                 ?: throw GradleException("Provide -PaudioDir=/absolute/path/to/wavs")

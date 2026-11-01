@@ -5,6 +5,11 @@ import com.sedmelluq.discord.lavaplayer.player.DefaultAudioPlayerManager
 import com.sedmelluq.discord.lavaplayer.track.AudioTrack
 import com.sedmelluq.discord.lavaplayer.track.AudioTrackInfo
 import dev.arbjerg.lavalink.api.IPlayer
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.lang.reflect.Proxy
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
@@ -114,6 +119,26 @@ class AdaptiveRuntimeTest {
             f.mixer.poll()
             assertEquals("short_crossfade", f.mixer.transitionStatus.kind)
             assertEquals("missing_features", f.mixer.transitionStatus.reason)
+        }
+    }
+
+    @Test
+    fun `state response encodes default valued capability and protocol fields under default kotlinx Json`() {
+        val manager = DefaultAudioPlayerManager()
+        val plugin = MixerPlugin(manager, MixerConfig())
+        try {
+            val state = MixerRestHandler(plugin).state(1L).body!!
+            // Spring's KotlinSerializationJsonHttpMessageConverter uses Json.Default (encodeDefaults = false).
+            val wire = Json.parseToJsonElement(Json.encodeToString(MixerState.serializer(), state)).jsonObject
+            assertEquals(2, wire.getValue("protocolVersion").jsonPrimitive.int)
+            assertEquals("IDLE", wire.getValue("state").jsonPrimitive.content)
+            assertFalse(wire.getValue("bpmDetectionEnabled").jsonPrimitive.boolean)
+            assertFalse(wire.getValue("beatmatchEnabled").jsonPrimitive.boolean)
+            assertTrue(wire.getValue("adaptiveTransitionsSupported").jsonPrimitive.boolean)
+            assertFalse(wire.getValue("normalizationEnabled").jsonPrimitive.boolean)
+        } finally {
+            plugin.destroy()
+            manager.shutdown()
         }
     }
 

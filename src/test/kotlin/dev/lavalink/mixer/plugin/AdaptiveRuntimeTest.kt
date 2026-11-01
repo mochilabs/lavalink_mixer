@@ -136,6 +136,8 @@ class AdaptiveRuntimeTest {
             assertFalse(wire.getValue("beatmatchEnabled").jsonPrimitive.boolean)
             assertTrue(wire.getValue("adaptiveTransitionsSupported").jsonPrimitive.boolean)
             assertFalse(wire.getValue("normalizationEnabled").jsonPrimitive.boolean)
+            assertFalse("playbackState" in wire)
+            assertFalse("nextTrackFirstBeatMs" in wire)
         } finally {
             plugin.destroy()
             manager.shutdown()

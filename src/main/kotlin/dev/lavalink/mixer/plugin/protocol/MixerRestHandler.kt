@@ -154,10 +154,8 @@ data class MixerState(
     val duckLevel: Float,
     /** Wire protocol version of this plugin's control plane. */
     val protocolVersion: Int,
-    /** v2 state-machine name, identical to [playbackState] ("IDLE"|"PLAYING"|"ARMED"|"NO_NEXT"). */
+    /** Protocol state-machine name ("IDLE"|"PLAYING"|"ARMED"|"NO_NEXT"). */
     val state: String,
-    /** Raw PlaybackState enum name, kept for backward compatibility with v1 clients. */
-    val playbackState: String,
     /** Highest epoch the mixer has accepted (v2 protocol bookkeeping). */
     val lastKnownEpoch: Long,
     val normalizationEnabled: Boolean,
@@ -195,8 +193,7 @@ data class MixerState(
     val decisionReason: String?,
     /** Detected tempo (BPM) of the queued next track; null while detection is pending or disabled. */
     val nextTrackBpm: Float?,
-    /** Offset (ms) of the queued track's first detected downbeat; null with [nextTrackBpm]. */
-    val nextTrackFirstBeatMs: Long?,
+    /** Track-relative beat-grid phase offset in milliseconds, when available. */
     val nextTrackPhaseMs: Long?,
     val nextTrackBpmConfidence: Float?,
     val beatmatchEnabled: Boolean,
@@ -247,7 +244,6 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
             is ArmResult.PreResetArrival -> ResponseEntity.status(HttpStatus.CONFLICT).body(
                 mapOf(
                     "error" to "PRE_RESET_ARRIVAL",
-                    "v2WindowOpenAt" to res.windowOpenAt,
                     "windowOpenAt" to res.windowOpenAt,
                     "lastKnownEpoch" to res.lastKnownEpoch,
                 )
@@ -271,7 +267,6 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
             is InvalidateResult.PreResetArrival -> ResponseEntity.status(HttpStatus.CONFLICT).body(
                 mapOf(
                     "error" to "PRE_RESET_ARRIVAL",
-                    "v2WindowOpenAt" to res.windowOpenAt,
                     "windowOpenAt" to res.windowOpenAt,
                     "lastKnownEpoch" to res.lastKnownEpoch,
                 )
@@ -303,7 +298,6 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
             is OverrideResult.PreResetArrival -> ResponseEntity.status(HttpStatus.CONFLICT).body(
                 mapOf(
                     "error" to "PRE_RESET_ARRIVAL",
-                    "v2WindowOpenAt" to res.windowOpenAt,
                     "windowOpenAt" to res.windowOpenAt,
                     "lastKnownEpoch" to res.lastKnownEpoch,
                 )
@@ -357,7 +351,6 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
                 duckLevel = mixer.duckLevel,
                 protocolVersion = 2,
                 state = mixer.playbackState.name,
-                playbackState = mixer.playbackState.name,
                 lastKnownEpoch = mixer.lastKnownEpoch,
                 normalizationEnabled = mixer.normalizationEnabled,
                 silenceEnabled = mixer.silenceSkipEnabled,
@@ -382,7 +375,6 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
                 transitionKind = transition.kind,
                 decisionReason = transition.reason,
                 nextTrackBpm = mixer.peekNextBeatGrid()?.bpm ?: mixer.peekNextBpm()?.bpm,
-                nextTrackFirstBeatMs = mixer.peekNextBeatGrid()?.phaseMs ?: mixer.peekNextBpm()?.firstBeatMs,
                 nextTrackPhaseMs = mixer.peekNextBeatGrid()?.phaseMs ?: mixer.peekNextBpm()?.firstBeatMs,
                 nextTrackBpmConfidence = mixer.peekNextBeatGrid()?.confidence ?: mixer.peekNextBpm()?.confidence,
                 beatmatchEnabled = mixer.beatmatchEnabled,
@@ -458,12 +450,14 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
     fun silence(@RequestBody body: SilenceRequest): ResponseEntity<MixerState> {
         val guildId = gid(body.guildId)
         val mixer = plugin.getOrCreate(guildId)
-        mixer.silenceSkipEnabled = body.enabled
-        body.thresholdDb?.let { mixer.silenceThresholdDb = it.coerceIn(-90f, -20f) }
-        body.minSoundMs?.let { mixer.silenceMinSoundMs = it.coerceIn(20, 2000) }
-        body.headScanMs?.let { mixer.silenceHeadScanMs = it.coerceIn(1000, 60000) }
-        body.tailScanMs?.let { mixer.silenceTailScanMs = it.coerceIn(1000, 60000) }
-        body.tailConfirmMs?.let { mixer.tailConfirmMs = it.coerceIn(300, 10000) }
+        mixer.updateSilence(
+            enabled = body.enabled,
+            thresholdDb = body.thresholdDb,
+            minSoundMs = body.minSoundMs,
+            headScanMs = body.headScanMs,
+            tailScanMs = body.tailScanMs,
+            confirmMs = body.tailConfirmMs,
+        )
         return stateById(body.guildId, guildId)
     }
 

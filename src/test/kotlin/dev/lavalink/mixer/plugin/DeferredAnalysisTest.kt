@@ -105,6 +105,27 @@ class DeferredAnalysisTest {
         }
     }
 
+    @Test
+    fun `first track silence preanalysis caches trailing silence without promoting queue slot`() {
+        val manager = manager()
+        val file = paddedToneFile("mixer-first-silence", 440.0, toneSeconds = 4, tailSilentSeconds = 2)
+        try {
+            val mixer = GuildMixer(33L, manager, MixerConfig().apply {
+                silenceSkipEnabled = true
+                silenceHeadScanMs = 1500
+                silenceTailScanMs = 3000
+            }, java.util.concurrent.Executor { it.run() })
+            val track = loadTrack(manager, file)
+            assertTrue(mixer.requestPreanalysis(track), "first track with silenceSkipEnabled should schedule preanalysis")
+            val trim = assertNotNull(mixer.trimForTest(track.identifier), "preanalysis must cache trim points for the first track")
+            assertEquals("idle", mixer.analysisState(), "cache-only preanalysis must not arm or promote a next slot")
+            mixer.destroy()
+        } finally {
+            file.delete()
+            manager.shutdown()
+        }
+    }
+
     private fun manager(): DefaultAudioPlayerManager {
         val m = DefaultAudioPlayerManager()
         m.registerSourceManager(com.sedmelluq.discord.lavaplayer.source.local.LocalAudioSourceManager())
@@ -154,6 +175,34 @@ class DeferredAnalysisTest {
             out.writeIntLE(dataLen)
             for (i in 0 until samples) {
                 val v = (sin(2.0 * PI * frequency * i / sampleRate) * 16000).toInt()
+                out.writeShortLE(v)
+                out.writeShortLE(v)
+            }
+        }
+        return file
+    }
+
+    private fun paddedToneFile(prefix: String, frequency: Double, toneSeconds: Int, tailSilentSeconds: Int): File {
+        val file = File.createTempFile(prefix, ".wav")
+        val toneSamples = sampleRate * toneSeconds
+        val totalSamples = sampleRate * (toneSeconds + tailSilentSeconds)
+        val dataLen = totalSamples * 2 * 2
+        DataOutputStream(FileOutputStream(file).buffered()).use { out ->
+            out.writeBytes("RIFF")
+            out.writeIntLE(36 + dataLen)
+            out.writeBytes("WAVE")
+            out.writeBytes("fmt ")
+            out.writeIntLE(16)
+            out.writeShortLE(1)
+            out.writeShortLE(2)
+            out.writeIntLE(sampleRate)
+            out.writeIntLE(sampleRate * 2 * 2)
+            out.writeShortLE(4)
+            out.writeShortLE(16)
+            out.writeBytes("data")
+            out.writeIntLE(dataLen)
+            for (i in 0 until totalSamples) {
+                val v = if (i < toneSamples) (sin(2.0 * PI * frequency * i / sampleRate) * 16000).toInt() else 0
                 out.writeShortLE(v)
                 out.writeShortLE(v)
             }

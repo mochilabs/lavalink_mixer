@@ -9,36 +9,20 @@ Built against `dev.arbjerg.lavalink:plugin-api:4.2.2` + `dev.arbjerg:lavaplayer:
 (Java 17). Protocol Version 2 (JIT Prefetch & Generation Epoch Fencing).
 
 - Machine-readable REST spec for agents/tools: [`api/openapi.yaml`](api/openapi.yaml)
-- Protocol-v2 integration notes and legacy client helper: [`examples/lavalink-client/`](examples/lavalink-client/)
+- Bot integration: [`examples/lavalink-client/README.md`](examples/lavalink-client/README.md)
 - AI contributor instructions: [`AGENTS.md`](AGENTS.md)
 - Implementation reference: [`docs/architecture.md`](docs/architecture.md)
 - Build and verification guide: [`docs/development.md`](docs/development.md)
 
-## Why Protocol v2 (JIT Prefetch & Epoch Fencing)
+## Queue protocol: JIT prefetch and epoch fencing
 
-In v1 the queue contract was naive: `POST /mixer/queue/next` at track start,
-then the server drove the handoff. This caused **race conditions**:
-the 1-ahead preload window (often 3-4 minutes) was fully open to queue
-mutations, and a user skip while the plugin armed a track created a double
-play or ghost track.
-
-V2 solves this with a **state machine based on Just-In-Time (JIT) prefetch and
-monotonic Epoch fencing**:
-
-- The server never preloads at track start. It waits until the audio engine
-  approaches `crossfadeMs + 7000ms` remaining, then fires a
-  `MixerNeedNextTrackEvent` to ask the client for the next track.
-- The client arms the next track atomically with a unique `epoch` and
-  `Idempotency-Key`.
-- If the user changes the queue before the handoff, the client submits an
-  `invalidate` request with a *higher epoch*; any pending ARMED slot is
-  dropped, and the server re-fires the JIT window.
-- If the user skips, the client submits an `override` request; the server
-  clears the ARMED slot and stops/starts the main player atomically on its own
-  audio thread without the client having to call `play()`.
-
-This guarantees **exactly one state transition per track lifecycle** and
-removes all double-play or ghost-track edge cases.
+The server asks the client for the next track only when playback approaches
+the transition window (`crossfadeMs + 7000ms` remaining). The client arms that
+track with a monotonically increasing epoch and an `Idempotency-Key`. Queue
+changes invalidate the armed slot with a higher epoch; user stop/skip commands
+use an atomic server override. The server owns automatic transitions, so the
+client must keep `autoSkip: false` and synchronize its queue from
+`MixerAdvancedEvent`.
 
 ## Quickstart
 
@@ -168,14 +152,14 @@ audible source must be mixed **before encoding**. The plugin:
 |---|---|
 | `IDLE` | No track playing |
 | `PLAYING` | Main track playing, no next track armed |
-| `ARMED` | Next track preloaded & analysis complete |
+| `ARMED` | Next track accepted; analysis may still be pending |
 | `NO_NEXT` | Playing, but queue is empty or client declined a JIT request |
 
 ## REST (v2 Protocol, `/mixer/*`)
 
-All v2 endpoints expect the `Idempotency-Key` header.
-The `Idempotency-Key` is scoped to a guild and deduplicated by payload fingerprint.
-If the same key is replayed with a different payload, the request is rejected with `HTTP 422`.
+Idempotency keys are required for `queue/arm`, `queue/invalidate`,
+`queue/override`, and `reset`; they are scoped to a guild and deduplicated by
+payload fingerprint. Reusing a key with a different payload returns `HTTP 422`.
 
 | Method | Path | Headers | Body | Effect |
 |---|---|---|---|---|
@@ -198,14 +182,16 @@ If the same key is replayed with a different payload, the request is rejected wi
 
 ### Standard v2 errors
 - `HTTP 400` Bad Request — missing or invalid `Idempotency-Key`, invalid action, invalid `encodedTrack`, or payload form mismatch.
-- `HTTP 409` Conflict — `STALE_EPOCH`, or `PRE_RESET_ARRIVAL` with `{ "error": "PRE_RESET_ARRIVAL", "v2WindowOpenAt": <ms-epoch>, "windowOpenAt": <ms-epoch>, "lastKnownEpoch": <n> }`.
+- `HTTP 409` Conflict — `STALE_EPOCH`, or `PRE_RESET_ARRIVAL` with `{ "error": "PRE_RESET_ARRIVAL", "windowOpenAt": <ms-epoch>, "lastKnownEpoch": <n> }`.
 - `HTTP 422` Unprocessable Entity — payload mismatch for the same `Idempotency-Key`.
 
 ### Response fields (v2)
-- `GET /mixer/state` includes `protocolVersion: 2`, `state` (identical to `playbackState`: `"IDLE" | "PLAYING" | "ARMED" | "NO_NEXT"`), `playbackState` (raw enum name, v1-compatible), and `lastKnownEpoch`.
+- `GET /mixer/state` includes `protocolVersion: 2`, `state` (`IDLE`, `PLAYING`,
+  `ARMED`, or `NO_NEXT`), and `lastKnownEpoch`.
 - `POST /mixer/reset` returns `{ "lastKnownEpoch": <n>, "protocolVersion": 2 }`.
 - `MixerAdvancedEvent` includes `handoffId` only for `handoffType: "CROSSFADE"`.
-- `GET /mixer/state` also reports `beatmatchEnabled`, `maxTempoChange`, `beatmatchMinConfidence`, `nextTrackBpmConfidence`, `nextTrackPhaseMs` (beat grid phase offset, not musical downbeat), and backward-compatible `nextTrackFirstBeatMs`.
+- `/mixer/state` reports transition configuration and analysis, including
+  `nextTrackBpmConfidence` and `nextTrackPhaseMs` (not a musical downbeat).
 
 ## WebSocket events (`op: "mixer"`, pushed by the plugin)
 
@@ -224,15 +210,16 @@ If the same key is replayed with a different payload, the request is rejected wi
   of the full window); short tracks are analyzed in a single pass; analyses
   run on a bounded pool (`mixer.analysisThreads`, default 2).
 - **Silence skipping** (opt-in via `/mixer/silence` or yml): preloaded tracks
-  sit in a pending slot while a background decode scans leading / trailing
-  silence below `thresholdDb` (sustained `minSoundMs` to ignore clicks),
-  then promote to ready. Leading silence is skipped with a seek when the
-  track starts; trailing silence ends the track early (drives gapless
-  advance and the crossfade trigger). A **realtime fallback** watches
-  main-chain energy and cuts after `tailConfirmMs` of sustained silence
-  inside the tail window — no extra decode, and the only signal that works
-  for streams. If analysis is still running at content end the server
-  advances anyway (no trim) rather than playing silence.
+  are decoded on an isolated analysis player to find leading/trailing silence.
+  Leading silence is skipped on seekable tracks. Trailing silence ends playback
+  at the measured content boundary; if analysis is unavailable, realtime PCM
+  detection waits until the current playback position reaches confirmed silence
+  within the configured tail window. It also starts early enough to avoid
+  crossfading over confirmed silence. The realtime path is the only signal for
+  streams. Enable it with `mixer.silenceSkipEnabled: true` or
+  `POST /mixer/silence` (`{"guildId":"...","enabled":true}`); default threshold
+  is -60 dB and confirmation is 1000 ms.
+  If analysis is still running at content end the server advances without trim.
 - **Volume normalization** (`/mixer/normalization`): measured using the ITU-R
   BS.1770-4 (EBU R128) K-weighting filter with 400ms momentary blocks,
   75% overlap, and a two-stage gating process (`-70 LUFS` absolute, `-10 LU`
@@ -244,7 +231,7 @@ If the same key is replayed with a different payload, the request is rejected wi
 - **Beat-matched AutoMix & Tempo detection** (`/mixer/bpm`, `/mixer/beatmatch`):
   A preloaded track decodes head and tail `bpmScanMs` windows (default 30s) and runs a pure-Kotlin
   energy-flux onset + lag autocorrelation to estimate tempo (BPM) and beat grid phase offset (ms),
-  exposed via `/mixer/state` as `nextTrackBpm` / `nextTrackPhaseMs` (`nextTrackFirstBeatMs`).
+  exposed through `/mixer/state` as `nextTrackBpm` and `nextTrackPhaseMs`.
   With crossfade, BPM detection, and beat matching enabled, outgoing and incoming beat grids align kicks across 2, 4, or 8
   beats using producer-side timescale time-stretching (`SoundTouch` via `TempoStretcher`) within `maxTempoChange` (clamped up to 0.12).
   If tempo difference exceeds `maxTempoChange` or confidence is below `minConfidence`, it cleanly falls back

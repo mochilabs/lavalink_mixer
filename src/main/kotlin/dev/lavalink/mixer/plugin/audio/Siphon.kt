@@ -194,9 +194,7 @@ class SiphonFilter(
         for (queue in taps) queue.clear()
     }
 
-    override fun flush() {
-        for (queue in taps) queue.clear()
-    }
+    override fun flush() = Unit
 
     override fun close() = Unit
 }

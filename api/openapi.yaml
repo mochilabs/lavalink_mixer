@@ -28,8 +28,9 @@ info:
        sends `queue/invalidate`. On explicit user stops/skips, the client
        sends `queue/override`. No client `play()` calls are needed for
        server-driven transitions. The client starts initial playback and keeps
-       its queue synchronized with MixerAdvancedEvent. Disable client auto-skip
-       to avoid racing the server. The bundled TypeScript helper is legacy v1.
+       its queue synchronized with `MixerAdvancedEvent`. Disable client auto-skip
+       to avoid racing the server. Bot integrations must implement this event
+       and REST flow directly; see the protocol-v2 integration guide.
     4. Inspect with GET /mixer/state.
 
     All guildIds are strings (snowflakes exceed 2^53, JSON numbers would lose precision).
@@ -121,10 +122,6 @@ components:
           type: integer
           format: int64
           description: The exact timestamp when the post-reset grace window opens on the server. Only present for PRE_RESET_ARRIVAL errors.
-        v2WindowOpenAt:
-          type: integer
-          format: int64
-          description: Compatibility alias of windowOpenAt, present on PRE_RESET_ARRIVAL.
     DuplicateResponse:
       type: object
       required: [duplicate]
@@ -241,7 +238,7 @@ components:
         state:
           type: string
           enum: [IDLE, PLAYING, ARMED, NO_NEXT]
-          description: Protocol state, identical to playbackState. ARMED does not mean analysis is complete.
+          description: Protocol state. ARMED does not mean analysis is complete.
         guildId: { type: string }
         hasNext: { type: boolean, description: "A preloaded next track is waiting (pending or ready)" }
         overlayActive: { type: boolean }
@@ -292,27 +289,20 @@ components:
           type: [number, 'null']
           format: float
           description: Detected tempo of the queued track; null when disabled, absent, pending, or no usable beat result was found.
-        nextTrackFirstBeatMs:
-          type: [integer, 'null']
-          format: int64
-          description: Compatibility alias of nextTrackPhaseMs. Not a musical downbeat; retained for existing clients.
         nextTrackPhaseMs:
           type: [integer, 'null']
           format: int64
-          description: Track-relative beat-grid phase in milliseconds, with legacy first-onset fallback when no grid is cached. Not a musical downbeat.
+          description: Track-relative beat-grid phase in milliseconds; not a musical downbeat.
         nextTrackBpmConfidence:
           type: [number, 'null']
           format: float
         beatmatchEnabled: { type: boolean }
         maxTempoChange: { type: number, format: float, minimum: 0, maximum: 0.12 }
         beatmatchMinConfidence: { type: number, format: float, minimum: 0, maximum: 1 }
-        playbackState:
-          type: string
-          enum: [IDLE, PLAYING, ARMED, NO_NEXT]
         lastKnownEpoch:
           type: integer
           format: int64
-          description: The latest accepted client epoch for this guild's state machine (0 if untouched)
+          description: The latest accepted client epoch for this guild's state machine (0 if untouched).
     CrossfadeRequest:
       type: object
       required: [guildId, enabled]
@@ -866,8 +856,13 @@ paths:
 
   /mixer/silence:
     post:
-      operationId: setSilenceSkipping
       summary: Configure leading/trailing silence skipping
+      description: |
+        Silence skipping defaults to disabled. Enable it with `enabled: true`;
+        seekable queued and currently playing tracks are analyzed off the live
+        audio path. If analysis is unavailable, realtime PCM detection waits for
+        confirmed silence in the configured tail window before advancing. The
+        default threshold is -60 dB and tail confirmation is 1000 ms.
       requestBody:
         required: true
         content:

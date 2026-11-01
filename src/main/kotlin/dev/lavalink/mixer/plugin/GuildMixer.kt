@@ -113,6 +113,30 @@ class GuildMixer(
         }
     }
 
+    fun updateSilence(
+        enabled: Boolean,
+        thresholdDb: Float? = null,
+        minSoundMs: Long? = null,
+        headScanMs: Long? = null,
+        tailScanMs: Long? = null,
+        confirmMs: Long? = null,
+    ) {
+        val playing = synchronized(lock) {
+            silenceSkipEnabled = enabled
+            thresholdDb?.let { silenceThresholdDb = it.coerceIn(-90f, -20f) }
+            minSoundMs?.let { silenceMinSoundMs = it.coerceIn(20, 2000) }
+            headScanMs?.let { silenceHeadScanMs = it.coerceIn(1000, 60000) }
+            tailScanMs?.let { silenceTailScanMs = it.coerceIn(1000, 60000) }
+            confirmMs?.let { tailConfirmMs = it.coerceIn(300, 10000) }
+            tailWatch = enabled && !protocol.preserveTransition
+            if (!enabled) tailCutter.reset()
+            if (enabled) main?.audioPlayer?.playingTrack else null
+        }
+        playing?.let { track ->
+            runCatching { track.makeClone() }.getOrNull()?.let { requestPreanalysis(it) }
+        }
+    }
+
     @Volatile var silenceSkipEnabled: Boolean = config.silenceSkipEnabled
     @Volatile var silenceThresholdDb: Float = config.silenceThresholdDb
     @Volatile var silenceMinSoundMs: Long = config.silenceMinSoundMs
@@ -121,7 +145,7 @@ class GuildMixer(
     /** Sustained realtime silence needed before an early cut. */
     @Volatile var tailConfirmMs: Long = config.tailConfirmMs
     /** Set by poll(): realtime tail watch armed (cheap per-chunk check reads this). */
-    @Volatile var tailWatch: Boolean = false
+    @Volatile var tailWatch: Boolean = config.silenceSkipEnabled
     /** Tempo (BPM) detection is opt-in; each preloaded track decodes one head window for onset analysis. */
     @Volatile var bpmDetectionEnabled: Boolean = config.bpmDetectionEnabled
     @Volatile var bpmScanMs: Long = config.bpmScanMs.coerceIn(5000, 60000)
@@ -327,6 +351,7 @@ class GuildMixer(
                 val currentMain = main?.audioPlayer
                 if (currentMain != null && player !== currentMain) return@synchronized null
                 tailCutter.reset()
+                tailWatch = silenceSkipEnabled && !protocol.preserveTransition
                 // The client-side play() is the ground truth for "audio is
                 // flowing"; recover the state machine if it lagged behind.
                 if (protocol.playbackState == PlaybackState.IDLE || protocol.playbackState == PlaybackState.NO_NEXT) {
@@ -386,7 +411,7 @@ class GuildMixer(
             if (needsBaselineAnalysis) {
                 scheduleBaselineAnalysis(track)
             }
-            if (bpmDetectionEnabled) {
+            if (bpmDetectionEnabled || silenceSkipEnabled) {
                 runCatching { track.makeClone() }.getOrNull()?.let { requestPreanalysis(it) }
             }
             if (snap.xfade) {
@@ -631,9 +656,13 @@ class GuildMixer(
             subSourceMilliSamples.addAndGet(read.sourceMilliSamples)
             return read.outputSamples
         }
-        val desired = (chainPos.get() - samples - start).coerceAtLeast(0L)
+        val chunkStart = chainPos.get() - samples
+        val desired = (chunkStart - start).coerceAtLeast(0L)
         val read = siphon.takeAt(desired, samples, channels, out)
-        subSourceMilliSamples.set(read.sourcePositionMilliSamples)
+        val end = xfadeEndSample
+        if (end < 0 || chunkStart < end) {
+            subSourceMilliSamples.set(read.sourcePositionMilliSamples)
+        }
         return read.outputSamples
     }
 
@@ -738,9 +767,10 @@ class GuildMixer(
      * computation is needed this chunk (voice-thread fast path).
      */
     fun realtimeTailAmp(): Float? =
-        if (tailWatch && silenceSkipEnabled) SilenceAnalyzer.thresholdAmp(silenceThresholdDb) else null
+        if (tailWatch && silenceSkipEnabled && !protocol.preserveTransition) SilenceAnalyzer.thresholdAmp(silenceThresholdDb) else null
 
-    fun noteChunk(peak: Float, samples: Int, thresholdAmp: Float) = tailCutter.note(peak, samples, thresholdAmp)
+    fun noteChunk(peak: Float, samples: Int, thresholdAmp: Float) =
+        tailCutter.note(peak, samples, thresholdAmp, chainPos.get())
 
     /** Test seam: bypass ramps and pin gains. */
     internal fun gainsForTest(main: Float, sub: Float) {
@@ -938,6 +968,7 @@ class GuildMixer(
         val audioPlayer = main?.audioPlayer ?: return PollAction.None
         val track = audioPlayer.playingTrack ?: run {
             lastMainTrack = null
+            tailWatch = false
             return PollAction.None
         }
         if (track !== lastMainTrack) {
@@ -960,6 +991,7 @@ class GuildMixer(
         } else if (pos > lastPosition + 2500 && pos * SAMPLE_RATE / 1000 > chainPos.get() + SAMPLE_RATE) {
             // Forward seek (e.g. fresh session restore seeking to saved position):
             // re-base chainPos if track.position jumped ahead of the decoded chain.
+            tailCutter.reset()
             resetFilterHeartbeatLocked(pos)
             syncChainPos(pos)
         }
@@ -967,14 +999,22 @@ class GuildMixer(
         checkFilterHeartbeatLocked(audioPlayer, pos)
         // Opportunistic promotion: analysis may have finished since queue.
         promoteIfPendingLocked()
+        tailWatch = silenceSkipEnabled && !protocol.preserveTransition
         if (!xfadeActive && (readyNextTrack != null || pendingNextTrack != null)) {
-            tailWatch = silenceSkipEnabled && !protocol.preserveTransition
             val duration = track.duration
             if (duration > 0 && duration < Long.MAX_VALUE / 2) {
                 val trail = if (silenceSkipEnabled && !protocol.preserveTransition) trailForLocked(track) else 0L
                 val contentEnd = TrimTransition.contentEnd(duration, trail)
                 val plan = planCrossfadeLocked(track, readyNextTrack ?: pendingNextTrack, contentEnd)
-                if (readyNextTrack != null && plan != null &&
+                val silenceBeforeOverlap = !protocol.preserveTransition && silenceSkipEnabled && plan != null &&
+                    tailCutter.isConfirmedBefore(plan.startMs, duration, tailConfirmMs, silenceTailScanMs)
+                if (!protocol.preserveTransition && silenceSkipEnabled &&
+                    tailCutter.shouldCut(pos, duration, tailConfirmMs, silenceTailScanMs)
+                ) {
+                    // Realtime fallback: sustained silence inside the tail window.
+                    if (readyNextTrack == null) promoteForcedLocked()
+                    return PollAction.AdvanceNext(transitionFenceLocked())
+                } else if (readyNextTrack != null && plan != null && !silenceBeforeOverlap &&
                     chainPos.get() >= plan.startMs * SAMPLE_RATE / 1000
                 ) {
                     // Chain, not track.position: the mix lands on frames as they
@@ -988,18 +1028,12 @@ class GuildMixer(
                     // Force-promote pending so a slow analysis never plays silence.
                     if (readyNextTrack == null) promoteForcedLocked()
                     return PollAction.AdvanceNext(transitionFenceLocked())
-                } else if (!protocol.preserveTransition && silenceSkipEnabled &&
-                    tailCutter.shouldCut(pos, duration, tailConfirmMs, silenceTailScanMs)
-                ) {
-                    // Realtime fallback: sustained silence inside the tail window.
-                    if (readyNextTrack == null) promoteForcedLocked()
-                    return PollAction.AdvanceNext(transitionFenceLocked())
                 } else if (readyNextTrack == null && pendingNextTrack != null && pos >= duration - 500) {
                     // Analysis still running at file end: advance anyway (degraded, no trim).
                     promoteForcedLocked()
                     return PollAction.AdvanceNext(transitionFenceLocked())
                 }
-            } else if (silenceSkipEnabled &&
+            } else if (!protocol.preserveTransition && silenceSkipEnabled &&
                 tailCutter.shouldCut(pos, -1, tailConfirmMs, silenceTailScanMs)
             ) {
                 // Streams have no pre-analysis tail; realtime is the only signal.
@@ -1016,7 +1050,6 @@ class GuildMixer(
             // audible end instead, so detected trailing silence is gone.
             return PollAction.Handoff
         } else {
-            tailWatch = false
             return PollAction.None
         }
     }
@@ -2130,14 +2163,20 @@ class GuildMixer(
         val now = System.currentTimeMillis()
         return synchronized(lock) {
             if (analysisQueued) return null
-            val pending = pendingNextTrack ?: readyNextTrack ?: (if (bpmDetectionEnabled) main?.audioPlayer?.playingTrack else null) ?: return null
-            if (!pending.isSeekable || pending.duration <= 0) return null
-            val id = idOf(pending) ?: return null
-            val needSilence = silenceSkipEnabled && !AnalysisCaches.trim.contains(id)
-            val needNorm = normalizationEnabled && !AnalysisCaches.norm.contains(id)
-            val needBpm = bpmDetectionEnabled && needsBpmAnalysisLocked(id)
-            if (!needSilence && !needNorm && !needBpm) return null
-            if (!analysisState.canRetryLocked(id, now)) return null
+            val mainPlaying = main?.audioPlayer?.playingTrack
+            val candidates = listOfNotNull(
+                pendingNextTrack,
+                readyNextTrack,
+                if (bpmDetectionEnabled || silenceSkipEnabled) mainPlaying else null,
+            )
+            val pending = candidates.firstOrNull { candidate ->
+                if (!candidate.isSeekable || candidate.duration <= 0) return@firstOrNull false
+                val id = idOf(candidate) ?: return@firstOrNull false
+                val needSilence = silenceSkipEnabled && !AnalysisCaches.trim.contains(id)
+                val needNorm = candidate !== mainPlaying && normalizationEnabled && !AnalysisCaches.norm.contains(id)
+                val needBpm = bpmDetectionEnabled && needsBpmAnalysisLocked(id)
+                (needSilence || needNorm || needBpm) && analysisState.canRetryLocked(id, now)
+            } ?: return null
             log.debug("retrying deferred analysis for '{}' on guild {}", titleOf(pending), guildId)
             try {
                 pending.makeClone()
@@ -2151,14 +2190,17 @@ class GuildMixer(
     /** Bounded, cache-only warmup; it never arms a queue slot or mutates playback. */
     fun requestPreanalysis(track: AudioTrack): Boolean {
         val id = idOf(track) ?: return false
+        val includeSilence = silenceSkipEnabled
         synchronized(lock) {
-            if (!bpmDetectionEnabled || !track.isSeekable || track.duration <= 0 ||
-                analysisQueued || analysisState.active || !needsBpmAnalysisLocked(id)) return false
+            val needSilence = includeSilence && !AnalysisCaches.trim.contains(id)
+            val needBpm = bpmDetectionEnabled && needsBpmAnalysisLocked(id)
+            if ((!needSilence && !needBpm) || !track.isSeekable || track.duration <= 0 ||
+                analysisQueued || analysisState.active) return false
             analysisQueued = true
         }
         try {
             analysisExecutor.execute {
-                try { analyzeBlocking(track, cacheOnly = true) }
+                try { analyzeBlocking(track, cacheOnly = true, includeSilence = includeSilence) }
                 catch (e: Exception) { log.warn("preanalysis failed on guild {}", guildId, e) }
                 finally { synchronized(lock) { analysisQueued = false } }
             }
@@ -2174,8 +2216,8 @@ class GuildMixer(
             !(AnalysisCaches.bpm.contains(identifier) && AnalysisCaches.bpmHead.contains(identifier) && AnalysisCaches.bpmTail.contains(identifier) && AnalysisCaches.featuresHead.contains(identifier) && AnalysisCaches.featuresTail.contains(identifier))
 
     /** Scans a clone on the isolated analysis player. A concurrent scan defers this work. */
-    fun analyzeBlocking(track: AudioTrack, cacheOnly: Boolean = false) {
-        val doSilence = silenceSkipEnabled && !cacheOnly
+    fun analyzeBlocking(track: AudioTrack, cacheOnly: Boolean = false, includeSilence: Boolean = !cacheOnly) {
+        val doSilence = silenceSkipEnabled && includeSilence
         val doNorm = normalizationEnabled && !cacheOnly
         val doBpm = bpmDetectionEnabled
         if (!doSilence && !doNorm && !doBpm) {
@@ -2259,6 +2301,28 @@ class GuildMixer(
                     if (tail?.features?.unknownReason != "incomplete_window") {
                         tail?.grid?.let { AnalysisCaches.bpmTail[playingId] = it }
                         tail?.features?.let { AnalysisCaches.featuresTail[playingId] = it }
+                    }
+                }
+            }
+            if (doSilence && !result.aborted) {
+                val playing = synchronized(lock) { main?.audioPlayer?.playingTrack }
+                val playingId = playing?.let { idOf(it) }
+                if (playing != null && playingId != null && playingId != identifier && !AnalysisCaches.trim.contains(playingId)) {
+                    val playingTrim = analysisService.measureTailSilence(
+                        playing,
+                        TrackAnalysisSettings(
+                            silence = true,
+                            normalization = false,
+                            bpm = false,
+                            silenceThresholdDb = silenceThresholdDb,
+                            silenceMinSoundMs = silenceMinSoundMs,
+                            silenceHeadScanMs = silenceHeadScanMs,
+                            silenceTailScanMs = silenceTailScanMs,
+                            bpmScanMs = bpmScanMs,
+                        ),
+                    )
+                    if (playingTrim != null) {
+                        AnalysisCaches.trim[playingId] = playingTrim
                     }
                 }
             }

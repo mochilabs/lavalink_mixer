@@ -36,7 +36,7 @@ object AdaptiveTransitionPlanner {
         if (outgoingFeatures.trailingSilenceMs >= 100 || incomingFeatures.leadingSilenceMs >= 100) {
             val end = if (outgoingFeatures.trailingSilenceMs > 0) {
                 minOf(contentEndMs, outgoingFeatures.windowEndMs - outgoingFeatures.trailingSilenceMs)
-                    .coerceIn(maxOf(1L, contentEndMs - 2000), contentEndMs)
+                    .coerceIn(1L, contentEndMs)
             } else contentEndMs
             val start = maxOf(incomingLeadMs, incomingFeatures.windowStartMs + incomingFeatures.leadingSilenceMs)
             if (end > 0 && (incomingDurationMs <= 0 || start < incomingDurationMs - 500)) {

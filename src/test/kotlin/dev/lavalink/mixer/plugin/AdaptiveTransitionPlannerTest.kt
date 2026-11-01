@@ -62,6 +62,12 @@ class AdaptiveTransitionPlannerTest {
         assertEquals(9200L, result.outgoingContentEndMs)
         assertEquals(400L, result.incomingStartMs)
         assertNull(AdaptiveTransitionPlanner.toCrossfadePlan(result, 10000))
+
+        val longSilence = assertIs<AdaptiveTransitionDecision.SilenceTrim>(decide(
+            features().copy(trailingSilenceMs = 4200), features().copy(leadingSilenceMs = 3100),
+        ))
+        assertEquals(5800L, longSilence.outgoingContentEndMs)
+        assertEquals(3100L, longSilence.incomingStartMs)
     }
     @Test
     fun `bounded candidate with smoother boundary wins without a long skip`() {

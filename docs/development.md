@@ -107,6 +107,7 @@ excluded by the build workflow. Release workflows attach JARs to GitHub
 releases and publish the Maven artifact to GitHub Packages.
 
 When changing the protocol, update handler DTOs and mappings, controller logic,
-tests, `api/openapi.yaml`, and affected README examples together. Check both
-REST responses and WebSocket event payloads. Preserve compatibility fields
-such as `playbackState` and `nextTrackFirstBeatMs` when adding replacements.
+tests, `api/openapi.yaml`, and the v2 bot integration guide together. Check both
+REST responses and WebSocket event payloads. Treat the schema as the exact
+current contract; remove retired fields rather than retaining compatibility
+aliases.

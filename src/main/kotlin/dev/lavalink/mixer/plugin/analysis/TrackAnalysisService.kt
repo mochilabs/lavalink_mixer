@@ -225,6 +225,29 @@ internal class TrackAnalysisService(
         }
     }
 
+    fun measureTailSilence(track: AudioTrack, settings: TrackAnalysisSettings): TrimPoints? {
+        val factory = ensureAnalysisPlayer().second
+        return try {
+            val duration = try {
+                track.duration
+            } catch (e: Exception) {
+                -1L
+            }
+            val seekable = try {
+                track.isSeekable
+            } catch (e: Exception) {
+                false
+            }
+            if (!seekable || duration <= 0 || duration >= Long.MAX_VALUE / 2) {
+                return null
+            }
+            val tail = scanTail(track, factory, duration, settings)
+            if (analysisBroken) null else TrimPoints(0L, tail.coerceAtLeast(0L))
+        } finally {
+            stopTrack()
+        }
+    }
+
     private fun guardFeatureWindow(features: TransitionFeatures, expectedEndMs: Long): TransitionFeatures =
         if (analysisBroken || features.windowEndMs < expectedEndMs - 250) features.copy(unknownReason = "incomplete_window") else features
 
@@ -313,7 +336,7 @@ internal class TrackAnalysisService(
         duration: Long,
         settings: TrackAnalysisSettings,
     ): SinglePassResult {
-        val collected = collectFrom(track, factory, 0, msToSamples(duration + 1000))
+        val collected = collectFrom(track, factory, 0, msToSamples(duration))
         return analyzeFrames(
             collected,
             settings.silenceThresholdDb,
@@ -438,8 +461,8 @@ internal class TrackAnalysisService(
             val pumpFrame = newProvideFrame()
             val deadline = System.currentTimeMillis() + SCAN_TIMEOUT_MS
             while (collected < capSamples && System.currentTimeMillis() < deadline && !analysisBroken) {
-                if (sub.playingTrack !== clone) break
                 if (tap.pendingFrames == 0) {
+                    if (sub.playingTrack !== clone) break
                     pumpSub(sub, pumpFrame)
                     continue
                 }

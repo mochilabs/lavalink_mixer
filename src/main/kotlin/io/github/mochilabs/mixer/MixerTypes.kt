@@ -19,6 +19,7 @@ class OverlaySlot(
     val id: Long,
     val player: AudioPlayer,
     val siphon: SiphonQueue,
+    val channel: AnnounceChannel = AnnounceChannel.BOTH,
 ) {
     @Volatile var track: AudioTrack? = null
     @Volatile var active: Boolean = false

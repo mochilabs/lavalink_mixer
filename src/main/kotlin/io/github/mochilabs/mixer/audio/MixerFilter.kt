@@ -124,6 +124,25 @@ class MixerFilter(
         mixer.noteSubOutput(subSamples)
         if (subSamples < length) mixer.noteUnderrun(length - subSamples, length)
 
+        if (input.size >= 2 && mixer.isOverlayActive()) {
+            val hasRight = sub.size > 1 && sub[1].any { it != 0f }
+            val srcR = if (hasRight) sub[1] else sub[0]
+            when (mixer.currentOverlayChannel()) {
+                AnnounceChannel.LEFT -> {
+                    sub[1].fill(0f, 0, length)
+                }
+                AnnounceChannel.RIGHT -> {
+                    srcR.copyInto(sub[1], 0, 0, length)
+                    sub[0].fill(0f, 0, length)
+                }
+                AnnounceChannel.BOTH -> {
+                    if (!hasRight) {
+                        sub[0].copyInto(sub[1], 0, 0, length)
+                    }
+                }
+            }
+        }
+
         // Sum each parallel overlay's siphon at its fade-ramp gain.
         val parallel = if (parallels.isEmpty()) null else {
             parallelScratch = ensureScratch(parallelScratch, input.size, length)
@@ -135,10 +154,34 @@ class MixerFilter(
             for (slot in parallels) {
                 slot.siphon.take(length, input.size, buf)
                 val g = slot.ramp.current
-                for (c in input.indices) {
-                    val pc = parallel[c]
-                    val bc = buf[c]
-                    for (i in 0 until length) pc[i] += bc[i] * g
+                if (input.size >= 2) {
+                    val srcL = buf[0]
+                    val hasRight = buf.size > 1 && buf[1].any { it != 0f }
+                    val srcR = if (hasRight) buf[1] else buf[0]
+                    when (slot.channel) {
+                        AnnounceChannel.LEFT -> {
+                            val pc = parallel[0]
+                            for (i in 0 until length) pc[i] += srcL[i] * g
+                        }
+                        AnnounceChannel.RIGHT -> {
+                            val pc = parallel[1]
+                            for (i in 0 until length) pc[i] += srcR[i] * g
+                        }
+                        AnnounceChannel.BOTH -> {
+                            val pc0 = parallel[0]
+                            val pc1 = parallel[1]
+                            for (i in 0 until length) {
+                                pc0[i] += srcL[i] * g
+                                pc1[i] += srcR[i] * g
+                            }
+                        }
+                    }
+                } else {
+                    for (c in input.indices) {
+                        val pc = parallel[c]
+                        val bc = buf[c]
+                        for (i in 0 until length) pc[i] += bc[i] * g
+                    }
                 }
             }
         }

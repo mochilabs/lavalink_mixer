@@ -265,6 +265,7 @@ class GuildMixer(
     private val parallelOverlays = LinkedHashMap<Long, OverlaySlot>()
     /** Sequential (single-sub) overlay is still active; mutually exclusive with parallel overlays. */
     private var sequentialOverlayId: Long? = null
+    @Volatile private var sequentialOverlayChannel: AnnounceChannel = AnnounceChannel.BOTH
     /** Voice thread reads these without taking [lock]; races only shift a fade by a chunk. */
     @Volatile private var overlayActive: Boolean = false
     @Volatile private var xfadeActive: Boolean = false
@@ -857,6 +858,12 @@ class GuildMixer(
     internal fun installParallelOverlayForTest(slot: OverlaySlot) {
         synchronized(lock) { parallelOverlays[slot.id] = slot }
     }
+    internal fun overlayForTest(active: Boolean, channel: AnnounceChannel = AnnounceChannel.BOTH) {
+        synchronized(lock) {
+            overlayActive = active
+            sequentialOverlayChannel = channel
+        }
+    }
 
     /** Test seam: simulate [count] active parallel slots without players (for the limit check). */
     internal fun armParallelForTest(count: Int) {
@@ -1187,6 +1194,7 @@ class GuildMixer(
     fun hasNext(): Boolean = synchronized(lock) { pendingNextTrack != null || readyNextTrack != null }
 
     fun isOverlayActive(): Boolean = synchronized(lock) { overlayActive }
+    fun currentOverlayChannel(): AnnounceChannel = sequentialOverlayChannel
     fun isXfadeActive(): Boolean = synchronized(lock) { xfadeActive }
     fun isSubBusy(): Boolean = synchronized(lock) { overlayActive || xfadeActive || analysisState.active || parallelOverlays.isNotEmpty() }
 
@@ -1211,9 +1219,10 @@ class GuildMixer(
         encodedTrack: String?,
         duckLevel: Float,
         mode: AnnounceMode = AnnounceMode.SEQUENTIAL,
+        channel: AnnounceChannel = AnnounceChannel.BOTH,
     ): Pair<Long, Int> =
         synchronized(lock) {
-            announcementQueue.enqueue(identifier, encodedTrack, duckLevel, mode)
+            announcementQueue.enqueue(identifier, encodedTrack, duckLevel, mode, channel)
         }
 
     fun takeNextAnnouncement(): AnnouncementItem? = synchronized(lock) {
@@ -1286,9 +1295,10 @@ class GuildMixer(
         duck: Float,
         announcementId: Long? = null,
         mode: AnnounceMode = AnnounceMode.SEQUENTIAL,
+        channel: AnnounceChannel = AnnounceChannel.BOTH,
     ): AudioTrack {
         if (mode == AnnounceMode.PARALLEL) {
-            startParallelOverlay(track, duck, announcementId)
+            startParallelOverlay(track, duck, announcementId, channel)
             return track
         }
         val (sub, gen) = synchronized(lock) {
@@ -1299,6 +1309,7 @@ class GuildMixer(
             subTrack = track
             overlayActive = true
             sequentialOverlayId = announcementId
+            sequentialOverlayChannel = channel
             subStartMs = System.currentTimeMillis()
             siphon.clear()
             // Overlays are announcements: they use their original level, not
@@ -1344,7 +1355,12 @@ class GuildMixer(
      * the shared [mainGain], so the first parallel overlay ducks and the
      * last one to finish releases it.
      */
-    private fun startParallelOverlay(track: AudioTrack, duck: Float, announcementId: Long?) {
+    private fun startParallelOverlay(
+        track: AudioTrack,
+        duck: Float,
+        announcementId: Long?,
+        channel: AnnounceChannel = AnnounceChannel.BOTH,
+    ) {
         val slot = synchronized(lock) {
             if (parallelOverlays.size >= maxParallelOverlays) {
                 throw MixerBusyException("parallel overlay limit ($maxParallelOverlays) reached on guild $guildId")
@@ -1354,7 +1370,7 @@ class GuildMixer(
             val siphon = SiphonQueue.forFrameBuffer(safeFrameBufferDurationMs())
             player.setFilterFactory(SiphonFactory(siphon))
             player.addListener(parallelOverlayListener(id))
-            val s = OverlaySlot(id, player, siphon)
+            val s = OverlaySlot(id, player, siphon, channel)
             parallelOverlays[id] = s
             s.track = track
             s.active = true
@@ -1931,6 +1947,7 @@ class GuildMixer(
             overlayActive = false
             subTrack = null
             sequentialOverlayId = null
+            sequentialOverlayChannel = AnnounceChannel.BOTH
             subNormGain = 1f
             siphon.clear()
             // Release the music duck only if no parallel overlays are still

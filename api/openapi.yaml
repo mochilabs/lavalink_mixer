@@ -330,6 +330,12 @@ components:
           examples: [sequential, parallel]
           description: Case-insensitive; omitted, null, or empty uses sequential. Other values return 400.
           default: sequential
+        channel:
+          type: [string, 'null']
+          enum: [both, left, right]
+          examples: [both, left, right]
+          description: "Target stereo channel for the announcement. Case-insensitive ('left'/'l', 'right'/'r', or 'both'/null). If omitted, plays on both channels."
+          default: both
     AnnounceQueuedResponse:
       type: object
       required: [guildId, id, position, queueLength]

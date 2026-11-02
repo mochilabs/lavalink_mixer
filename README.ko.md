@@ -225,7 +225,7 @@ $$
 
 | 메서드 | 경로 | 바디 파라미터 | 설명 |
 |---|---|---|---|
-| `POST` | `/mixer/announce` | `{ guildId, identifier?, encodedTrack?, duckLevel?, mode? }` | 안내 음성 재생 (`mode`: `sequential` \| `parallel`) |
+| `POST` | `/mixer/announce` | `{ guildId, identifier?, encodedTrack?, duckLevel?, mode?, channel? }` | 안내 음성 재생 (`mode`: `sequential` \| `parallel`, `channel`: `both` \| `left` \| `right`) |
 | `POST` | `/mixer/announce/cancel` | `{ guildId }` | 현재 공지 즉시 중단 및 음악 볼륨 복원 |
 | `DELETE` | `/mixer/announce/queue` | 쿼리: `?guildId=` | 대기 중인 모든 공지 취소 |
 

@@ -225,7 +225,7 @@ All endpoints accept standard Lavalink `Authorization` headers.
 
 | Method | Path | Body Parameters | Description |
 |---|---|---|---|
-| `POST` | `/mixer/announce` | `{ guildId, identifier?, encodedTrack?, duckLevel?, mode? }` | Queue TTS / voice overlay (`mode`: `sequential` \| `parallel`) |
+| `POST` | `/mixer/announce` | `{ guildId, identifier?, encodedTrack?, duckLevel?, mode?, channel? }` | Queue TTS / voice overlay (`mode`: `sequential` \| `parallel`, `channel`: `both` \| `left` \| `right`) |
 | `POST` | `/mixer/announce/cancel` | `{ guildId }` | Stop active announcement and restore music volume |
 | `DELETE` | `/mixer/announce/queue` | Query: `?guildId=` | Clear all queued announcements |
 

@@ -111,8 +111,8 @@ class AnnounceQueueTest {
     @Test
     fun `parallel announcements start despite a busy sequential slot and mix into output`() {
         val manager = manager()
-        val fileA = toneFile("mixer-par-a", 440.0, 1)
-        val fileB = toneFile("mixer-par-b", 660.0, 1)
+        val fileA = toneFile("mixer-par-a", 440.0, 5)
+        val fileB = toneFile("mixer-par-b", 660.0, 5)
         try {
             val plugin = MixerPlugin(manager, MixerConfig())
             val guildId = 51L
@@ -199,6 +199,29 @@ class AnnounceQueueTest {
         m.registerSourceManager(com.sedmelluq.discord.lavaplayer.source.local.LocalAudioSourceManager())
         m.configuration.outputFormat = StandardAudioDataFormats.DISCORD_PCM_S16_LE
         return m
+    }
+    @Test
+    fun `announcement with channel RIGHT configures channel on active overlay`() {
+        val manager = manager()
+        val file = toneFile("mixer-channel-right", 440.0, 5)
+        try {
+            val plugin = MixerPlugin(manager, MixerConfig())
+            val guildId = 61L
+            val socket = RecordingSocket()
+            val player = manager.createPlayer()
+            plugin.getOrCreate(guildId).attachMain(iPlayer(guildId, player, socket.context))
+
+            plugin.announce(guildId, file.absolutePath, null, 0.2f, AnnounceMode.SEQUENTIAL, AnnounceChannel.RIGHT)
+            val mixer = plugin.find(guildId)!!
+            try {
+                assertTrue(waitUntil(5_000) { mixer.isOverlayActive() }, "announcement overlay should start")
+                assertEquals(AnnounceChannel.RIGHT, mixer.currentOverlayChannel())
+            } finally {
+                plugin.destroy()
+            }
+        } finally {
+            file.delete()
+        }
     }
 
     private fun iPlayer(guildId: Long, ap: AudioPlayer, socket: ISocketContext? = null): IPlayer = Proxy.newProxyInstance(

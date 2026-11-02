@@ -88,9 +88,10 @@ class MixerPlugin(
         encodedTrack: String?,
         duck: Float?,
         mode: AnnounceMode = AnnounceMode.SEQUENTIAL,
+        channel: AnnounceChannel = AnnounceChannel.BOTH,
     ): Pair<Long, Int> {
         val mixer = getOrCreate(guildId)
-        return mixer.enqueueAnnouncement(identifier, encodedTrack, duck ?: mixer.duckLevel, mode)
+        return mixer.enqueueAnnouncement(identifier, encodedTrack, duck ?: mixer.duckLevel, mode, channel)
     }
 
     private fun resolveTrack(guildId: Long, identifier: String?, encodedTrack: String?): CompletableFuture<AudioTrack> {
@@ -188,7 +189,7 @@ class MixerPlugin(
                 return@whenComplete
             }
             try {
-                mixer.startOverlay(track, item.duckLevel, item.id, item.mode)
+                mixer.startOverlay(track, item.duckLevel, item.id, item.mode, item.channel)
                 mixer.onAnnouncementStarted(item)
             } catch (e: Exception) {
                 mixer.requeueAnnouncement(item, e)

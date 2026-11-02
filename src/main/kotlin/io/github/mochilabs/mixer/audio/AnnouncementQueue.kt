@@ -2,12 +2,27 @@ package io.github.mochilabs.mixer
 
 import org.slf4j.LoggerFactory
 
+enum class AnnounceChannel {
+    BOTH,
+    LEFT,
+    RIGHT;
+
+    companion object {
+        fun from(value: String?): AnnounceChannel = when (value?.trim()?.lowercase()) {
+            "left", "l" -> LEFT
+            "right", "r" -> RIGHT
+            else -> BOTH
+        }
+    }
+}
+
 data class AnnouncementItem(
     val id: Long,
     val identifier: String?,
     val encodedTrack: String?,
     val duckLevel: Float,
     val mode: AnnounceMode,
+    val channel: AnnounceChannel = AnnounceChannel.BOTH,
 )
 
 enum class AnnounceMode { SEQUENTIAL, PARALLEL }
@@ -40,10 +55,11 @@ internal class AnnouncementQueue(
         encodedTrack: String?,
         duckLevel: Float,
         mode: AnnounceMode,
+        channel: AnnounceChannel = AnnounceChannel.BOTH,
     ): Pair<Long, Int> {
-        val item = AnnouncementItem(++seq, identifier, encodedTrack, duckLevel, mode)
+        val item = AnnouncementItem(++seq, identifier, encodedTrack, duckLevel, mode, channel)
         queue.addLast(item)
-        log.info("queued announcement {} on guild {} ({} waiting)", item.id, guildId, queue.size)
+        log.info("queued announcement {} on guild {} (channel {}, {} waiting)", item.id, guildId, channel, queue.size)
         return item.id to queue.size
     }
 

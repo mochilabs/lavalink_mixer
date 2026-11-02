@@ -121,6 +121,105 @@ class MixerFilterTest {
             manager.shutdown()
         }
     }
+    @Test
+    fun `parallel overlay with channel RIGHT mixes only into right channel`() {
+        val manager = DefaultAudioPlayerManager()
+        val mixer = GuildMixer(125L, manager, MixerConfig(), java.util.concurrent.Executor { it.run() })
+        try {
+            mixer.gainsForTest(0f, 0f)
+            val slot = OverlaySlot(1L, manager.createPlayer(), SiphonQueue(), channel = AnnounceChannel.RIGHT).apply {
+                active = true
+                ramp.setNow(1.0f)
+                siphon.push(arrayOf(floatArrayOf(0.4f, 0.4f)), 0, 2)
+            }
+            mixer.installParallelOverlayForTest(slot)
+            val input = arrayOf(FloatArray(2), FloatArray(2))
+
+            val filter = MixerFilter(mixer, null)
+            filter.process(input, 0, 2)
+
+            assertEquals(0.0f, input[0][0], 1e-6f, "Left channel should be silent")
+            assertEquals(0.0f, input[0][1], 1e-6f, "Left channel should be silent")
+            assertEquals(0.4f, input[1][0], 1e-6f, "Right channel should receive overlay audio")
+            assertEquals(0.4f, input[1][1], 1e-6f, "Right channel should receive overlay audio")
+        } finally {
+            mixer.destroy()
+            manager.shutdown()
+        }
+    }
+
+    @Test
+    fun `parallel overlay with channel LEFT mixes only into left channel`() {
+        val manager = DefaultAudioPlayerManager()
+        val mixer = GuildMixer(126L, manager, MixerConfig(), java.util.concurrent.Executor { it.run() })
+        try {
+            mixer.gainsForTest(0f, 0f)
+            val slot = OverlaySlot(1L, manager.createPlayer(), SiphonQueue(), channel = AnnounceChannel.LEFT).apply {
+                active = true
+                ramp.setNow(1.0f)
+                siphon.push(arrayOf(floatArrayOf(0.4f, 0.4f)), 0, 2)
+            }
+            mixer.installParallelOverlayForTest(slot)
+            val input = arrayOf(FloatArray(2), FloatArray(2))
+
+            val filter = MixerFilter(mixer, null)
+            filter.process(input, 0, 2)
+
+            assertEquals(0.4f, input[0][0], 1e-6f, "Left channel should receive overlay audio")
+            assertEquals(0.4f, input[0][1], 1e-6f, "Left channel should receive overlay audio")
+            assertEquals(0.0f, input[1][0], 1e-6f, "Right channel should be silent")
+            assertEquals(0.0f, input[1][1], 1e-6f, "Right channel should be silent")
+        } finally {
+            mixer.destroy()
+            manager.shutdown()
+        }
+    }
+
+    @Test
+    fun `sequential overlay with channel RIGHT mixes only into right channel`() {
+        val manager = DefaultAudioPlayerManager()
+        val mixer = GuildMixer(127L, manager, MixerConfig(), java.util.concurrent.Executor { it.run() })
+        try {
+            mixer.gainsForTest(0f, 1.0f)
+            mixer.overlayForTest(active = true, channel = AnnounceChannel.RIGHT)
+            mixer.siphon.push(arrayOf(floatArrayOf(0.4f, 0.4f)), 0, 2)
+            val input = arrayOf(FloatArray(2), FloatArray(2))
+
+            val filter = MixerFilter(mixer, null)
+            filter.process(input, 0, 2)
+
+            assertEquals(0.0f, input[0][0], 1e-6f, "Left channel should be silent")
+            assertEquals(0.0f, input[0][1], 1e-6f, "Left channel should be silent")
+            assertEquals(0.4f, input[1][0], 1e-6f, "Right channel should receive overlay audio")
+            assertEquals(0.4f, input[1][1], 1e-6f, "Right channel should receive overlay audio")
+        } finally {
+            mixer.destroy()
+            manager.shutdown()
+        }
+    }
+
+    @Test
+    fun `sequential overlay with channel LEFT mixes only into left channel`() {
+        val manager = DefaultAudioPlayerManager()
+        val mixer = GuildMixer(128L, manager, MixerConfig(), java.util.concurrent.Executor { it.run() })
+        try {
+            mixer.gainsForTest(0f, 1.0f)
+            mixer.overlayForTest(active = true, channel = AnnounceChannel.LEFT)
+            mixer.siphon.push(arrayOf(floatArrayOf(0.4f, 0.4f)), 0, 2)
+            val input = arrayOf(FloatArray(2), FloatArray(2))
+
+            val filter = MixerFilter(mixer, null)
+            filter.process(input, 0, 2)
+
+            assertEquals(0.4f, input[0][0], 1e-6f, "Left channel should receive overlay audio")
+            assertEquals(0.4f, input[0][1], 1e-6f, "Left channel should receive overlay audio")
+            assertEquals(0.0f, input[1][0], 1e-6f, "Right channel should be silent")
+            assertEquals(0.0f, input[1][1], 1e-6f, "Right channel should be silent")
+        } finally {
+            mixer.destroy()
+            manager.shutdown()
+        }
+    }
 
     @Test
     fun `output stays in unit range`() {

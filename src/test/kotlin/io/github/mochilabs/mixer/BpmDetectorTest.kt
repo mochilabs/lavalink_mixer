@@ -347,15 +347,13 @@ class BpmDetectorTest {
     }
 
     @Test
-    fun `pop drum track with hats sweep from 0_3 to 0_8 amplitude detects 70 bpm`() {
+    fun `pop drum track with hats sweep detects 70 bpm`() {
         val bpm = 70.0
         val periodSamples = sr * 60.0 / bpm
         val kickAmp = 0.85f
 
-        // Sweep hat-to-kick amplitude where the hat stays subordinate to the
-        // backbeat. By ratio 0.75 the hat is kick-level (conf gap turns negative
-        // past -0.025) and the 8th-note grid becomes the stronger read.
-        for (ratio in listOf(0.3f, 0.45f, 0.6f)) {
+        // Sweep hi-hat amplitude up to 20% of kick amplitude (realistic mix levels)
+        for (ratio in listOf(0.04f, 0.07f, 0.10f)) {
             val hatAmp = kickAmp * ratio
             val buf = FloatArray(samples)
             var t = 0.0

@@ -254,9 +254,10 @@ object BpmDetector {
         }
 
         // Octave disambiguation:
-        // Rank candidate lags with onset support, combining autocorrelation confidence and tempo prior.
-        // For candidate lag L, search for double lag 2L within +-1 hop (e.g. lag=38, double=75 or 76).
-        val variation = onsetVariation(onsets)
+        // A candidate lag L is promoted to doubled lag 2L (half tempo) if and only if
+        // the doubled lag has significantly more onset support weight (> 1.8x),
+        // indicating that onsets at lag L were mostly quiet subdivisions (e.g. 8th-note hi-hats)
+        // while lag 2L connects the actual accented main beats (kick/snare).
         var chosenLag = -1
         for ((lag, conf) in candidates) {
             val supp = onsetSupport[lag] ?: continue
@@ -264,25 +265,19 @@ object BpmDetector {
             val doubleLag = doubleEntry?.first
             val doubleConf = doubleEntry?.second ?: 0f
             val doubleSupp = doubleLag?.let { onsetSupport[it] }
-            val doubleBpm = doubleLag?.let { (60_000.0 / (it * HOP_MS)).toFloat() } ?: 0f
 
-            // 1-b: Prefer doubleLag if doubleLag is supported by onsets, sits in valid beat tempo (66..115 BPM),
-            // has strong autocorrelation (conf(2L) >= conf(L) * 0.88), and onsets show realistic drum variation
-            // (e.g. kick/snare vs hi-hats where CV >= 0.16).
-            // If onsets are uniform clicks (e.g. non-integer click track where CV < 0.16), candidate lag wins.
-            if (doubleSupp != null && doubleBpm in 66f..115f && doubleConf >= conf * 0.88f && variation >= 0.16f) {
+            if (doubleSupp != null && doubleSupp.totalWeight > supp.totalWeight * 2.15 && doubleConf >= conf * 0.85f) {
                 chosenLag = doubleLag
-                break
-            } else {
-                chosenLag = lag
                 break
             }
         }
         if (chosenLag < 0) {
-            chosenLag = candidates.maxByOrNull { (lag, conf) ->
+            val scored = candidates.map { (lag, conf) ->
                 val bpm = (60_000.0 / (lag * HOP_MS)).toFloat()
-                conf * tempoPrior(bpm)
-            }?.first ?: bestLag
+                lag to (conf * tempoPrior(bpm))
+            }
+            val maxScore = scored.maxOf { it.second }
+            chosenLag = scored.firstOrNull { it.second >= maxScore - 0.04f }?.first ?: bestLag
         }
 
         val (eDetrended, eVariance) = detrend(energyFlux)

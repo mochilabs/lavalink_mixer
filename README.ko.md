@@ -39,11 +39,11 @@ Lavalink의 `application.yml` 파일에 플러그인 의존성을 추가합니�
 ```yaml
 lavalink:
   plugins:
-    - dependency: "io.github.mochilabs.mixer:mixer-plugin:0.3.6"
+    - dependency: "io.github.mochilabs.mixer:mixer-plugin:0.3.7"
       repository: "https://maven.pkg.github.com/mochilabs/lavalink_mixer"
 ```
 
-또는 [Releases](https://github.com/mochilabs/lavalink_mixer/releases)에서 `lavalink_mixer-0.3.6.jar`를 다운로드하여 Lavalink의 `plugins/` 디렉터리에 넣고 Lavalink를 재시작합니다.
+또는 [Releases](https://github.com/mochilabs/lavalink_mixer/releases)에서 `lavalink_mixer-0.3.7.jar`를 다운로드하여 Lavalink의 `plugins/` 디렉터리에 넣고 Lavalink를 재시작합니다.
 
 ### 2. 필터 활성화 (길드별 1회 필수)
 
@@ -111,23 +111,25 @@ mixer:
 ### 1. 비트 매칭 오토믹스 (Beat-Matched AutoMix)
 순수 Kotlin 고정밀 분석 엔진을 통해 독립된 백그라운드에서 분석을 수행합니다:
 - **Radix-2 Real FFT (N=2048, Hann Window)**: 힙 메모리 할당 없이 PCM을 10ms 홉 단위로 주파수 변환.
-  - 다중 채널 독립 FFT: 채널별로 FFT를 수행한 후 로그 크기($L_t(k) = \ln(1 + 10 \cdot |X_t(k)|)$)를 평균하여 위상 상쇄 방지.
+  - 다중 채널 독립 FFT: 채널별 FFT의 로그 크기를 평균하여 위상 상쇄 방지. 로그 압축 전 윈도우 RMS를 0.1로 정규화하고 FFT 크기를 `1024/N`으로 보정합니다 (`L = ln(1 + 10·|X|·1024/N·0.1/RMS)`).
   - 가변 샘플레이트 지원: 48kHz, 44.1kHz 등 입력 샘플레이트에 맞춰 홉 크기(~10ms)와 주파수 대역 빈 경계를 동적 계산.
   - 대역별 표준편차 정규화: 저음역 킥/베이스 에너지가 고음역 스네어/하이햇 어택을 가리지 않도록 대역별 표준편차($SF_{\text{band}} / \sigma_{\text{band}}$)로 균등 가중합.
-  - **Low (30–150 Hz)**: 킥 드럼 및 서브베이스 어택 분리
-  - **Mid (150–2,000 Hz)**: 스네어, 클랩, 악기 어택 분리
-  - **High (2,000–10,000 Hz)**: 하이햇, 심벌, 셰이커 분리
+  - **Low (30–150 Hz, 48kHz에서 빈 1..6)**: 킥 드럼 및 서브베이스 어택 분리
+  - **Mid (150–2,000 Hz, 빈 7..85)**: 스네어, 클랩, 악기 어택 분리
+  - **High (2,000–10,000 Hz, 빈 86..427)**: 하이햇, 심벌, 셰이커 분리
 
 $$
 SF_{\text{band}}(t) = \sum_{k \in \text{band}} \max\left(0, L_t(k) - L_{t-1}(k)\right)
 $$
 
-- **정규화 자기상관 및 옥타브 판별**: 윈도우 길이 편향 없는 60–200 BPM 래그 탐색. 온셋 간격의 5% 상대오차(최소 1.5홉) 및 4개 이상 일치 검증, 8분음표 하이햇 세분화 교차 검증($2.2\times$ 에너지 비율 기준) 적용. 간격이 없을 경우 최대 신뢰도 대비 0.35 이내이면서 $\ge 0.35$인 빠른 템포 우선 채택.
-- **전역 위상 및 가중 최소제곱(WLS) 주기 최적화**: 코사인 펄스 커널($tolerance = \max(1.5\text{ hops}, T \times 0.10)$, $dist < tolerance$ 가드)로 최적 위상을 탐색한 뒤, 가중 최소제곱 회귀를 통해 주기 $T$와 위상 $\phi$를 동시 정밀화하여 30초 테일 구간 누적 드리프트 제거:
+- **상대 에너지 게이트 및 템포 후보 선택**: 에너지 엔벨로프를 평균으로 정규화해 작은 음량에서도 분석합니다. 60–200 BPM 범위의 국소 자기상관 피크와 에너지 후보를 보존하고 인접 래그를 합칩니다. 소리의 지속시간을 반영한 강세 주기성, 후보 그리드가 설명하는 강세의 비율, 로그 템포 사전분포(중심 120 BPM, 폭 1옥타브)를 함께 평가합니다. 짧은 하이햇 공격음이 박자의 강세를 압도하지 않게 하고, 중간 박자를 누락하는 반속도 그리드에는 낮은 점수를 줍니다. 신뢰도는 주기성을 나타내며 옥타브 정답을 보증하지 않습니다.
+- **전역 위상 및 가중 최소제곱(WLS) 주기 최적화**: 코사인 펄스 커널($tolerance = \max(1.5\text{ hops}, T \times 0.10)$, $dist < tolerance$ 가드)로 최적 위상을 탐색한 뒤, 가중 최소제곱 회귀를 통해 주기 $T$와 위상 $\phi$를 동시 정밀화하여 누적 드리프트를 줄입니다:
 
 $$
 K(d, tol) = \cos^2\left(\frac{\pi \cdot d}{2 \cdot tol}\right) \quad (d < tol), \quad 0 \quad (\text{otherwise})
 $$
+- **조건부 정수 BPM 스냅**: 정수와 0.15 BPM 이내이며, WLS 온셋 8개 이상·박 번호 범위 12 이상일 때만 검토합니다. 같은 온셋 배정을 유지하고 정수 주기의 위상을 다시 맞춘 잔차 RMS가 `자유 모델 × 1.2 + 1ms` 이하여야 스냅합니다. 라이브 연주 판별기는 아니며, 허용 오차보다 작은 템포 차이는 스냅될 수 있습니다.
+- **위상 보정과 검증 한계**: 2048 FFT 합성 킥에서 측정한 1.15홉 보정을 스펙트럴 경로에만 적용합니다. 강한 하이햇의 70→140 BPM 여섯 회귀 사례는 모두 70 BPM으로 검출하며, 추가 저속·고속 템포와 박자 위치도 검사합니다. 실제 음악의 박자 정확도 보정은 아직 완료하지 않았습니다. [논문·구현 비교와 측정 결과](docs/bpm-detector-design.md)를 참고하세요.
 - **경계 무음 자동 트림 결합**: 인코딩 딜레이나 앞뒤 무음이 있어도 무음을 건너뛴 실제 음악 시작 지점부터 2/4/8박자 비트 매칭 수행.
 - **템포 스트레칭 및 복구**: 두 곡의 템포가 `maxTempoChange` 이내로 다를 경우(예: 124 BPM → 126 BPM), 크로스페이드 구간 동안 들어오는 곡의 속도를 임시 조절하고, 핸드오프가 완료되면 원래 1.0 템포로 점진적 복귀.
 
@@ -202,7 +204,7 @@ $$
 
 | 메서드 | 경로 | 헤더 | 바디 | 설명 |
 |---|---|---|---|---|
-| `GET` | `/mixer/info` | — | — | 플러그인 정보 반환 `{ protocolVersion: 2, version: "0.3.6" }` |
+| `GET` | `/mixer/info` | — | — | 플러그인 정보 반환 `{ protocolVersion: 2, version: "0.3.7" }` |
 | `GET` | `/mixer/state?guildId=` | — | — | 믹서 상태, 현재 설정, 전환 판정 이유, BPM 조회 |
 | `POST` | `/mixer/analyze` | — | `{ guildId, encodedTrack }` | 다음 후보곡 사전 분석 캐싱 요청 (202 반환) |
 | `POST` | `/mixer/queue/arm` | `Idempotency-Key` | `{ guildId, epoch, encodedTrack?, isEmpty, preserveTransition? }` | 다음 곡 장전 (JIT 전환 준비) |
@@ -322,10 +324,10 @@ Discord 음성 채널은 연결당 단 하나의 Opus 스트림만 수용하므�
 ./gradlew test
 
 # 배포용 아티팩트 빌드
-./gradlew build
+./gradlew build -Pversion=0.3.7
 ```
 
-빌드 결과물: `build/libs/lavalink_mixer-0.3.6.jar`.
+빌드 결과물: `build/libs/lavalink_mixer-0.3.7.jar`.
 
 ---
 

@@ -129,6 +129,38 @@ class BpmIntegrationTest {
         }
     }
 
+    @Test
+    fun `tail scan uses trimmed content end for resampled audio`() {
+        val manager = manager()
+        val file = introThenBeatFile("mixer-trimmed-bpm", introSec = 0, bpm = 120.0,
+            totalSec = 50, contentEndSec = 28, sourceRate = 44100)
+        val service = TrackAnalysisService(manager, 46L)
+        try {
+            val track = loadTrack(manager, file)
+            val result = service.analyze(track, TrackAnalysisSettings(
+                silence = true, normalization = false, bpm = true,
+                silenceThresholdDb = -50f, silenceMinSoundMs = 1,
+                silenceHeadScanMs = 5000, silenceTailScanMs = 25000, bpmScanMs = 12000,
+            ))
+            assertTrue(!result.aborted)
+            val trim = assertNotNull(result.trim)
+            assertTrue(trim.trailMs in 22_000..23_000, "trim=$trim")
+            val tail = assertNotNull(result.bpmTail)
+            assertEquals(120f, tail.bpm)
+            val features = assertNotNull(result.featuresTail)
+            assertTrue(features.windowStartMs in 15_000..16_000, "tail starts at ${features.windowStartMs}")
+            assertTrue(tail.phaseMs in 15_000..16_500, "tail phase=${tail.phaseMs}")
+
+            val measured = assertNotNull(service.measureTailAnalysis(track, 12000, trim.trailMs))
+            assertEquals(features.windowStartMs, measured.features.windowStartMs)
+            assertEquals(120f, assertNotNull(measured.grid).bpm)
+        } finally {
+            service.destroy()
+            manager.shutdown()
+            file.delete()
+        }
+    }
+
     private fun manager(): DefaultAudioPlayerManager {
         val m = DefaultAudioPlayerManager()
         m.registerSourceManager(com.sedmelluq.discord.lavaplayer.source.local.LocalAudioSourceManager())
@@ -185,11 +217,12 @@ class BpmIntegrationTest {
         }
         return file
     }
-    private fun introThenBeatFile(prefix: String, introSec: Int, bpm: Double, totalSec: Int): File {
+    private fun introThenBeatFile(prefix: String, introSec: Int, bpm: Double, totalSec: Int,
+                                  contentEndSec: Int = totalSec, sourceRate: Int = sampleRate): File {
         val file = File.createTempFile(prefix, ".wav")
-        val total = sampleRate * totalSec
-        val introSamples = sampleRate * introSec
-        val period = (sampleRate * 60.0 / bpm).toInt()
+        val total = sourceRate * totalSec
+        val introSamples = sourceRate * introSec
+        val period = (sourceRate * 60.0 / bpm).toInt()
         val dataLen = total * 2
         DataOutputStream(FileOutputStream(file).buffered()).use { out ->
             out.writeBytes("RIFF")
@@ -199,15 +232,17 @@ class BpmIntegrationTest {
             out.writeIntLE(16)
             out.writeShortLE(1)
             out.writeShortLE(1)
-            out.writeIntLE(sampleRate)
-            out.writeIntLE(sampleRate * 2)
+            out.writeIntLE(sourceRate)
+            out.writeIntLE(sourceRate * 2)
             out.writeShortLE(2)
             out.writeShortLE(16)
             out.writeBytes("data")
             out.writeIntLE(dataLen)
             for (pos in 0 until total) {
-                if (pos < introSamples) {
-                    val tone = (Math.sin(2 * Math.PI * 440.0 * pos / sampleRate) * 1000).toInt()
+                if (pos >= contentEndSec * sourceRate) {
+                    out.writeShortLE(0)
+                } else if (pos < introSamples) {
+                    val tone = (Math.sin(2 * Math.PI * 440.0 * pos / sourceRate) * 1000).toInt()
                     out.writeShortLE(tone)
                 } else {
                     val click = ((pos - introSamples) % period) < 100

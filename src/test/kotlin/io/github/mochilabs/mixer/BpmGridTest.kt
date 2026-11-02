@@ -159,16 +159,14 @@ class BpmGridTest {
     fun `tail phase preserves global grid alignment across arbitrary window start`() {
         val bpm = 128f
         val periodMs = 60_000.0 / bpm
-        // Global track has clicks anchored at t = 100ms + k * periodMs
         val baseOffsetMs = 100L
-        val track = clickTrack(bpm, seconds = 10, offsetMs = 0L) // first click at 0 + jitter 0
-        // Simulate tail extraction starting at an arbitrary non-beat-aligned timestamp
-        val tailStartMs = 182_345L
-        val tailGrid = BpmDetector.analyzeGrid(track, windowStartMs = tailStartMs) ?: fail("no tail grid")
+        val globalPcm = clickTrack(bpm, seconds = 30, offsetMs = baseOffsetMs).single().single()
+        val tailStartMs = 12_345L
+        val startSample = (tailStartMs * sr / 1000).toInt()
+        val tail = listOf(arrayOf(globalPcm.copyOfRange(startSample, startSample + 10 * sr)))
+        val tailGrid = BpmDetector.analyzeGrid(tail, windowStartMs = tailStartMs) ?: fail("no tail grid")
 
-        // Any beat predicted by tailGrid should land at tailGrid.phaseMs + k * tailGrid.periodMs
-        // In global track coordinates, this must be an integer multiple of periodMs (mod periodMs == 0)
-        val errorMs = ((tailGrid.phaseMs % periodMs) + periodMs) % periodMs
+        val errorMs = (((tailGrid.phaseMs - baseOffsetMs) % periodMs) + periodMs) % periodMs
         val distanceToGrid = minOf(errorMs, periodMs - errorMs)
         assertTrue(distanceToGrid <= 20.0, "tail grid error=$distanceToGrid ms (expected <= 20ms)")
     }

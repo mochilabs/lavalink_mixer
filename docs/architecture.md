@@ -167,6 +167,16 @@ Native stretching failures fall back to forwarding unstretched PCM.
 Beat phase is not a musical downbeat. Enabling beat matching does not by itself
 enable BPM analysis in `updateBeatmatch()`.
 
+`BpmDetector` normalizes energy and spectral analysis levels, retains local
+autocorrelation tempo candidates, and fits each candidate's period/phase with WLS.
+Tempo selection combines duration-aware accent periodicity, coverage of those
+accents by the fitted grid, and a log-tempo prior. Onset timing weights remain
+separate from metrical salience. Nearby integer BPM values are accepted only when the same assigned onsets support their residual.
+The first energy onset remains distinct from fitted grid phase. Confidence is
+periodicity, not metrical-level certainty. The detector remains pure Kotlin/JVM;
+its [research and calibration notes](bpm-detector-design.md) describe policy values
+and the strong-hi-hat octave regression checks. The default scan stays at 30 seconds.
+
 Sequential announcements share the secondary player with crossfades.
 `AnnouncementQueue` defers track resolution until playback and can requeue
 an item if the secondary player becomes busy. Parallel announcements own

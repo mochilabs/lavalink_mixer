@@ -18,6 +18,9 @@ data class FluxWeights(
  *   Low:  30 ~ 150 Hz   - Kick drum, sub/bass transients
  *   Mid:  150 ~ 2000 Hz - Snare, clap, vocal/synth attacks
  *   High: 2000 ~ 10000 Hz - Hi-hats, cymbals, shakers
+ * At 48 kHz these are bins 1..6, 7..85 and 86..427 respectively.
+ * `pcmScale` applies a common analysis gain before log compression; the BPM
+ * detector supplies a window RMS normalization. No time-domain mono downmix.
  */
 object SpectralFluxAnalyzer {
     private val log = org.slf4j.LoggerFactory.getLogger(SpectralFluxAnalyzer::class.java)
@@ -29,6 +32,7 @@ object SpectralFluxAnalyzer {
         frames: List<Array<FloatArray>>,
         sampleRate: Int = 48000,
         weights: FluxWeights = FluxWeights(),
+        pcmScale: Float = 1f,
     ): FloatArray? {
         if (frames.isEmpty()) return null
         val totalSamples = frames.sumOf { it[0].size.toLong() }.toInt()
@@ -91,7 +95,8 @@ object SpectralFluxAnalyzer {
 
                 val normFactor = 1024f / FFT_SIZE
                 for (i in chMags.indices) {
-                    currLogAvg[i] += ln(1f + 10f * chMags[i] * normFactor) / channels
+                    // Normalize before nonlinear compression so gain changes preserve onset shape.
+                    currLogAvg[i] += ln(1f + 10f * chMags[i] * normFactor * pcmScale) / channels
                 }
             }
 

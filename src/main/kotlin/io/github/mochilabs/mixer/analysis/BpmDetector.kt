@@ -7,42 +7,23 @@ import kotlin.math.exp
 import kotlin.math.ln
 import kotlin.math.round
 import kotlin.math.sqrt
+
 /**
- * Pure Kotlin tempo (BPM) + beat-grid detection from decoded float PCM.
- * Operates on the same planar chunks the rest of the analysis pipeline
- * produces (`List<Array<FloatArray>>` = one array per channel, any length).
+ * Tempo and local beat-grid detection from planar PCM on the isolated analysis path.
+ * A mean-normalized energy envelope is fused with channel-independent spectral flux.
+ * Local autocorrelation peaks and octave hypotheses compete using duration-aware accents
+ * and a log-tempo prior. A cosine phase search and WLS refine the selected period;
+ * integer BPM is accepted only when the same assigned onsets support its residual.
  *
- * Method (energy-flux onset detection + lag autocorrelation):
- *  1. Downmix to mono and fold into a ~100 frames/sec mean-square envelope.
- *  2. Half-wave-rectified first difference of the envelope = onset strength.
- *     A beat onset is a sharp *rise* in energy, so only positive flux counts;
- *     sustained loudness and decays contribute nothing.
- *  3. Autocorrelate the onset-strength signal over the lag window spanned by
- *     [minBpm]..[maxBpm]. A plain argmax only quantizes the period to whole
- *     10ms hops (~2% tempo resolution), so the winning peak is refined by
- *     parabolic interpolation across its raw-score neighbours; and a raw
- *     argmax alone can lock onto a half/double-tempo octave multiple, so the
- *     x2 and x0.5 harmonics of that lag are rescored with the same
- *     normalized-autocorrelation confidence as the winner and the best-
- *     scoring in-range candidate is kept unless clustered adjacent onset spacing
- *     independently supports a shorter octave (avoiding integer-hop bias). [analyzeGrid] turns the refined
- *     period + first onset into a phase-anchored [BeatGrid];
- *     [analyze] keeps the legacy scalar shape.
- *  4. The first onset that clears an adaptive threshold (mean + 1.5 sigma)
- *     anchors the grid phase in [BeatGrid.phaseMs] / [BpmResult.firstBeatMs].
- *  5. [BpmResult.confidence] scores how periodic the onset signal really is at
- *     the chosen lag, so a caller can tell "a beat grid exists" from "the
- *     autocorrelation had to pick *some* lag".
- *
- * No native code, no allocations beyond a few small arrays sized by the scan
- * window (~3k frames for 30s @ 100fps); the per-lag autocorrelation is
- * O(n * lagRange), trivially cheap at these sizes.
+ * [analyze] reports the first energy onset, while [analyzeGrid] reports the fitted
+ * grid phase in track coordinates. Confidence measures periodicity, not certainty
+ * about the musical metrical level. See docs/bpm-detector-design.md for references,
+ * measured policies and evaluation limits. This is not a full BeatRoot/DP tracker.
  */
 object BpmDetector {
     private val log = org.slf4j.LoggerFactory.getLogger(BpmDetector::class.java)
 
-    internal data class Onset(val hop: Double, val weight: Double)
-
+    private data class Onset(val hop: Double, val weight: Double, val salience: Double = weight)
 
     /**
      * Legacy scalar view of [analyzeGrid] (kept for [TrackAnalysisService.measureBpmBlocking]).
@@ -71,6 +52,23 @@ object BpmDetector {
 
     /** Hop length of the envelope, in ms. */
     private const val HOP_MS = 1000.0 / FRAMES_PER_SECOND
+
+    /** Relative energy-flux mean square; provisional until real-track calibration. */
+    private const val MIN_REL_FLUX_MS = 0.02
+    // 105 BPM collapsed the 150 BPM regression to 75; retain 120 pending music calibration.
+    private const val PRIOR_CENTER_BPM = 120.0
+    private const val PRIOR_SIGMA_OCT = 1.0
+    /** Fixed analysis level before log compression, independent of playback gain. */
+    private const val SPECTRAL_REFERENCE_RMS = 0.1
+    /** Measured with 2048/Hann kicks at 44.1/48 kHz over all ten sub-hop offsets. */
+    private const val SPECTRAL_ONSET_BIAS_HOPS = 1.15
+    /** Include the attack preceding a flux centroid when measuring its duration. */
+    private const val ACCENT_PREROLL_HOPS = 2.0
+    private const val SNAP_MAX_DELTA_BPM = 0.15
+    private const val SNAP_MIN_ONSETS = 8
+    private const val SNAP_MIN_BEAT_SPAN = 12
+    private const val SNAP_RMS_FACTOR = 1.2
+    private const val SNAP_RMS_SLACK_HOPS = 0.1
 
     /**
      * A tempo estimate below this confidence is reported as-is (legacy callers
@@ -122,8 +120,13 @@ object BpmDetector {
     ): Detection? {
         val env = envelope(frames, sampleRate)
         val n = env.size
-        // Need at least one full beat period of the slowest tempo to correlate.
+        // The lag search below also requires two periods of the candidate tempo.
         if (n < 8) return null
+
+        val meanEnv = env.sumOf { it.toDouble() } / n
+        if (meanEnv < 1e-9) return null
+        val invMean = (1.0 / meanEnv).toFloat()
+        for (i in env.indices) env[i] *= invMean
 
         // Onset strength: fuse energy flux with 3-band spectral flux when available
         val energyFlux = FloatArray(n)
@@ -132,16 +135,20 @@ object BpmDetector {
             val d = env[i] - env[i - 1]
             if (d > 0f) energyFlux[i] = d
         }
+        val (eDetrended, eVariance) = detrend(energyFlux)
+        log.debug("BPM relative energy-flux mean square: {} (minimum {})", eVariance / n, MIN_REL_FLUX_MS)
+        if (eVariance / n < MIN_REL_FLUX_MS) return null
 
         val specFlux = try {
-            SpectralFluxAnalyzer.computeSpectralFlux(frames, sampleRate)
+            SpectralFluxAnalyzer.computeSpectralFlux(
+                frames, sampleRate, pcmScale = (SPECTRAL_REFERENCE_RMS / sqrt(meanEnv)).toFloat(),
+            )
         } catch (e: Exception) {
             log.warn("Spectral flux computation failed, falling back to energy flux: ${e.message}")
             null
         }
         val (_, eStd) = stats(energyFlux, 0, n)
         val (_, sStd) = if (specFlux != null) stats(specFlux, 0, specFlux.size) else (0f to 0f)
-        if (eStd < 0.005f && sStd < 0.005f) return null
         val flux = if (specFlux != null) {
             val invE = if (eStd > 1e-4f) 1f / eStd else 0f
             val invS = if (sStd > 1e-4f) 1f / sStd else 0f
@@ -228,12 +235,24 @@ object BpmDetector {
         }
         if (bestLag <= 0) return null
 
-        val onsets = extractOnsets(flux, threshold)
+        val onsetBias = if (specFlux != null) SPECTRAL_ONSET_BIAS_HOPS else 0.0
+        val onsets = measureOnsetSalience(frames, sampleRate, extractOnsets(flux, threshold, onsetBias), minLag)
 
         val rawCandidates = mutableSetOf<Int>()
         rawCandidates.add(bestLag)
         rawCandidates.add(bestLag * 2)
         rawCandidates.add(round(bestLag / 2.0).toInt())
+        val energyBestLag = (minLag..maxLag).maxBy { normalizedCorrelation(eDetrended, eVariance, it) }
+        rawCandidates.add(energyBestLag)
+        rawCandidates.add(energyBestLag * 2)
+        rawCandidates.add(round(energyBestLag / 2.0).toInt())
+        // A third harmonic can win the global peak; retain other local tempo hypotheses.
+        // Ellis (2007) / librosa evaluate the full lag range before applying the prior.
+        for (lag in minLag..maxLag) {
+            val left = if (lag > minLag) scores[lag - 1] else -1f
+            val right = if (lag < maxLag) scores[lag + 1] else -1f
+            if (scores[lag] > left && scores[lag] >= right) rawCandidates.add(lag)
+        }
 
         // Ensure both half-lags and double-lags are present so odd bestLag (e.g. 75 -> 38)
         // has its 2x multiple (76) available for cross-checking without omission.
@@ -245,62 +264,62 @@ object BpmDetector {
         val candidateLags = expandedLags.filter { it in minLag..maxLag }.toSortedSet()
         if (candidateLags.isEmpty()) return null
 
-        val candidates = candidateLags.map { it to sampleConfidence(detrended, variance, it) }
-        val maxConf = candidates.maxOf { it.second }
+        val candidates = candidateLags
+            .map { it to normalizedCorrelation(detrended, variance, it).toFloat() }
+            .fold(mutableListOf<Pair<Int, Float>>()) { acc, candidate ->
+                val last = acc.lastOrNull()
+                if (last != null && candidate.first - last.first <= 1) {
+                    if (candidate.second > last.second) acc[acc.lastIndex] = candidate
+                } else {
+                    acc.add(candidate)
+                }
+                acc
+            }
+            .map { (lag, _) -> lag to sampleConfidence(detrended, variance, lag) }
 
-        val onsetSupport = candidates.associate { (lag, _) ->
-            val autoRefined = refineLag(detrended, variance, lag, minLag, maxLag, n)
-            lag to supportedOnsetPeriod(onsets, lag, autoRefined)
-        }
-
-        // Octave disambiguation:
-        // A candidate lag L is promoted to doubled lag 2L (half tempo) if and only if
-        // the doubled lag has significantly more onset support weight (> 1.8x),
-        // indicating that onsets at lag L were mostly quiet subdivisions (e.g. 8th-note hi-hats)
-        // while lag 2L connects the actual accented main beats (kick/snare).
-        var chosenLag = -1
-        for ((lag, conf) in candidates) {
-            val supp = onsetSupport[lag] ?: continue
-            val doubleEntry = candidates.firstOrNull { abs(it.first - 2 * lag) <= 1 }
-            val doubleLag = doubleEntry?.first
-            val doubleConf = doubleEntry?.second ?: 0f
-            val doubleSupp = doubleLag?.let { onsetSupport[it] }
-
-            if (doubleSupp != null && doubleSupp.totalWeight > supp.totalWeight * 2.15 && doubleConf >= conf * 0.85f) {
-                chosenLag = doubleLag
-                break
+        // Threshold prominence describes attack timing, not metrical salience. Include
+        // event duration to distinguish short subdivisions from sustained beat accents.
+        // A one-hop Gaussian retains fractional onset positions in the autocorrelation.
+        val accents = FloatArray(n)
+        for (onset in onsets) {
+            for (i in maxOf(0, onset.hop.toInt() - 3)..minOf(n - 1, onset.hop.toInt() + 3)) {
+                val distance = i - onset.hop
+                accents[i] += (onset.salience * exp(-0.5 * distance * distance)).toFloat()
             }
         }
-        if (chosenLag < 0) {
-            val scored = candidates.map { (lag, conf) ->
-                val bpm = (60_000.0 / (lag * HOP_MS)).toFloat()
-                lag to (conf * tempoPrior(bpm))
-            }
-            val maxScore = scored.maxOf { it.second }
-            chosenLag = scored.firstOrNull { it.second >= maxScore - 0.04f }?.first ?: bestLag
+        val (accentSignal, accentVariance) = detrend(accents)
+        // Fit each hypothesis before comparing coverage: alternating attack offsets can
+        // bias a single-interval median and otherwise smear the correct grid over time.
+        val candidateGrids = candidates.associate { (lag, _) ->
+            val refined = refineLag(detrended, variance, lag, minLag, maxLag, n)
+            val supported = supportedOnsetPeriod(onsets, lag, refined) ?: refined
+            lag to optimizePhaseAndPeriod(onsets, supported)
         }
+        val chosenLag = candidates.maxByOrNull { (lag, conf) ->
+            val accentConf = if (accentVariance > 0.0) sampleConfidence(accentSignal, accentVariance, lag) else conf
+            val (period, phase, _) = candidateGrids.getValue(lag)
+            // A half-tempo grid must account for the accents it leaves between its beats.
+            val coverage = accentCoverage(onsets, period, phase)
+            val score = accentConf * coverage * tempoPrior(60_000.0 / (lag * HOP_MS))
+            log.debug("BPM candidate: lag={}, flux confidence={}, accent confidence={}, coverage={}, score={}", lag, conf, accentConf, coverage, score)
+            score
+        }?.first ?: bestLag
 
-        val (eDetrended, eVariance) = detrend(energyFlux)
-        // Fail-closed if broadband energy flux variance is negligible (pure tone, white noise, static drone)
-        if (eVariance / n < 4e-5) return null
         val energyConf = sampleConfidence(eDetrended, eVariance, chosenLag)
         val specConf = sampleConfidence(detrended, variance, chosenLag)
         val rawConf = maxOf(energyConf, specConf)
         val chosenConf = if (onsets.size < 4) 0f else rawConf
 
-        val chosenRefined = onsetSupport[chosenLag]?.period ?: refineLag(detrended, variance, chosenLag, minLag, maxLag, n)
-        val (refinedPeriod, phaseHops, _) = optimizePhaseAndPeriod(onsets, chosenRefined)
+        val (refinedPeriod, phaseHops, _) = candidateGrids.getValue(chosenLag)
         val bpm = (60_000.0 / (refinedPeriod * HOP_MS)).toFloat()
         return Detection(bpm, chosenConf, firstBeatIdx, phaseHops)
     }
-
-    private data class SupportedPeriod(val period: Double, val totalWeight: Double)
 
     private fun supportedOnsetPeriod(
         onsets: List<Onset>,
         lag: Int,
         autoRefinedLag: Double,
-    ): SupportedPeriod? {
+    ): Double? {
         if (onsets.size < 4) return null
         val tol = maxOf(1.5, lag * 0.05)
 
@@ -342,24 +361,81 @@ object BpmDetector {
         } else {
             median
         }
-        return SupportedPeriod(period, totalSupportedWeight)
+        return period
     }
-    private fun onsetVariation(onsets: List<Onset>): Float {
-        if (onsets.size < 4) return 0f
-        var sum = 0.0
-        for (o in onsets) sum += o.weight
-        val mean = sum / onsets.size
-        if (mean <= 0.0) return 0f
-        var varAcc = 0.0
-        for (o in onsets) {
-            val d = o.weight - mean
-            varAcc += d * d
+
+    private fun accentCoverage(onsets: List<Onset>, period: Double, phase: Double): Double {
+        val total = onsets.sumOf { it.salience }
+        if (total <= 0.0) return 0.0
+        val tolerance = maxOf(1.5, period * 0.10)
+        var covered = 0.0
+        for (onset in onsets) {
+            val offset = ((onset.hop - phase) % period + period) % period
+            val distance = minOf(offset, period - offset)
+            if (distance < tolerance) {
+                val kernel = cos(PI * distance / (2.0 * tolerance))
+                covered += onset.salience * kernel * kernel
+            }
         }
-        return (sqrt(varAcc / onsets.size) / mean).toFloat()
+        return covered / total
     }
 
+    private fun measureOnsetSalience(
+        frames: List<Array<FloatArray>>,
+        sampleRate: Int,
+        onsets: List<Onset>,
+        shortestPeriodHops: Int,
+    ): List<Onset> {
+        val hopSamples = (sampleRate / FRAMES_PER_SECOND).coerceAtLeast(1)
+        // Disjoint windows end at the next attack or the shortest allowed beat.
+        // Traverse planar PCM once; channel energies avoid anti-phase cancellation.
+        val starts = onsets.map { ((it.hop - ACCENT_PREROLL_HOPS) * hopSamples).toLong().coerceAtLeast(0L) }
+        var frameIndex = 0
+        var frameStart = 0L
+        return onsets.mapIndexed { index, onset ->
+            val start = starts[index]
+            val end = minOf(start + shortestPeriodHops.toLong() * hopSamples, starts.getOrNull(index + 1) ?: Long.MAX_VALUE)
+            // A short RMS envelope measures duration without making noisy snare peaks
+            // appear shorter than a sinusoidal kick of the same envelope.
+            val blockSize = maxOf(1, hopSamples / 4)
+            var blockEnergy = 0.0
+            var blockSamples = 0
+            var area = 0.0
+            var peak = 0.0
+            fun finishBlock() {
+                if (blockSamples == 0) return
+                val rms = sqrt(blockEnergy / blockSamples)
+                area += rms * blockSamples
+                peak = maxOf(peak, rms)
+                blockEnergy = 0.0
+                blockSamples = 0
+            }
+            while (frameIndex < frames.size && frameStart < end) {
+                val frame = frames[frameIndex]
+                val frameEnd = frameStart + frame[0].size
+                val lo = (start - frameStart).coerceIn(0L, frame[0].size.toLong()).toInt()
+                val hi = (end - frameStart).coerceIn(0L, frame[0].size.toLong()).toInt()
+                for (i in lo until hi) {
+                    var energy = 0.0
+                    for (channel in frame) energy += channel[i].toDouble() * channel[i]
+                    blockEnergy += energy / frame.size
+                    blockSamples++
+                    if (blockSamples == blockSize) finishBlock()
+                }
+                if (frameEnd >= end) break
+                frameIndex++
+                frameStart = frameEnd
+            }
+            finishBlock()
+            // Equivalent rectangular duration (area / peak) is invariant to playback gain.
+            val durationHops = if (peak > 0.0) area / (peak * hopSamples) else 0.0
+            // Saturate threshold prominence: suppress marginal noise without allowing
+            // a sharper attack to outweigh all of the longer, quieter beat accents.
+            onset.copy(salience = durationHops * onset.weight / (1.0 + onset.weight))
+        }
+    }
 
-    private fun extractOnsets(flux: FloatArray, threshold: FloatArray): List<Onset> {
+    private fun extractOnsets(flux: FloatArray, threshold: FloatArray, bias: Double): List<Onset> {
         val onsets = mutableListOf<Onset>()
         var i = 0
         while (i < flux.size) {
@@ -376,8 +452,7 @@ object BpmDetector {
                 i++
             }
             if (sumWeight > 0.0) {
-                // Compensate for 2048 FFT Hann window lookahead (~0.5 hops) to center transient
-                onsets.add(Onset(sumPos / sumWeight + 0.5, sumWeight))
+                onsets.add(Onset(sumPos / sumWeight + bias, sumWeight))
             }
         }
         return onsets
@@ -412,34 +487,50 @@ object BpmDetector {
         val alignmentRatio = (bestScore / totalWeight).coerceIn(0.0, 1.0).toFloat()
 
         // Jointly refine period and phase using weighted least squares (WLS) across the full window
-        val (refinedPeriod, refinedPhi) = refinePeriodAndPhaseWls(onsets, initialPeriod, bestPhi)
-        return Triple(refinedPeriod, refinedPhi, alignmentRatio)
+        val fit = refinePeriodAndPhaseWls(onsets, initialPeriod, bestPhi)
+            ?: return Triple(initialPeriod, bestPhi, alignmentRatio)
+        val snapped = snapToIntegerBpm(fit)
+        if (snapped != null) {
+            log.debug("BPM snapped: {} -> {}", 60_000.0 / (fit.period * HOP_MS), 60_000.0 / (snapped.first * HOP_MS))
+            return Triple(snapped.first, snapped.second, alignmentRatio)
+        }
+        return Triple(fit.period, fit.phase, alignmentRatio)
     }
+
+    private data class AssignedOnset(val beat: Double, val hop: Double, val weight: Double)
+
+    private class GridFit(
+        val period: Double,
+        val phase: Double,
+        val phaseRaw: Double,
+        val assigned: List<AssignedOnset>,
+    )
 
     private fun refinePeriodAndPhaseWls(
         onsets: List<Onset>,
         initialPeriod: Double,
         initialPhase: Double,
-    ): Pair<Double, Double> {
-        if (onsets.size < 4 || initialPeriod <= 0.0) return initialPeriod to initialPhase
+    ): GridFit? {
+        if (onsets.size < 4 || initialPeriod <= 0.0) return null
 
         var currPeriod = initialPeriod
         var currPhase = initialPhase
         val toleranceRatios = doubleArrayOf(0.22, 0.12, 0.08)
+        var best: GridFit? = null
 
         for (tolRatio in toleranceRatios) {
             val tol = maxOf(1.2, currPeriod * tolRatio)
             var sumW = 0.0
             var sumK = 0.0
             var sumT = 0.0
-            val valid = mutableListOf<Triple<Double, Double, Double>>() // (k, t, w)
+            val valid = mutableListOf<AssignedOnset>()
             val beatIndices = mutableSetOf<Long>()
 
             for (onset in onsets) {
                 val k = round((onset.hop - currPhase) / currPeriod)
                 val expected = currPhase + k * currPeriod
                 if (abs(onset.hop - expected) <= tol) {
-                    valid.add(Triple(k, onset.hop, onset.weight))
+                    valid.add(AssignedOnset(k, onset.hop, onset.weight))
                     beatIndices.add(k.toLong())
                     sumW += onset.weight
                     sumK += onset.weight * k
@@ -472,14 +563,44 @@ object BpmDetector {
             val refinedPhase = meanT - refinedPeriod * meanK
             currPeriod = refinedPeriod
             currPhase = ((refinedPhase % currPeriod) + currPeriod) % currPeriod
+            best = GridFit(currPeriod, currPhase, refinedPhase, valid)
         }
 
-        return currPeriod to currPhase
+        return best
     }
 
-    private fun tempoPrior(bpm: Float): Float {
-        val log2Ratio = (ln(bpm.toDouble() / 120.0) / ln(2.0)).toFloat()
-        return exp(-0.5f * (log2Ratio / 0.90f) * (log2Ratio / 0.90f))
+    private fun weightedRms(assigned: List<AssignedOnset>, period: Double, phaseRaw: Double): Double {
+        var sumWeight = 0.0
+        var sumSquaredResidual = 0.0
+        for ((beat, hop, weight) in assigned) {
+            val residual = hop - (phaseRaw + beat * period)
+            sumSquaredResidual += weight * residual * residual
+            sumWeight += weight
+        }
+        return sqrt(sumSquaredResidual / sumWeight)
+    }
+
+    private fun snapToIntegerBpm(fit: GridFit): Pair<Double, Double>? {
+        val bpm = 60_000.0 / (fit.period * HOP_MS)
+        val target = round(bpm)
+        if (target < 1.0 || abs(bpm - target) > SNAP_MAX_DELTA_BPM) return null
+        val assigned = fit.assigned
+        if (assigned.size < SNAP_MIN_ONSETS) return null
+        if (assigned.maxOf { it.beat } - assigned.minOf { it.beat } < SNAP_MIN_BEAT_SPAN) return null
+
+        val snapPeriod = 60_000.0 / (target * HOP_MS)
+        val sumWeight = assigned.sumOf { it.weight }
+        val snapPhaseRaw = assigned.sumOf { it.weight * (it.hop - it.beat * snapPeriod) } / sumWeight
+        val freeRms = weightedRms(assigned, fit.period, fit.phaseRaw)
+        val snapRms = weightedRms(assigned, snapPeriod, snapPhaseRaw)
+        log.debug("BPM integer fit: raw={}, target={}, free RMS={}, integer RMS={} hops", bpm, target, freeRms, snapRms)
+        if (snapRms > freeRms * SNAP_RMS_FACTOR + SNAP_RMS_SLACK_HOPS) return null
+        return snapPeriod to ((snapPhaseRaw % snapPeriod) + snapPeriod) % snapPeriod
+    }
+
+    private fun tempoPrior(bpm: Double): Double {
+        val oct = ln(bpm / PRIOR_CENTER_BPM) / ln(2.0)
+        return exp(-0.5 * (oct / PRIOR_SIGMA_OCT) * (oct / PRIOR_SIGMA_OCT))
     }
 
     /**

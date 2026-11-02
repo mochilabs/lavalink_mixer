@@ -62,3 +62,13 @@ the reserved evaluation subset. Record the scan duration and plugin revision
 with the result. A table of confidence values alone is a measurement report,
 not a calibrated threshold. Real-track calibration remains pending until
 audio and reference labels are supplied and evaluated.
+
+## Detector policies and synthetic checks
+
+See [BPM detector research and measurements](bpm-detector-design.md) for the
+relative-flux gate, integer-snap residual rule, phase correction, and the 12s/30s
+scan comparison. `BpmPrecisionTest` prints synthetic measurements; the strong-hat
+sweep requires the quarter-note BPM and beat phase, rejecting half/double tempo
+and offbeat grids.
+Enable DEBUG for `io.github.mochilabs.mixer.BpmDetector` to inspect relative flux
+mean square, candidate accent periodicity/coverage, and integer-fit residuals while collecting calibration data.

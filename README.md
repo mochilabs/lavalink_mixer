@@ -39,11 +39,11 @@ Add the plugin to your Lavalink `application.yml`:
 ```yaml
 lavalink:
   plugins:
-    - dependency: "io.github.mochilabs.mixer:mixer-plugin:0.3.6"
+    - dependency: "io.github.mochilabs.mixer:mixer-plugin:0.3.7"
       repository: "https://maven.pkg.github.com/mochilabs/lavalink_mixer"
 ```
 
-Or manually download `lavalink_mixer-0.3.6.jar` from [Releases](https://github.com/mochilabs/lavalink_mixer/releases) and place it into Lavalink's `plugins/` directory, then restart Lavalink.
+Or manually download `lavalink_mixer-0.3.7.jar` from [Releases](https://github.com/mochilabs/lavalink_mixer/releases) and place it into Lavalink's `plugins/` directory, then restart Lavalink.
 
 ### 2. Enable Filter (Required Once Per Guild)
 
@@ -111,23 +111,25 @@ mixer:
 ### 1. Beat-Matched AutoMix
 The AutoMix engine runs an isolated, pure Kotlin analysis pass on incoming and outgoing tracks:
 - **Radix-2 Real FFT (N=2048)** with Hann windowing for zero-allocation spectral analysis.
-  - Multi-channel processing: transforms each channel independently and averages log magnitudes ($L_t(k) = \ln(1 + 10 \cdot |X_t(k)|)$) to avoid stereo phase cancellation.
+  - Multi-channel processing: transforms each channel independently and averages log magnitudes to avoid stereo phase cancellation. Before compression, normalize window RMS to 0.1 and scale FFT magnitudes by `1024/N` (`L = ln(1 + 10·|X|·1024/N·0.1/RMS)`).
   - Dynamic sample-rate support: dynamically scales hop size ($\sim 10\text{ms}$) and frequency bin boundaries for 48kHz, 44.1kHz, etc.
   - Standardized band fusion: scales each band by its standard deviation ($SF_{\text{band}} / \sigma_{\text{band}}$) so low-end bass cannot bury snare or hi-hat attacks.
-  - **Low (30–150 Hz)**: Isolates kick drums and sub-bass transients.
-  - **Mid (150–2,000 Hz)**: Tracks snares, claps, and instrumental attacks.
-  - **High (2,000–10,000 Hz)**: Tracks hi-hats, cymbals, and shakers.
+  - **Low (30–150 Hz, bins 1..6 at 48kHz)**: Isolates kick drums and sub-bass transients.
+  - **Mid (150–2,000 Hz, bins 7..85)**: Tracks snares, claps, and instrumental attacks.
+  - **High (2,000–10,000 Hz, bins 86..427)**: Tracks hi-hats, cymbals, and shakers.
 
 $$
 SF_{\text{band}}(t) = \sum_{k \in \text{band}} \max\left(0, L_t(k) - L_{t-1}(k)\right)
 $$
 
-- **Normalized Autocorrelation & Octave Disambiguation**: Unbiased tempo candidate estimation (60–200 BPM) with 5% relative interval tolerance, minimum 4 interval confirmations, and energy-weighted hi-hat subdivision cross-checking ($2.2\times$ energy ratio threshold). If intervals are absent, candidates within 0.35 of maximum confidence and $\ge 0.35$ confidence prefer the faster fundamental tempo.
-- **Global Phase & WLS Period Optimization**: Fits all detected onsets using a cosine pulse kernel ($tolerance = \max(1.5\text{ hops}, T \times 0.10)$) with $dist < tolerance$ guard, followed by Weighted Least Squares (WLS) regression to jointly optimize period $T$ and grid phase $\phi$, eliminating 30-second tail grid drift:
+- **Relative Energy Gate & Tempo Candidates**: Normalize the energy envelope by its mean so quiet audio remains analyzable. Retain local autocorrelation peaks and energy candidates over 60–200 BPM, merging adjacent lags. Select among fitted grids using duration-aware accent periodicity, accent coverage, and a log-tempo prior (120 BPM center, one-octave width). Short hi-hat attacks no longer receive the same metrical weight as sustained beat accents; coverage penalizes grids that skip intervening beats. Confidence measures periodicity, not certainty about the musical octave.
+- **Global Phase & WLS Period Optimization**: Fits all detected onsets using a cosine pulse kernel ($tolerance = \max(1.5\text{ hops}, T \times 0.10)$) with $dist < tolerance$ guard, followed by Weighted Least Squares (WLS) regression to jointly optimize period $T$ and grid phase $\phi$, reducing accumulated grid drift:
 
 $$
 K(d, tol) = \cos^2\left(\frac{\pi \cdot d}{2 \cdot tol}\right) \quad \text{for } d < tol, \quad 0 \text{ otherwise}
 $$
+- **Conditional Integer BPM Snap**: Consider a nearby integer only within 0.15 BPM, with at least 8 assigned onsets spanning 12 beat indices. Refit phase at the integer period using the same WLS assignments; accept only if residual RMS is at most `free-fit RMS × 1.2 + 1ms`. This does not classify live performances; tempo differences below the allowed residual can still snap.
+- **Phase Calibration & Limits**: Apply a 1.15-hop correction measured on synthetic kicks with the 2048 FFT only to the spectral path. The six strong-hi-hat 70→140 BPM regressions now return 70 BPM, with additional slow/fast tempo and phase checks. Real-music metrical accuracy remains uncalibrated. See the [research and measurement notes](docs/bpm-detector-design.md).
 - **Boundary Silence Awareness**: Automatically trims encoding delays and leading/trailing silence, aligning the beat grids directly across the audible portions of both tracks.
 - **Tempo Transition & Recovery**: If tempos differ within `maxTempoChange` (e.g. 124 BPM → 126 BPM), the secondary track's tempo is stretched using `lavadsp` timescale during the crossfade. Once the outgoing track fades out, the incoming track smoothly returns to its native 1.0 tempo.
 
@@ -202,7 +204,7 @@ All endpoints accept standard Lavalink `Authorization` headers.
 
 | Method | Path | Header | Body | Description |
 |---|---|---|---|---|
-| `GET` | `/mixer/info` | — | — | Returns `{ protocolVersion: 2, version: "0.3.6" }` |
+| `GET` | `/mixer/info` | — | — | Returns `{ protocolVersion: 2, version: "0.3.7" }` |
 | `GET` | `/mixer/state?guildId=` | — | — | Returns current state, config, transition status, and BPM |
 | `POST` | `/mixer/analyze` | — | `{ guildId, encodedTrack }` | Pre-warms analysis cache before arming (returns 202) |
 | `POST` | `/mixer/queue/arm` | `Idempotency-Key` | `{ guildId, epoch, encodedTrack?, isEmpty, preserveTransition? }` | Arms the next track for JIT transition |
@@ -323,10 +325,10 @@ Requirements: **JDK 17+**
 ./gradlew test
 
 # Full build including artifacts
-./gradlew build
+./gradlew build -Pversion=0.3.7
 ```
 
-Artifact output: `build/libs/lavalink_mixer-0.3.6.jar`.
+Artifact output: `build/libs/lavalink_mixer-0.3.7.jar`.
 
 ---
 

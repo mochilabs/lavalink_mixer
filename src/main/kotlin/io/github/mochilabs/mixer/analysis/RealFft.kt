@@ -7,6 +7,7 @@ import kotlin.math.sqrt
 
 /**
  * Pure Kotlin in-place Radix-2 Real/Complex Fast Fourier Transform for power-of-two size (default N=2048).
+ * At 48 kHz the default bin spacing is 23.4375 Hz; magnitudes are unnormalized.
  * Zero heap allocations during [transform] and [magnitudes].
  * Thread-safe for distinct instances or when using per-call scratch buffers.
  */

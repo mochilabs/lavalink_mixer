@@ -411,8 +411,8 @@ internal class TrackAnalysisService(
             meter.feed(frames)
             meter.finish()
         } else null
-        val bpm = if (measureBpm) BpmDetector.analyze(frames) else null
-        val grid = if (measureBpm) BpmDetector.analyzeGrid(frames, windowStartMs = 0L) else null
+        val bpm = if (measureBpm) BpmDetector.analyze(frames, sampleRate = SAMPLE_RATE) else null
+        val grid = if (measureBpm) BpmDetector.analyzeGrid(frames, sampleRate = SAMPLE_RATE, windowStartMs = 0L) else null
         val features = if (measureBpm) TransitionFeatureAnalyzer.analyze(frames, grid = grid) else null
         return SinglePassResult(lead, trail, loudness, bpm, bpmHead = grid, bpmTail = grid, featuresHead = features, featuresTail = features)
     }

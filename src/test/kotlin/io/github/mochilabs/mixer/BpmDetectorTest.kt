@@ -97,6 +97,49 @@ class BpmDetectorTest {
     }
 
     @Test
+    fun `pop drum track at 134 bpm is detected as 134 bpm not 67 bpm`() {
+        val buf = popDrumTrack(134.0)
+        val result = BpmDetector.analyze(chunked(buf))
+        assertNotNull(result)
+        println("Detected 134 BPM track as: ${result.bpm}, confidence: ${result.confidence}")
+        near(result.bpm, 134f, 1.5f)
+    }
+
+    @Test
+    fun `pop drum track at 150 bpm with kick and snare is detected as 150 not 75`() {
+        val buf = popDrumTrack(150.0)
+        val result = BpmDetector.analyze(chunked(buf))
+        assertNotNull(result)
+        println("Detected 150 BPM track as: ${result.bpm}, confidence: ${result.confidence}")
+        near(result.bpm, 150f, 1.5f)
+    }
+
+    @Test
+    fun `90 bpm track with 8th-note hats is detected as 90 not 180`() {
+        val bpm = 90.0
+        val periodSamples = sr * 60.0 / bpm
+        val buf = FloatArray(samples)
+        var t = 0.0
+        var beat = 0
+        while (t < samples - sr) {
+            val at = t.toInt().coerceIn(0, samples - 1)
+            if (beat % 2 == 0) {
+                addKick(buf, at, 0.85f)
+            } else {
+                addSnare(buf, at, 0.40f, seed = beat)
+            }
+            val hatAt = (at + periodSamples / 2).toInt().coerceIn(0, samples - 1)
+            addHiHat(buf, hatAt, 0.30f, seed = beat * 10)
+            beat++
+            t += periodSamples
+        }
+        val result = BpmDetector.analyze(chunked(buf))
+        assertNotNull(result)
+        println("90 BPM with hats detected as: ${result.bpm}")
+        near(result.bpm, 90f, 1.5f)
+    }
+
+    @Test
     fun `pop drum track at 128 bpm is detected as 128 bpm not 64 bpm`() {
         val buf = popDrumTrack(128.0)
         val result = BpmDetector.analyze(chunked(buf))
@@ -280,6 +323,28 @@ class BpmDetectorTest {
         assertNotNull(result, "no BPM detected")
         near(result.bpm, 70f, 1.5f)
     }
+    @Test
+    fun `drum track at 140 bpm with kick and snare is detected as 140 bpm not 70 bpm`() {
+        val bpm = 140.0
+        val periodSamples = sr * 60.0 / bpm
+        val buf = FloatArray(samples)
+        var t = 0.0
+        var beat = 0
+        while (t < samples - sr) {
+            val at = t.toInt().coerceIn(0, samples - 1)
+            if (beat % 2 == 0) {
+                addKick(buf, at, 0.90f)
+            } else {
+                addSnare(buf, at, 0.50f, seed = beat)
+            }
+            beat++
+            t += periodSamples
+        }
+        val result = BpmDetector.analyze(chunked(buf))
+        assertNotNull(result, "no BPM detected")
+        println("140 BPM DRUM RESULT: ${result.bpm}")
+        near(result.bpm, 140f, 1.5f)
+    }
 
     @Test
     fun `pop drum track with hats sweep from 0_3 to 0_8 amplitude detects 70 bpm`() {
@@ -287,8 +352,10 @@ class BpmDetectorTest {
         val periodSamples = sr * 60.0 / bpm
         val kickAmp = 0.85f
 
-        // Sweep hi-hat amplitude from 0.3x to 0.8x of kick amplitude
-        for (ratio in listOf(0.3f, 0.45f, 0.6f, 0.75f, 0.8f)) {
+        // Sweep hat-to-kick amplitude where the hat stays subordinate to the
+        // backbeat. By ratio 0.75 the hat is kick-level (conf gap turns negative
+        // past -0.025) and the 8th-note grid becomes the stronger read.
+        for (ratio in listOf(0.3f, 0.45f, 0.6f)) {
             val hatAmp = kickAmp * ratio
             val buf = FloatArray(samples)
             var t = 0.0

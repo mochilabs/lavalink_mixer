@@ -10,9 +10,11 @@ info:
 
     PROTOCOL V2 — JIT PREFETCH & EPOCH FENCING.
     AGENT WORKFLOW (follow this order per guild):
-    1. Enable audio output once per guild via the Lavalink WebSocket `filters`
-       op: `{ "op": "filters", "guildId": "<id>",
-       "pluginFilters": { "mixer": { "guildId": "<id>" } } }`.
+    1. Enable audio output per player via Lavalink v4's Update Player endpoint:
+       PATCH /v4/sessions/{sessionId}/players/{guildId} with
+       `{ "filters": { "pluginFilters": { "mixer": { "guildId": "<id>" } } } }`.
+       Keep the mixer entry and any other desired filters on later updates,
+       because updating filters replaces the player's filter configuration.
        Without this filter, mixer effects are not applied; ordinary main audio can still play.
     2. Optionally tune per-guild behavior: POST /mixer/crossfade,
        POST /mixer/fade-in, POST /mixer/normalization, POST /mixer/silence,
@@ -738,10 +740,11 @@ paths:
   /mixer/analyze:
     post:
       operationId: preanalyze
-      summary: Warm BPM and adaptive feature caches without arming playback
+      summary: Warm enabled silence, BPM, and adaptive feature caches without arming playback
       description: |
-        Optional best-effort warmup before the normal JIT arm. Requires BPM detection
-        and a seekable, known-length track. One active or queued scan and the latest
+        Optional best-effort warmup before the normal JIT arm. Requires silence
+        skipping or BPM detection and a seekable, known-length track. Normalization
+        analysis remains on the normal arming path. One active or queued scan and the latest
         deferred warmup are retained per guild. Busy scans accept the latest
         warmup request; disabled, already cached or unsupported tracks return accepted=false.
         A 202 receipt does not mean analysis succeeded. Normal JIT analysis remains
@@ -856,15 +859,19 @@ paths:
   /mixer/announce/cancel:
     post:
       operationId: cancelAnnounce
-      summary: Stop the active overlay and restore music
+      summary: Stop the active sequential announcement
+      description: |
+        Stops the sequential overlay only. Parallel overlays and waiting
+        announcements are unchanged. Music ducking remains while a parallel
+        overlay is still active.
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: '#/components/schemas/AnnounceCancelRequest' }
       responses:
-        '204': { description: "Overlay stopped" }
-        '404': { description: "No active overlay" }
+        '204': { description: "Sequential overlay stopped" }
+        '404': { description: "No active sequential overlay" }
         '400': { description: "Invalid guild ID or request parameters; error body is provided by the host framework." }
 
   /mixer/normalization:

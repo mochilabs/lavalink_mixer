@@ -7,335 +7,289 @@
 [![Lavalink](https://img.shields.io/badge/Lavalink-v4-orange)](https://github.com/lavalink-devs/Lavalink)
 [![Java](https://img.shields.io/badge/Java-17%2B-blue)](https://adoptium.net)
 
-A high-performance [Lavalink v4](https://github.com/lavalink-devs/Lavalink) plugin that brings DJ-style audio mixing, smart transitions, and audio enhancements directly to the server side:
+A Kotlin plugin for [Lavalink v4](https://github.com/lavalink-devs/Lavalink) that mixes audio on the server before Opus encoding.
 
-- 🎧 **Beat-Matched AutoMix**: Seamlessly aligns outgoing and incoming track beats (2/4/8 beats) with temporary timescale tempo stretching and smooth recovery.
-- 🎚️ **Equal-Power Crossfade**: Soft-knee limited dual-track overlap mixing that prevents digital clipping.
-- 🔇 **Smart Silence Skipping**: Isolated background pre-analysis and real-time PCM silence detection to trim dead air.
-- 🔊 **EBU R128 Loudness Normalization**: Industry-standard dual-gated ITU-R BS.1770-4 loudness leveling to -14.0 LUFS.
-- 🗣️ **TTS / Announcement Overlays**: Voice prompt playback with background music ducking (sequential or parallel).
-- ⚡ **JIT Epoch-Fenced Protocol (v2)**: Race-condition-free queue coordination with idempotency keys.
+- Equal-power crossfades and server-managed advancement without overlap.
+- Beat-matched transitions with 2-, 4-, or 8-beat fades, temporary tempo adjustment, and recovery to the incoming track's original speed.
+- Adaptive transition choices based on local energy, rhythm, key estimates, and silence.
+- Leading and trailing silence trimming, plus realtime tail-silence detection.
+- EBU R128 loudness measurement and attenuation toward a configurable target, defaulting to -14 LUFS.
+- Sequential or parallel announcement audio with music ducking and stereo-channel selection.
+- Protocol v2 queue coordination with epochs and idempotency keys.
 
-**No changes to Lavalink's codebase required.** Built on pure Kotlin/JVM with zero native or external library dependencies for analysis.
+The plugin requires no Lavalink source changes. Analysis runs in Kotlin/JVM on a separate decoder. Tempo stretching uses the host's `lavadsp` native support and falls back to unstretched PCM if native processing fails. Lavalink, Lavaplayer, and lavadsp are supplied by the server.
 
----
+## Documentation
 
-## Documentation & References
-
-- 📋 **OpenAPI REST Specification**: [`api/openapi.yaml`](api/openapi.yaml)
-- 🤖 **Bot Integration Guide**: [`examples/lavalink-client/README.md`](examples/lavalink-client/README.md)
-- 🏗️ **Architecture Reference**: [`docs/architecture.md`](docs/architecture.md)
-- 🛠️ **Build & Testing Guide**: [`docs/development.md`](docs/development.md)
-- 📊 **Adaptive Transition Calibration**: [`docs/adaptive-calibration.md`](docs/adaptive-calibration.md)
-
----
+- [REST and WebSocket reference](api/openapi.yaml)
+- [Bot integration guide](examples/lavalink-client/README.md)
+- [Architecture and threading](docs/architecture.md)
+- [Build and testing guide](docs/development.md)
+- [BPM detector design](docs/bpm-detector-design.md) and [BPM calibration](docs/bpm-calibration.md)
+- [Adaptive transition calibration](docs/adaptive-calibration.md)
 
 ## Quickstart
 
-### 1. Install Plugin
+### 1. Install the plugin
 
-Add the plugin to your Lavalink `application.yml`:
+Download `lavalink_mixer-<version>.jar` from [Releases](https://github.com/mochilabs/lavalink_mixer/releases), place it in Lavalink's `plugins/` directory, and restart Lavalink. You can also [build the JAR locally](#build-from-source).
 
-```yaml
-lavalink:
-  plugins:
-    - dependency: "io.github.mochilabs.mixer:mixer-plugin:0.3.9"
-      repository: "https://maven.pkg.github.com/mochilabs/lavalink_mixer"
-```
+Check `GET /mixer/info` with Lavalink's `Authorization` header to confirm the plugin loaded. It returns the running JAR version, `protocolVersion: 2`, and supported position options.
 
-Or manually download `lavalink_mixer-0.3.9.jar` from [Releases](https://github.com/mochilabs/lavalink_mixer/releases) and place it into Lavalink's `plugins/` directory, then restart Lavalink.
+This checkout compiles against Lavalink plugin API 4.2.2, Lavaplayer 2.2.6, and lavadsp 0.7.8, targeting JVM 17. Use a compatible Lavalink server.
 
-### 2. Enable Filter (Required Once Per Guild)
+### 2. Enable the filter for each player
 
-Lavalink filters are player-scoped. Send the Lavalink `filters` operation **before** or during playback:
+Before playback, use Lavalink v4's [Update Player endpoint](https://lavalink.dev/api/rest#update-player):
 
-```json
+```http
+PATCH /v4/sessions/{sessionId}/players/123456789012345678
+Authorization: <Lavalink password>
+Content-Type: application/json
+
 {
-  "op": "filters",
-  "guildId": "123456789012345678",
-  "pluginFilters": {
-    "mixer": {
-      "guildId": "123456789012345678"
-    }
-  }
+	"filters": {
+		"pluginFilters": {
+			"mixer": {
+				"guildId": "123456789012345678"
+			}
+		}
+	}
 }
 ```
 
-> ⚠️ **Important**: Always send `guildId` as a **string**. Discord snowflake IDs exceed JavaScript's 53-bit integer limit.
+Use the Lavalink session ID from the WebSocket `ready` message. Updating `filters` replaces the player's filter configuration, so include any other filters you need and retain `pluginFilters.mixer` on later updates. Reapply it when creating a replacement player.
 
----
+Keep guild IDs as JSON strings. Discord snowflakes can exceed JavaScript's safe integer range. The mixer routes use `/mixer/*` on the same server, without the `/v4` prefix.
 
-## Configuration (`application.yml`)
+### 3. Connect the bot's queue handling
 
-Configure defaults under the `mixer:` block in your Lavalink `application.yml` (all values can be dynamically overridden per guild via REST):
+Start the first track through your Lavalink client and disable client auto-advance, such as `autoSkip: false` in lavalink-client. Forward custom `op: "mixer"` WebSocket messages to your bot handler.
+
+On `MixerNeedNextTrackEvent`, arm the next track through `/mixer/queue/arm`. On `MixerAdvancedEvent`, update the bot's queue and now-playing state. The server has already started that track. Client `trackEnd` handlers must also leave advancement to the server.
+
+Implement the [protocol v2 flow](#queue-protocol-v2) before relying on automatic transitions. Enabling the filter alone does not provide a next track.
+
+## Server defaults
+
+Set startup defaults in Lavalink's `application.yml` under `mixer:`:
 
 ```yaml
 mixer:
-  # Crossfade & Fade-In
+  # Crossfade and initial fade-in
   crossfadeEnabled: true
-  crossfadeMs: 5000               # Overlap duration in ms (500 .. 30000)
-  fadeInMs: 300                   # Initial fade-in when starting from stop (0 = off)
+  crossfadeMs: 5000
+  fadeInMs: 300
 
-  # Announcement Ducking
-  duckLevel: 0.2                  # Main track volume multiplier during announcements (0.0 .. 1.0)
-  duckFadeMs: 300                 # Ducking ramp duration in ms
-  maxParallelOverlays: 4          # Max simultaneous parallel TTS overlays
+  # Announcement ducking and concurrency
+  duckLevel: 0.2
+  duckFadeMs: 300
+  maxParallelOverlays: 4
 
-  # Volume Normalization (EBU R128 / ITU-R BS.1770-4)
-  normalizationEnabled: false     # Requires pre-decoding pass
-  targetLufs: -14.0               # Standard target loudness (-30.0 .. -6.0 LUFS)
+  # Loudness normalization
+  normalizationEnabled: false
+  targetLufs: -14.0
 
-  # Silence Skipping
-  silenceSkipEnabled: false       # Trims leading/trailing dead air
-  silenceThresholdDb: -60.0       # Silence cutoff amplitude in dB
-  silenceMinSoundMs: 120          # Minimum sound duration to confirm non-silence
-  silenceHeadScanMs: 15000        # Pre-analysis window for track start
-  silenceTailScanMs: 15000        # Pre-analysis window for track end
-  tailConfirmMs: 1000             # Real-time sustained silence before cut (streams)
+  # Silence trimming
+  silenceSkipEnabled: false
+  silenceThresholdDb: -60.0
+  silenceMinSoundMs: 120
+  silenceHeadScanMs: 15000
+  silenceTailScanMs: 15000
+  tailConfirmMs: 1000
 
-  # Beat-Matched AutoMix & BPM Analysis
-  bpmDetectionEnabled: false      # Enables tempo & beat grid extraction
-  bpmScanMs: 30000                # Analysis window at head and tail (5000 .. 60000 ms)
-  beatmatchEnabled: false         # Enables tempo stretching & beat grid alignment
-  maxTempoChange: 0.06            # Max allowed tempo adjustment ratio (default 6%, max 12%)
-  beatmatchMinConfidence: 0.30    # Min confidence threshold to accept a beat grid
+  # BPM detection and beat matching
+  bpmDetectionEnabled: false
+  bpmScanMs: 30000
+  beatmatchEnabled: false
+  maxTempoChange: 0.06
+  beatmatchMinConfidence: 0.30
 
-  # Background Workers
-  analysisThreads: 2              # Parallel track pre-analysis worker threads
+  # Shared analysis worker pool
+  analysisThreads: 2
 ```
 
----
+Per-guild REST endpoints override the settings listed in the [API tables](#rest-api). Worker count, ducking-ramp duration, and the parallel-overlay limit have no dedicated REST setter. `analysisThreads` is clamped to 1–8, and `maxParallelOverlays` to 1–16.
 
-## Features in Detail
+Crossfade defaults to enabled. Silence trimming, normalization, and BPM detection default to disabled because analysis requires extra decoding. Beat matching also defaults to disabled.
 
-### 1. Beat-Matched AutoMix
-The AutoMix engine runs an isolated, pure Kotlin analysis pass on incoming and outgoing tracks:
-- **Radix-2 Real FFT (N=2048)** with Hann windowing for zero-allocation spectral analysis.
-  - Multi-channel processing: transforms each channel independently and averages log magnitudes to avoid stereo phase cancellation. Before compression, normalize window RMS to 0.1 and scale FFT magnitudes by `1024/N` (`L = ln(1 + 10·|X|·1024/N·0.1/RMS)`).
-  - Dynamic sample-rate support: dynamically scales hop size ($\sim 10\text{ms}$) and frequency bin boundaries for 48kHz, 44.1kHz, etc.
-  - Standardized band fusion: scales each band by its standard deviation ($SF_{\text{band}} / \sigma_{\text{band}}$) so low-end bass cannot bury snare or hi-hat attacks.
-  - **Low (30–150 Hz, bins 1..6 at 48kHz)**: Isolates kick drums and sub-bass transients.
-  - **Mid (150–2,000 Hz, bins 7..85)**: Tracks snares, claps, and instrumental attacks.
-  - **High (2,000–10,000 Hz, bins 86..427)**: Tracks hi-hats, cymbals, and shakers.
+## Transitions and audio processing
 
-$$
-SF_{\text{band}}(t) = \sum_{k \in \text{band}} \max\left(0, L_t(k) - L_{t-1}(k)\right)
-$$
+### Beat matching and adaptive transitions
 
-- **Relative Energy Gate & Tempo Candidates**: Normalize the energy envelope by its mean so quiet audio remains analyzable. Retain local autocorrelation peaks and energy candidates over 60–200 BPM, merging adjacent lags. Select among fitted grids using duration-aware accent periodicity, accent coverage, and a log-tempo prior (120 BPM center, one-octave width). Short hi-hat attacks no longer receive the same metrical weight as sustained beat accents; coverage penalizes grids that skip intervening beats. Confidence measures periodicity, not certainty about the musical octave.
-- **Global Phase & WLS Period Optimization**: Fits all detected onsets using a cosine pulse kernel ($tolerance = \max(1.5\text{ hops}, T \times 0.10)$) with $dist < tolerance$ guard, followed by Weighted Least Squares (WLS) regression to jointly optimize period $T$ and grid phase $\phi$, reducing accumulated grid drift:
-
-$$
-K(d, tol) = \cos^2\left(\frac{\pi \cdot d}{2 \cdot tol}\right) \quad \text{for } d < tol, \quad 0 \text{ otherwise}
-$$
-- **Conditional Integer BPM Snap**: Consider a nearby integer only within 0.15 BPM, with at least 8 assigned onsets spanning 12 beat indices. Refit phase at the integer period using the same WLS assignments; accept only if residual RMS is at most `free-fit RMS × 1.2 + 1ms`. This does not classify live performances; tempo differences below the allowed residual can still snap.
-- **Phase Calibration & Limits**: Apply a 1.15-hop correction measured on synthetic kicks with the 2048 FFT only to the spectral path. The six strong-hi-hat 70→140 BPM regressions now return 70 BPM, with additional slow/fast tempo and phase checks. Real-music metrical accuracy remains uncalibrated. See the [research and measurement notes](docs/bpm-detector-design.md).
-- **Boundary Silence Awareness**: Automatically trims encoding delays and leading/trailing silence, aligning the beat grids directly across the audible portions of both tracks.
-- **Tempo Transition & Recovery**: If tempos differ within `maxTempoChange` (e.g. 124 BPM → 126 BPM), the secondary track's tempo is stretched using `lavadsp` timescale during the crossfade. Once the outgoing track fades out, the incoming track smoothly returns to its native 1.0 tempo.
-
-### 2. Equal-Power Crossfade with Soft-Knee Limiting
-During a crossfade, summing two full-scale audio sources can produce amplitudes up to $+3\text{ dB}$ ($1.41\times$). Rather than hard-clipping into distortion:
-- Follows equal-power gain curves:
-
-$$
-g_{\text{out}}^2 + g_{\text{in}}^2 = 1
-$$
-
-- Any combined signal excursion above `0.9` is compressed smoothly with a soft-knee curve toward `1.0`. A $1.41\times$ peak lands at $\approx 0.98$ (an inaudible $\approx 0.14\text{ dB}$ compression), preserving natural transients without square-wave clipping.
-
-### 3. Smart Silence Skipping
-- **Pre-Analysis Pass**: Traces audio forward from `0ms` to detect the true start of audio (skipping MP3/container delays) and backwards from the track end to identify where music terminates.
-- **Real-Time Detection**: Continuously monitors PCM peaks in the mixer filter. If a track (or unseekable live stream) goes silent for `tailConfirmMs`, playback advances immediately rather than playing silence.
-
-### 4. EBU R128 Loudness Normalization
-- Implements ITU-R BS.1770-4 K-weighting filtering with 400ms momentary windows (75% overlap) and dual-gating ($-70\text{ LUFS}$ absolute, $-10\text{ LU}$ relative).
-- Computes integrated loudness and applies linear digital scaling to meet `targetLufs` (default $-14.0\text{ LUFS}$):
-
-$$
-G = \min\left(1.0, 10^{\frac{\text{targetLufs} - \text{measuredLufs}}{20}}\right)
-$$
-
-- Clamped to `MAX_GAIN = 1.0` by default to prevent digital clipping on quiet tracks.
-
-### 5. TTS / Announcement Overlays
-- Play audio notifications, TTS alerts, or voice cues over music without pausing.
-- **Ducking**: Automatically attenuates main track volume to `duckLevel` (e.g. 20%) over `duckFadeMs` (e.g. 300ms), plays the announcement, and smoothly restores volume upon completion.
-- Supports both `sequential` (queued back-to-back) and `parallel` overlay modes.
-
----
-
-## Queue Protocol v2 (JIT Prefetch & Epoch Fencing)
-
-To enable seamless crossfades, the server needs the next track *before* the current track finishes. Protocol v2 delegates queue ownership to the server while keeping client control strictly consistent:
-
-```text
-[Track A Playing]
-        │
-        ▼ (Remaining time reaches the prefetch window; earlier with BPM beat matching)
-Server pushes WebSocket: MixerNeedNextTrackEvent
-        │
-        ▼
-Client sends REST: POST /mixer/queue/arm
-(Body: { guildId, epoch, encodedTrack }, Header: Idempotency-Key)
-        │
-        ▼ (Server decodes & analyzes Track B in background)
-Server plans Transition (BeatMatched / Crossfade / SilenceTrim)
-        │
-        ▼ (Playback reaches handoff point)
-Server starts secondary player -> MixerFilter mixes Track B into Track A
-Server pushes WebSocket: overlapStart
-        │
-        ▼ (Crossfade completes)
-Server promotes Track B to main -> pushes WebSocket: MixerAdvancedEvent
-Client syncs its local queue (client keeps autoSkip: false)
-```
-
-- **Monotonic Epochs**: Prevents race conditions when arming or skipping. Stale requests with older epochs are rejected with `HTTP 409 Conflict`.
-- **Idempotency Keys**: Network retries with the same `Idempotency-Key` and payload return cached success without duplicate actions. Payload mismatches return `HTTP 422`.
-- **Client Override**: User commands (`STOP`, `PLAY_NOW`) call `POST /mixer/queue/override` to atomically cancel pending crossfades and execute engine mutations immediately.
-- **Prefetch timing**: The window is `crossfadeMs + 7000ms`, or `crossfadeMs + min(2 × bpmScanMs + 7000ms, 120000ms)` when BPM detection and beat matching are enabled. The client can arm `isEmpty: true` and invalidate when its queue changes; the server requests the new head within the same window.
-
----
-
-## REST API Reference
-
-All endpoints accept standard Lavalink `Authorization` headers.
-
-### Queue & Engine Control
-
-| Method | Path | Header | Body | Description |
-|---|---|---|---|---|
-| `GET` | `/mixer/info` | — | — | Returns `{ protocolVersion: 2, version: "...", incomingStartPositionSupported: true }` |
-| `GET` | `/mixer/state?guildId=` | — | — | Returns current state, config, transition status, and BPM |
-| `POST` | `/mixer/analyze` | — | `{ guildId, encodedTrack }` | Pre-warms analysis cache before arming (returns 202) |
-| `POST` | `/mixer/queue/arm` | `Idempotency-Key` | `{ guildId, epoch, encodedTrack?, isEmpty, preserveTransition?, startPositionMs?, outgoingEndPositionMs? }` | Arms the next track; optional incoming start and outgoing effective end are in milliseconds |
-| `POST` | `/mixer/queue/invalidate` | `Idempotency-Key` | `{ guildId, epoch }` | Clears armed next track; triggers `MixerNeedNextTrackEvent` |
-| `POST` | `/mixer/queue/override` | `Idempotency-Key` | `{ guildId, epoch, action, encodedTrack? }` | Atomic override (`action: "STOP"` or `"PLAY_NOW"`) |
-| `POST` | `/mixer/reset` | `Idempotency-Key` | `{ guildId, epoch, windowOpenGraceMs? }` | Resets mixer state machine and synchronizes epochs |
-
-### Transition & DSP Configuration
-
-| Method | Path | Body Parameters | Description |
-|---|---|---|---|
-| `POST` | `/mixer/crossfade` | `{ guildId, enabled, durationMs? }` | Configure crossfade (500–30000ms) |
-| `POST` | `/mixer/fade-in` | `{ guildId, durationMs }` | Configure initial fade-in (0–10000ms) |
-| `POST` | `/mixer/bpm` | `{ guildId, enabled, scanMs?, beatmatchEnabled?, maxTempoChange?, minConfidence? }` | Configure BPM detection & AutoMix |
-| `POST` | `/mixer/beatmatch` | `{ guildId, enabled, maxTempoChange?, minConfidence? }` | Toggle beat matching independently |
-| `POST` | `/mixer/silence` | `{ guildId, enabled, thresholdDb?, minSoundMs?, headScanMs?, tailScanMs?, confirmMs? }` | Configure silence skipping |
-| `POST` | `/mixer/normalization` | `{ guildId, enabled, targetLufs? }` | Configure EBU R128 loudness normalization |
-
-### Overlays & Announcements
-
-| Method | Path | Body Parameters | Description |
-|---|---|---|---|
-| `POST` | `/mixer/announce` | `{ guildId, identifier?, encodedTrack?, duckLevel?, mode?, channel? }` | Queue TTS / voice overlay (`mode`: `sequential` \| `parallel`, `channel`: `both` \| `left` \| `right`) |
-| `POST` | `/mixer/announce/cancel` | `{ guildId }` | Stop active announcement and restore music volume |
-| `DELETE` | `/mixer/announce/queue` | Query: `?guildId=` | Clear all queued announcements |
-
----
-
-## WebSocket Events (`op: "mixer"`)
-
-Events dispatched to connected Lavalink WebSocket clients:
-
-```jsonc
-// 1. JIT window fired: client should arm the next track
-{ "op": "mixer", "type": "MixerNeedNextTrackEvent", "guildId": "123", "remainingMs": 12000, "currentTrackEncoded": "..." }
-
-// 2. Overlap crossfade started
-{ "op": "mixer", "type": "overlapStart", "guildId": "123", "crossfadeMs": 4000, "handoffInMs": 4000, "incomingStartMs": 13520, "beatMatched": true, "fadeBeats": 8, "targetBpm": 124.0, "rateRatio": 1.016 }
-
-// 3. Playback advanced server-side: client must sync local queue
-{ "op": "mixer", "type": "MixerAdvancedEvent", "guildId": "123", "epoch": 2, "encodedTrack": "...", "handoffType": "CROSSFADE", "handoffId": "uuid" }
-
-// 4. Overlap completed
-{ "op": "mixer", "type": "overlapEnd", "guildId": "123", "reason": "handoff", "beatMatched": true }
-
-// 5. User override executed
-{ "op": "mixer", "type": "MixerOverriddenEvent", "guildId": "123", "epoch": 3, "requestId": "key", "action": "PLAY_NOW" }
-```
-
----
-
-## Enabling AutoMix via REST
-
-To enable beat-matched transitions on a running Lavalink server:
-
-```http
-POST /mixer/crossfade
-Content-Type: application/json
-
-{
-  "guildId": "123456789012345678",
-  "enabled": true,
-  "durationMs": 5000
-}
-```
+Beat matching requires crossfade, BPM detection, and beat matching all enabled. `/mixer/bpm` can enable detection and matching together:
 
 ```http
 POST /mixer/bpm
+Authorization: <Lavalink password>
 Content-Type: application/json
 
 {
-  "guildId": "123456789012345678",
-  "enabled": true,
-  "beatmatchEnabled": true,
-  "scanMs": 30000,
-  "maxTempoChange": 0.06,
-  "minConfidence": 0.30
+	"guildId": "123456789012345678",
+	"enabled": true,
+	"beatmatchEnabled": true,
+	"scanMs": 30000,
+	"maxTempoChange": 0.06,
+	"minConfidence": 0.30
 }
 ```
 
-Check the active transition decision anytime:
-```http
-GET /mixer/state?guildId=123456789012345678
+`/mixer/beatmatch` toggles matching independently and does not enable BPM detection. If crossfade was disabled, enable it through `/mixer/crossfade` as well.
+
+Analysis extracts head and tail beat grids and local transition features. The planner can preserve a boundary, trim silence, use an equal-power crossfade, or choose a beat-matched fade. During a matched transition, the incoming track follows the outgoing tempo, then recovers to its original speed before handoff. `overlapMs` is the two-track fade duration, and `recoveryMs` is the incoming-only recovery period within the total transition window.
+
+Missing grids, low confidence, unsuitable track pairs, or excessive tempo differences fall back to ordinary crossfade. The compatibility label `short_crossfade` keeps the configured crossfade duration, bounded by available outgoing content. It does not imply a fixed 1.5-second fade.
+
+Beat-grid phase is not a musical downbeat. Confidence measures periodicity, and the adaptive thresholds remain heuristics awaiting representative music calibration. See the [BPM design notes](docs/bpm-detector-design.md) for detector details and limits.
+
+### Crossfade, silence, and normalization
+
+Crossfades use equal-power gains and soft limiting above an absolute mixed amplitude of `0.9`. Handoff position follows consumed incoming source samples, including tempo adjustment, rather than the secondary decoder's buffered position.
+
+Silence analysis scans seekable tracks near their start and end. Realtime detection monitors raw main PCM before gain application. For tracks with a known duration, an early cut requires confirmed silence in the tail window after the first five seconds. Streams require at least `max(tailConfirmMs, 3000)` ms of silence. Advancement uses an armed next track when available.
+
+Normalization uses K-weighting, 400 ms windows with 75% overlap, and absolute and relative loudness gates. Gain is capped at `1.0`, so quiet tracks are not amplified. The target is configurable from -30 to -6 LUFS through REST.
+
+### Announcements
+
+`POST /mixer/announce` accepts an encoded track or a source identifier. It plays supplied audio, including audio from a TTS source configured on the server. The plugin does not synthesize speech itself.
+
+Sequential announcements share the secondary player with crossfades and wait when it is busy. Parallel announcements use separate players, up to `maxParallelOverlays`. Both modes support `channel: "both"`, `"left"`, or `"right"` and duck the main track. `/mixer/announce/cancel` stops the active sequential announcement. Clear waiting items separately with `DELETE /mixer/announce/queue?guildId=...`.
+
+## Queue protocol v2
+
+The bot owns queue selection. After initial playback starts, the plugin owns advancement to the armed track.
+
+1. The server sends `MixerNeedNextTrackEvent` in the prefetch window.
+2. The bot sends `/mixer/queue/arm` with the exact Lavalink-encoded next track, an epoch, and an `Idempotency-Key`. Send `isEmpty: true` if the queue is empty.
+3. The server accepts the arm and schedules analysis. `ARMED` means the track was accepted, not that analysis finished.
+4. The server performs the transition and sends `MixerAdvancedEvent` with `handoffType: "CROSSFADE"` or `"GAPLESS"`.
+5. The bot synchronizes its local queue without starting the same track again.
+
+The prefetch window is `crossfadeMs + 7000` ms. With BPM detection and beat matching enabled, it becomes `crossfadeMs + min(2 * bpmScanMs + 7000, 120000)` ms. Short tracks have a 500 ms settle delay, and reset grace can delay dispatch further.
+
+Use a new key for each logical operation and reuse that key when retrying the same request. The server retains 64 recent operation fingerprints per guild in memory. A retained match returns a duplicate response, while a mismatch returns HTTP 422. Lower epochs return HTTP 409 for new requests; equal epochs are accepted. Reset, eviction, and process restart limit deduplication.
+
+If the queue head changes, send `/mixer/queue/invalidate` with a higher epoch and a new key. This clears the armed slot and can request the next track again within the prefetch window. Explicit skips and stops use `/mixer/queue/override` with `PLAY_NOW` or `STOP`. Player mutation runs on an ordered executor. Confirm execution through `MixerOverriddenEvent`.
+
+On bot startup or session resume, call `/mixer/reset` to synchronize epochs. Reset keeps the greater of the existing and supplied epochs and opens a 1500 ms grace window by default. Handle HTTP 409 using `lastKnownEpoch` and, for `PRE_RESET_ARRIVAL`, `windowOpenAt`.
+
+### Preserve transitions and skip track boundaries
+
+An arm request can include these optional fields:
+
+| Field | Behavior |
+| --- | --- |
+| `preserveTransition` | Preserves this track boundary without automatic overlap or silence trimming. Applies to one arm, not a persistent album mode. |
+| `startPositionMs` | Minimum incoming start position, applied before overlap or gapless playback, including preserved transitions. A nonzero value requires a seekable track with more than 500 ms remaining. |
+| `outgoingEndPositionMs` | Effective end of the current track. The fade finishes there, or advancement occurs there without overlap. Requires a seekable current track, a non-empty next track, and `preserveTransition: false`. |
+
+Check `/mixer/info` for `incomingStartPositionSupported` and `outgoingEndPositionSupported` on each node. Both position fields are milliseconds and participate in arm deduplication. Do not send either position field with `isEmpty: true`. An outgoing cutoff must be more than 500 ms from each track boundary. A cutoff already passed or within 500 ms of the current position when armed is ignored.
+
+These options let a bot supply intro or outro boundaries, such as SponsorBlock segments. Segment lookup and selection belong to the bot. `overlapStart.incomingStartMs` reports the actual incoming position selected for an overlap.
+
+## REST API
+
+All endpoints use Lavalink's raw password in the `Authorization` header, without a `Bearer` prefix. All JSON guild IDs are strings. See [OpenAPI](api/openapi.yaml) for exact schemas, responses, and numeric bounds. Optional configuration fields preserve their current values when omitted; supplied numbers are clamped to documented bounds.
+
+### Queue and playback
+
+The four queue-control operations below require `Idempotency-Key`.
+
+| Method | Path | Request | Result |
+| --- | --- | --- | --- |
+| `GET` | `/mixer/info` | None | Running version, protocol version, and incoming/outgoing position capabilities |
+| `GET` | `/mixer/state?guildId=...` | Query guild ID | State, settings, analysis, gains, BPM, and transition diagnostics |
+| `POST` | `/mixer/analyze` | `{ guildId, encodedTrack }` | HTTP 202 with `accepted`; cache warmup does not arm or start playback |
+| `POST` | `/mixer/queue/arm` | `{ guildId, epoch, encodedTrack?, isEmpty?, preserveTransition?, startPositionMs?, outgoingEndPositionMs? }` | Accept next track or empty queue |
+| `POST` | `/mixer/queue/invalidate` | `{ guildId, epoch }` | Clear armed track and optionally re-request next track |
+| `POST` | `/mixer/queue/override` | `{ guildId, epoch, action, encodedTrack? }` | Schedule `STOP` or `PLAY_NOW`; the latter requires a track |
+| `POST` | `/mixer/reset` | `{ guildId, epoch, windowOpenGraceMs? }` | Synchronize epoch and clear pending transition state |
+
+### DSP settings and announcements
+
+These endpoints do not require `Idempotency-Key`.
+
+| Method | Path | Request |
+| --- | --- | --- |
+| `POST` | `/mixer/crossfade` | `{ guildId, enabled, durationMs? }`, duration 500–30000 ms |
+| `POST` | `/mixer/fade-in` | `{ guildId, durationMs }`, duration 0–10000 ms |
+| `POST` | `/mixer/bpm` | `{ guildId, enabled, scanMs?, beatmatchEnabled?, maxTempoChange?, minConfidence? }` |
+| `POST` | `/mixer/beatmatch` | `{ guildId, enabled, maxTempoChange?, minConfidence? }` |
+| `POST` | `/mixer/silence` | `{ guildId, enabled, thresholdDb?, minSoundMs?, headScanMs?, tailScanMs?, tailConfirmMs? }` |
+| `POST` | `/mixer/normalization` | `{ guildId, enabled, targetLufs? }` |
+| `POST` | `/mixer/announce` | `{ guildId, identifier?, encodedTrack?, duckLevel?, mode?, channel? }`, HTTP 202 |
+| `POST` | `/mixer/announce/cancel` | `{ guildId }` |
+| `DELETE` | `/mixer/announce/queue?guildId=...` | Query guild ID |
+
+## WebSocket events
+
+Consume these custom messages on the existing Lavalink WebSocket connection:
+
+```jsonc
+// Arm the next track when requested.
+{ "op": "mixer", "type": "MixerNeedNextTrackEvent", "guildId": "123", "remainingMs": 12000, "currentTrackEncoded": "..." }
+
+// A beat-matched overlap starts, including its incoming-only recovery period.
+{ "op": "mixer", "type": "overlapStart", "guildId": "123", "crossfadeMs": 4500, "overlapMs": 4000, "recoveryMs": 500, "handoffInMs": 4500, "incomingStartMs": 13520, "beatMatched": true, "fadeBeats": 8, "targetBpm": 120.0, "rateRatio": 1.016, "transitionKind": "beat_matched", "track": { "identifier": "next-track", "title": "Next track" } }
+
+// Sync the local queue. Playback has already advanced.
+{ "op": "mixer", "type": "MixerAdvancedEvent", "guildId": "123", "epoch": 2, "encodedTrack": "...", "handoffType": "CROSSFADE", "handoffId": "550e8400-e29b-41d4-a716-446655440000" }
+
+{ "op": "mixer", "type": "overlapEnd", "guildId": "123", "reason": "handoff", "beatMatched": true }
+{ "op": "mixer", "type": "MixerOverriddenEvent", "guildId": "123", "epoch": 3, "requestId": "key", "action": "PLAY_NOW" }
+
+// Parallel announcement lifecycle.
+{ "op": "mixer", "type": "announceStart", "guildId": "123", "announcementId": 1, "mode": "parallel", "track": { "identifier": "notice", "title": "Notice" } }
+{ "op": "mixer", "type": "announceEnd", "guildId": "123", "announcementId": 1 }
 ```
-Look at `transitionKind` and `decisionReason`:
-- `"transitionKind": "beat_matched"` → Successful beat-matched automix.
-- `"transitionKind": "short_crossfade"` → Equal-power crossfade fallback (e.g. missing analysis, tempo difference exceeding `maxTempoChange`, or key clash). This compatibility label does not mean a fixed short fade: the configured `crossfadeMs` is retained, bounded by available outgoing content. Missing/unknown features no longer reduce a 10-second setting to 1.5 seconds.
 
-Tail analysis validates completion against the trimmed content end. A complete
-scan that excludes trailing silence remains usable for BPM and transition caches.
+`handoffId` applies to crossfade advancement. Aborted overlaps use `reason: "aborted"`. A native tempo-stretch failure after `overlapStart` can make `overlapEnd` report `beatMatched: false` with `fallbackReason: "timescale_native_failed"`. Sequential `announceEnd` events omit `announcementId`.
 
----
+## Inspect playback
+
+Use `GET /mixer/state?guildId=...` while testing:
+
+- Check `mixerFilterActive`, `nextTrackIdentifier`, and `subTrackIdentifier` when overlap audio is missing.
+- Check `state`, `lastKnownEpoch`, `hasNext`, and `analysisState` when queue ownership or analysis appears stalled. `analysisState` reflects an active scan or the next-track slot. `ready` does not guarantee that BPM grids are available.
+- Check `transitionKind`, `decisionReason`, and `crossfadeHandoffInMs` for the latest transition decision and active handoff timing. `beat_matched` describes a selected plan, so also inspect completion events for fallback.
+- Check `currentTrackBpmIdentifier` against the confirmed current track before displaying `currentTrackBpm`. BPM and gain values can be unknown while analysis is pending or disabled.
+
+`POST /mixer/analyze` optionally warms enabled silence and BPM/feature caches for a seekable candidate. HTTP 202 does not mean analysis is complete. Normalization analysis still occurs through normal arming. Analysis remains separate from live secondary playback.
 
 ## Architecture
 
-Discord voice requires a single continuous Opus stream. `lavalink_mixer` performs PCM mixing **before encoding**:
-
 ```text
-[Main AudioPlayer]  ──> [Main Decoder] ──> [MixerFilter] ──> [Volume / EQ Filters] ──> [Opus Encoder] ──> [Discord Voice]
-                                                ▲
-                                                │ (Raw PCM sum: main * mainGain + sub * subGain)
-[Sub AudioPlayer]   ──> [Sub Decoder]  ──> [SiphonQueue]
-(Secondary / TTS)
+Main decoder --------------------> MixerFilter --> downstream filters --> Opus --> Discord
+                                        ^
+Secondary decoder --> tempo stretch --> SiphonQueue
+Parallel announcement decoders -------> overlay queues
+Analysis decoder ---------------------> analysis caches
 ```
 
-1. **Siphon Filter**: An isolated secondary player decodes secondary audio into a bounded float PCM ring buffer without binding to Discord voice.
-2. **MixerFilter**: Attached at the head of the main player's filter chain, mixing raw PCM chunks directly as they are decoded.
-3. **Decoupled Engine**: Track state mutations (`GuildMixer`) run on an event-driven queue, ensuring Lavaplayer `play()`/`stop()` operations never deadlock the realtime audio thread.
+The audio callback mixes PCM and forwards it downstream. Track loading, analysis, and blocking waits run elsewhere. A bounded sample queue absorbs decoder chunk-size differences, with zero-filled underflow and bounded overflow.
 
----
+State spans audio callbacks, player callbacks, schedulers, and the ordered protocol executor. A guild state lock and a separate player-mutation lock coordinate transitions. The filter resolves its guild mixer lazily, and feeder election prevents overlapping filter chains from consuming shared secondary audio twice. See the [architecture reference](docs/architecture.md) for ownership and lock order.
 
-## Building from Source
+## Build from source
 
-Requirements: **JDK 17+**
+Use JDK 17 to match CI. This checkout uses Kotlin 2.1.20 and the Gradle 8.14.1 wrapper. Initial dependency resolution needs Maven Central and `maven.lavalink.dev`.
 
 ```bash
-# Build JAR
+# Compile, run tests, and package the plugin.
+./gradlew build
+
+# Package without running tests.
 ./gradlew jar
 
-# Run all unit and audio integration tests
-./gradlew test
-
-# Full build including artifacts
-./gradlew build -Pversion=0.3.9
+# Set an explicit artifact version.
+./gradlew build -Pversion=1.2.3
 ```
 
-Artifact output: `build/libs/lavalink_mixer-0.3.9.jar`.
+JARs appear in `build/libs/lavalink_mixer-<version>.jar`. Version resolution uses `MIXER_VERSION`, then `-Pversion`, then an exact Git tag, then `0.0.0-SNAPSHOT`. A leading `v` is removed. `/mixer/info` reports the version embedded in the running JAR.
 
----
+See the [development guide](docs/development.md) for focused tests and live validation. Local audio integration tests exercise Lavaplayer with generated WAV files. They do not prove playback through a live Discord voice connection.
 
 ## License
 
-This project is released into the public domain under the [Unlicense](UNLICENSE).
+Released into the public domain under the [Unlicense](UNLICENSE).

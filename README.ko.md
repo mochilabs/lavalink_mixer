@@ -7,334 +7,289 @@
 [![Lavalink](https://img.shields.io/badge/Lavalink-v4-orange)](https://github.com/lavalink-devs/Lavalink)
 [![Java](https://img.shields.io/badge/Java-17%2B-blue)](https://adoptium.net)
 
-DJ 스타일 오디오 믹싱, 스마트 트랜지션, 오디오 보정을 서버 사이드에서 실시간으로 처리하는 고성능 [Lavalink v4](https://github.com/lavalink-devs/Lavalink) 플러그인입니다.
+서버에서 Opus 인코딩 전에 오디오를 합성하는 Kotlin 기반 [Lavalink v4](https://github.com/lavalink-devs/Lavalink) 플러그인입니다.
 
-- 🎧 **비트 매칭 오토믹스 (Beat-Matched AutoMix)**: 이전 곡과 다음 곡의 비트(2/4/8박자)를 정밀하게 맞추고, 필요시 템포를 임시 조절(Timescale)한 뒤 자연스럽게 복귀.
-- 🎚️ **이퀄 파워 크로스페이드 (Equal-Power Crossfade)**: 소프트 니(Soft-knee) 리미팅으로 두 곡이 겹치는 구간의 디지털 클리핑(깨짐) 방지.
-- 🔇 **스마트 무음 스킵 (Silence Skipping)**: 백그라운드 사전 분석 및 실시간 PCM 감지로 곡 앞뒤의 불필요한 공백을 자동 제거.
-- 🔊 **EBU R128 음량 정규화**: ITU-R BS.1770-4 K-weighting 이중 게이팅 기반 -14.0 LUFS 표준 음량 자동 보정.
-- 🗣️ **TTS / 공지 오버레이 (Ducking)**: 음악 재생 중 안내 음성이 나오면 배경 음악 볼륨을 자동으로 낮추고 복원 (순차/병렬 오버레이 지원).
-- ⚡ **JIT 에포크 펜싱 큐 프로토콜 (v2)**: 멱등성 키와 단조 증가 에포크를 사용하여 빠른 스킵/큐 조작 시 발생하는 레이스 컨디션 및 중복 재생 완벽 방지.
+- 이퀄 파워 크로스페이드와 겹침 없는 서버 주도 곡 전환.
+- 2·4·8박자 비트 매칭, 일시적인 템포 조절, 다음 곡의 원래 속도로 복귀.
+- 구간별 에너지, 리듬, 조성 추정치, 무음에 따른 전환 방식 선택.
+- 곡 앞뒤 무음 제거와 실시간 끝무음 감지.
+- EBU R128 음량 측정과 설정한 목표 음량까지 감쇠. 기본 목표는 -14 LUFS.
+- 음악 덕킹과 좌우 채널 선택을 지원하는 순차·병렬 공지 오디오.
+- 에포크와 멱등성 키를 사용하는 프로토콜 v2 큐 제어.
 
-**Lavalink 소스 코드 수정이 필요 없습니다.** 순수 Kotlin/JVM으로 구현되어 외부 네이티브 DSP나 별도 FFT 라이브러리 설치가 필요하지 않습니다.
-
----
+Lavalink 소스를 수정할 필요가 없습니다. 분석은 별도 디코더에서 Kotlin/JVM 코드로 수행합니다. 템포 조절은 서버가 제공하는 `lavadsp` 네이티브 기능을 사용하며, 네이티브 처리에 실패하면 속도를 조절하지 않은 PCM으로 폴백합니다. Lavalink, Lavaplayer, lavadsp는 서버에서 제공해야 합니다.
 
 ## 관련 문서
 
-- 📋 **OpenAPI REST 명세서**: [`api/openapi.yaml`](api/openapi.yaml)
-- 🤖 **봇 연동 가이드**: [`examples/lavalink-client/README.md`](examples/lavalink-client/README.md)
-- 🏗️ **아키텍처 및 내부 구조**: [`docs/architecture.md`](docs/architecture.md)
-- 🛠️ **빌드 및 테스트 가이드**: [`docs/development.md`](docs/development.md)
-- 📊 **오토믹스 트랜지션 캘리브레이션**: [`docs/adaptive-calibration.md`](docs/adaptive-calibration.md)
+- [REST 및 WebSocket 명세](api/openapi.yaml)
+- [봇 연동 가이드](examples/lavalink-client/README.md)
+- [아키텍처 및 스레딩](docs/architecture.md)
+- [빌드 및 테스트 가이드](docs/development.md)
+- [BPM 검출기 설계](docs/bpm-detector-design.md)와 [BPM 캘리브레이션](docs/bpm-calibration.md)
+- [적응형 전환 캘리브레이션](docs/adaptive-calibration.md)
 
----
-
-## 빠른 시작 (Quickstart)
+## 빠른 시작
 
 ### 1. 플러그인 설치
 
-Lavalink의 `application.yml` 파일에 플러그인 의존성을 추가합니다:
+[Releases](https://github.com/mochilabs/lavalink_mixer/releases)에서 `lavalink_mixer-<version>.jar`를 내려받아 Lavalink의 `plugins/` 디렉터리에 넣고 서버를 재시작합니다. [소스에서 JAR을 빌드](#소스-빌드)할 수도 있습니다.
 
-```yaml
-lavalink:
-  plugins:
-    - dependency: "io.github.mochilabs.mixer:mixer-plugin:0.3.9"
-      repository: "https://maven.pkg.github.com/mochilabs/lavalink_mixer"
-```
+Lavalink의 `Authorization` 헤더를 포함해 `GET /mixer/info`를 호출하여 로드를 확인합니다. 실행 중인 JAR 버전, `protocolVersion: 2`, 위치 지정 지원 여부를 반환합니다.
 
-또는 [Releases](https://github.com/mochilabs/lavalink_mixer/releases)에서 `lavalink_mixer-0.3.9.jar`를 다운로드하여 Lavalink의 `plugins/` 디렉터리에 넣고 Lavalink를 재시작합니다.
+현재 코드는 Lavalink plugin API 4.2.2, Lavaplayer 2.2.6, lavadsp 0.7.8을 기준으로 컴파일하며 JVM 17을 대상으로 합니다. 호환되는 Lavalink 서버를 사용합니다.
 
-### 2. 필터 활성화 (길드별 1회 필수)
+### 2. 플레이어별 필터 활성화
 
-Lavalink 필터는 플레이어 단위로 동작합니다. 음악 재생 **전** 또는 재생 중에 Lavalink `filters` 요청을 보냅니다:
+재생 전에 Lavalink v4의 [Update Player API](https://lavalink.dev/api/rest#update-player)를 호출합니다.
 
-```json
+```http
+PATCH /v4/sessions/{sessionId}/players/123456789012345678
+Authorization: <Lavalink password>
+Content-Type: application/json
+
 {
-  "op": "filters",
-  "guildId": "123456789012345678",
-  "pluginFilters": {
-    "mixer": {
-      "guildId": "123456789012345678"
-    }
-  }
+	"filters": {
+		"pluginFilters": {
+			"mixer": {
+				"guildId": "123456789012345678"
+			}
+		}
+	}
 }
 ```
 
-> ⚠️ **주의**: `guildId`는 반드시 **문자열(String)**로 전송해야 합니다. Discord Snowflake ID는 64비트 정수로, JavaScript의 기본 53비트 정수 범위를 초과합니다.
+`sessionId`는 WebSocket `ready` 메시지의 Lavalink 세션 ID입니다. `filters` 갱신은 기존 필터 설정을 교체하므로 필요한 다른 필터도 함께 보냅니다. 이후 갱신에서도 `pluginFilters.mixer`를 유지하고, 플레이어를 새로 만들면 다시 적용합니다.
 
----
+JSON의 길드 ID는 문자열로 보냅니다. Discord Snowflake는 JavaScript의 안전한 정수 범위를 넘을 수 있습니다. 믹서 API는 같은 서버의 `/mixer/*` 경로를 사용하며 `/v4` 접두사를 붙이지 않습니다.
 
-## 기본 설정 (`application.yml`)
+### 3. 봇 큐 연동
 
-Lavalink `application.yml`의 `mixer:` 블록에 기본값을 설정할 수 있습니다 (REST API를 통해 길드별로 실시간 변경 가능):
+첫 곡은 Lavalink 클라이언트로 시작합니다. lavalink-client의 `autoSkip: false`처럼 클라이언트 자동 전환을 비활성화하고, `op: "mixer"`인 WebSocket 메시지를 봇 핸들러에 전달합니다.
+
+`MixerNeedNextTrackEvent`를 받으면 `/mixer/queue/arm`으로 다음 곡을 장전합니다. `MixerAdvancedEvent`를 받으면 봇의 큐와 현재 곡 표시를 갱신합니다. 해당 곡은 서버에서 이미 재생 중입니다. 클라이언트의 `trackEnd` 핸들러에서도 서버에 곡 전환을 맡깁니다.
+
+자동 전환을 사용하려면 [프로토콜 v2 흐름](#큐-프로토콜-v2)을 구현해야 합니다. 필터 활성화만으로 다음 곡이 제공되지는 않습니다.
+
+## 서버 기본 설정
+
+Lavalink `application.yml`의 `mixer:` 블록에 시작 시 기본값을 설정합니다.
 
 ```yaml
 mixer:
-  # 크로스페이드 및 페이드인
+  # 크로스페이드 및 최초 페이드인
   crossfadeEnabled: true
-  crossfadeMs: 5000               # 겹침 시간(ms) (500 .. 30000)
-  fadeInMs: 300                   # 곡 시작 시 페이드인 시간(ms) (0 = 끔)
+  crossfadeMs: 5000
+  fadeInMs: 300
 
-  # 공지사항 오버레이 덕킹 (Ducking)
-  duckLevel: 0.2                  # 공지 재생 중 배경 음악 볼륨 배율 (0.0 .. 1.0)
-  duckFadeMs: 300                 # 볼륨 감소/복원 램프 시간(ms)
-  maxParallelOverlays: 4          # 동시 병렬 TTS 오버레이 최대 개수
+  # 공지 덕킹 및 동시 재생 수
+  duckLevel: 0.2
+  duckFadeMs: 300
+  maxParallelOverlays: 4
 
-  # 음량 정규화 (EBU R128 / ITU-R BS.1770-4)
-  normalizationEnabled: false     # 활성화 시 사전 디코딩 분석 수행
-  targetLufs: -14.0               # 표준 목표 음량 (-30.0 .. -6.0 LUFS)
+  # 음량 정규화
+  normalizationEnabled: false
+  targetLufs: -14.0
 
-  # 무음 건너뛰기
-  silenceSkipEnabled: false       # 곡 앞뒤 무음 자동 트림
-  silenceThresholdDb: -60.0       # 무음 판정 기준 음량(dB)
-  silenceMinSoundMs: 120          # 유음 확인 최소 지속 시간(ms)
-  silenceHeadScanMs: 15000        # 곡 시작 구간 분석 윈도우(ms)
-  silenceTailScanMs: 15000        # 곡 끝 구간 분석 윈도우(ms)
-  tailConfirmMs: 1000             # 실시간 스트림 무음 조기 컷 확정 대기 시간(ms)
+  # 무음 제거
+  silenceSkipEnabled: false
+  silenceThresholdDb: -60.0
+  silenceMinSoundMs: 120
+  silenceHeadScanMs: 15000
+  silenceTailScanMs: 15000
+  tailConfirmMs: 1000
 
-  # 비트 매칭 오토믹스 및 BPM 분석
-  bpmDetectionEnabled: false      # 템포 및 비트 그리드 분석 활성화
-  bpmScanMs: 30000                # 헤드/테일 분석 윈도우(ms) (5000 .. 60000)
-  beatmatchEnabled: false         # 비트 정렬 및 템포 조절 활성화
-  maxTempoChange: 0.06            # 최대 허용 템포 변경 비율 (기본 6%, 최대 12%)
-  beatmatchMinConfidence: 0.30    # 비트 그리드 수용 최소 신뢰도
+  # BPM 검출 및 비트 매칭
+  bpmDetectionEnabled: false
+  bpmScanMs: 30000
+  beatmatchEnabled: false
+  maxTempoChange: 0.06
+  beatmatchMinConfidence: 0.30
 
-  # 백그라운드 워커
-  analysisThreads: 2              # 트랙 사전 분석 병렬 워커 스레드 수
+  # 공용 분석 워커 풀
+  analysisThreads: 2
 ```
 
----
+[API 표](#rest-api)에 있는 설정은 길드별 REST 요청으로 변경할 수 있습니다. 워커 수, 덕킹 램프 시간, 병렬 오버레이 상한에는 별도 REST 설정 API가 없습니다. `analysisThreads`는 1–8, `maxParallelOverlays`는 1–16으로 제한됩니다.
 
-## 핵심 기능 상세
+크로스페이드는 기본 활성화입니다. 추가 디코딩이 필요한 무음 제거, 정규화, BPM 검출은 기본 비활성화이며 비트 매칭도 기본 비활성화입니다.
 
-### 1. 비트 매칭 오토믹스 (Beat-Matched AutoMix)
-순수 Kotlin 고정밀 분석 엔진을 통해 독립된 백그라운드에서 분석을 수행합니다:
-- **Radix-2 Real FFT (N=2048, Hann Window)**: 힙 메모리 할당 없이 PCM을 10ms 홉 단위로 주파수 변환.
-  - 다중 채널 독립 FFT: 채널별 FFT의 로그 크기를 평균하여 위상 상쇄 방지. 로그 압축 전 윈도우 RMS를 0.1로 정규화하고 FFT 크기를 `1024/N`으로 보정합니다 (`L = ln(1 + 10·|X|·1024/N·0.1/RMS)`).
-  - 가변 샘플레이트 지원: 48kHz, 44.1kHz 등 입력 샘플레이트에 맞춰 홉 크기(~10ms)와 주파수 대역 빈 경계를 동적 계산.
-  - 대역별 표준편차 정규화: 저음역 킥/베이스 에너지가 고음역 스네어/하이햇 어택을 가리지 않도록 대역별 표준편차($SF_{\text{band}} / \sigma_{\text{band}}$)로 균등 가중합.
-  - **Low (30–150 Hz, 48kHz에서 빈 1..6)**: 킥 드럼 및 서브베이스 어택 분리
-  - **Mid (150–2,000 Hz, 빈 7..85)**: 스네어, 클랩, 악기 어택 분리
-  - **High (2,000–10,000 Hz, 빈 86..427)**: 하이햇, 심벌, 셰이커 분리
+## 곡 전환 및 오디오 처리
 
-$$
-SF_{\text{band}}(t) = \sum_{k \in \text{band}} \max\left(0, L_t(k) - L_{t-1}(k)\right)
-$$
+### 비트 매칭과 적응형 전환
 
-- **상대 에너지 게이트 및 템포 후보 선택**: 에너지 엔벨로프를 평균으로 정규화해 작은 음량에서도 분석합니다. 60–200 BPM 범위의 국소 자기상관 피크와 에너지 후보를 보존하고 인접 래그를 합칩니다. 소리의 지속시간을 반영한 강세 주기성, 후보 그리드가 설명하는 강세의 비율, 로그 템포 사전분포(중심 120 BPM, 폭 1옥타브)를 함께 평가합니다. 짧은 하이햇 공격음이 박자의 강세를 압도하지 않게 하고, 중간 박자를 누락하는 반속도 그리드에는 낮은 점수를 줍니다. 신뢰도는 주기성을 나타내며 옥타브 정답을 보증하지 않습니다.
-- **전역 위상 및 가중 최소제곱(WLS) 주기 최적화**: 코사인 펄스 커널($tolerance = \max(1.5\text{ hops}, T \times 0.10)$, $dist < tolerance$ 가드)로 최적 위상을 탐색한 뒤, 가중 최소제곱 회귀를 통해 주기 $T$와 위상 $\phi$를 동시 정밀화하여 누적 드리프트를 줄입니다:
-
-$$
-K(d, tol) = \cos^2\left(\frac{\pi \cdot d}{2 \cdot tol}\right) \quad (d < tol), \quad 0 \quad (\text{otherwise})
-$$
-- **조건부 정수 BPM 스냅**: 정수와 0.15 BPM 이내이며, WLS 온셋 8개 이상·박 번호 범위 12 이상일 때만 검토합니다. 같은 온셋 배정을 유지하고 정수 주기의 위상을 다시 맞춘 잔차 RMS가 `자유 모델 × 1.2 + 1ms` 이하여야 스냅합니다. 라이브 연주 판별기는 아니며, 허용 오차보다 작은 템포 차이는 스냅될 수 있습니다.
-- **위상 보정과 검증 한계**: 2048 FFT 합성 킥에서 측정한 1.15홉 보정을 스펙트럴 경로에만 적용합니다. 강한 하이햇의 70→140 BPM 여섯 회귀 사례는 모두 70 BPM으로 검출하며, 추가 저속·고속 템포와 박자 위치도 검사합니다. 실제 음악의 박자 정확도 보정은 아직 완료하지 않았습니다. [논문·구현 비교와 측정 결과](docs/bpm-detector-design.md)를 참고하세요.
-- **경계 무음 자동 트림 결합**: 인코딩 딜레이나 앞뒤 무음이 있어도 무음을 건너뛴 실제 음악 시작 지점부터 2/4/8박자 비트 매칭 수행.
-- **템포 스트레칭 및 복구**: 두 곡의 템포가 `maxTempoChange` 이내로 다를 경우(예: 124 BPM → 126 BPM), 크로스페이드 구간 동안 들어오는 곡의 속도를 임시 조절하고, 핸드오프가 완료되면 원래 1.0 템포로 점진적 복귀.
-
-### 2. 이퀄 파워 크로스페이드 (소프트 니 리미팅)
-두 개의 소리가 겹치면 최대 $+3\text{ dB}$ ($1.41\times$)까지 신호가 증폭됩니다:
-- 이퀄 파워 게인 곡선:
-
-$$
-g_{\text{out}}^2 + g_{\text{in}}^2 = 1
-$$
-
-- 합산 신호가 `0.9`를 초과하면 소프트 니(Soft-knee) 압축 곡선을 적용해 `1.0` 아래로 완만하게 리미팅하여 찌그러짐(스퀘어파 왜곡) 없이 자연스러운 다이내믹을 유지합니다. A $1.41\times$ 피크는 $\approx 0.98$ (청감상 약 $\approx 0.14\text{ dB}$ 압축)에 안착합니다.
-
-### 3. 스마트 무음 스킵
-- **사전 분석 패스**: 곡 시작점의 인코딩 지연/무음과 곡 끝점의 페이드아웃 후 무음을 백그라운드에서 정확히 측정하여 건너뜁니다.
-- **실시간 PCM 감지**: 라이브 스트림이나 분석 불가 트랙의 경우, 믹서 필터의 실시간 오디오 레벨이 `tailConfirmMs` 동안 무음으로 유지되면 곡 끝까지 대기하지 않고 다음 곡으로 즉시 전환합니다.
-
-### 4. EBU R128 음량 정규화
-- ITU-R BS.1770-4 K-weighting 필터와 400ms 블록(75% 오버랩), 이중 게이팅($-70\text{ LUFS}$ 절대 게이트, $-10\text{ LU}$ 상대 게이트)을 사용해 통합 음량을 측정합니다.
-- 목표 음량(`targetLufs`, 기본 $-14.0\text{ LUFS}$)에 맞춰 디지털 선형 게인을 적용합니다:
-
-$$
-G = \min\left(1.0, 10^{\frac{\text{targetLufs} - \text{measuredLufs}}{20}}\right)
-$$
-
-- 음량이 과도하게 작은 트랙이 디지털 클리핑을 일으키지 않도록 최대 게인은 `MAX_GAIN = 1.0`으로 안전하게 제한됩니다.
-
-### 5. TTS / 안내 방송 오버레이
-- 음악 재생을 멈추지 않고 효과음이나 TTS 안내를 동시에 믹싱합니다.
-- **덕킹(Ducking)**: 안내 방송이 시작되면 음악 볼륨을 `duckLevel`(예: 20%)로 부드럽게 낮추고, 방송이 끝나면 원래 볼륨으로 복원합니다.
-- `sequential`(순차 재생) 및 `parallel`(동시 병렬 재생) 모드를 지원합니다.
-
----
-
-## 큐 프로토콜 v2 (JIT 프리페치 및 에포크 펜싱)
-
-자연스러운 크로스페이드를 위해 서버는 현재 곡이 끝나기 전에 다음 곡 정보를 미리 요청합니다:
-
-```text
-[곡 A 재생 중]
-        │
-        ▼ (남은 재생 시간이 프리페치 구간에 도달; BPM 비트매칭 시 더 일찍)
-서버가 WebSocket 이벤트 발송: MixerNeedNextTrackEvent
-        │
-        ▼
-클라이언트가 REST 요청 전송: POST /mixer/queue/arm
-(Body: { guildId, epoch, encodedTrack }, Header: Idempotency-Key)
-        │
-        ▼ (서버가 백그라운드에서 곡 B 디코딩 및 BPM/무음 분석 완료)
-서버가 전환 계획 수립 (BeatMatched / Crossfade / SilenceTrim)
-        │
-        ▼ (핸드오프 시작 지점 도달)
-서버가 서브 플레이어로 곡 B 재생 시작 -> MixerFilter에서 두 곡 믹싱
-서버가 WebSocket 이벤트 발송: overlapStart
-        │
-        ▼ (크로스페이드 완료)
-서버가 곡 B를 메인 트랙으로 승격 -> WebSocket 이벤트 발송: MixerAdvancedEvent
-클라이언트 로컬 큐 동기화 (클라이언트는 autoSkip: false 유지)
-```
-
-- **단조 증가 에포크(Epoch)**: 지연된 이전 요청이 뒤늦게 도착하더라도 에포크 검증을 통해 `HTTP 409 Conflict`로 안전하게 무시합니다.
-- **멱등성 키(Idempotency-Key)**: 네트워크 재시도 시 동일 키에 대해 중복 연산 없이 안전하게 결과를 반환합니다.
-- **클라이언트 강제 오버라이드**: 사용자가 즉시 스킵(`PLAY_NOW`)하거나 정지(`STOP`)하면 진행 중이던 크로스페이드 상태를 즉시 무효화하고 즉각 전환합니다.
-- **다음 곡 요청 시점**: 기본값은 `crossfadeMs + 7000ms` 전입니다. BPM 검출과 비트 매칭이 켜지면 `crossfadeMs + min(2 × bpmScanMs + 7000ms, 120000ms)` 전으로 앞당깁니다. 빈 큐를 응답한 뒤 곡이 추가되면 `queue/invalidate`로 다시 요청할 수 있습니다.
-
----
-
-## REST API 레퍼런스
-
-모든 요청은 표준 Lavalink `Authorization` 헤더를 포함해야 합니다.
-
-### 큐 및 재생 제어
-
-| 메서드 | 경로 | 헤더 | 바디 | 설명 |
-|---|---|---|---|---|
-| `GET` | `/mixer/info` | — | — | 플러그인 정보 반환 `{ protocolVersion: 2, version: "...", incomingStartPositionSupported: true }` |
-| `GET` | `/mixer/state?guildId=` | — | — | 믹서 상태, 현재 설정, 전환 판정 이유, BPM 조회 |
-| `POST` | `/mixer/analyze` | — | `{ guildId, encodedTrack }` | 다음 후보곡 사전 분석 캐싱 요청 (202 반환) |
-| `POST` | `/mixer/queue/arm` | `Idempotency-Key` | `{ guildId, epoch, encodedTrack?, isEmpty, preserveTransition?, startPositionMs?, outgoingEndPositionMs? }` | 다음 곡 장전. 다음 곡 시작점과 현재 곡 유효 종료점은 ms 단위 |
-| `POST` | `/mixer/queue/invalidate` | `Idempotency-Key` | `{ guildId, epoch }` | 장전된 곡 취소 (`MixerNeedNextTrackEvent` 재발생) |
-| `POST` | `/mixer/queue/override` | `Idempotency-Key` | `{ guildId, epoch, action, encodedTrack? }` | 강제 전환 (`action: "STOP"` 또는 `"PLAY_NOW"`) |
-| `POST` | `/mixer/reset` | `Idempotency-Key` | `{ guildId, epoch, windowOpenGraceMs? }` | 믹서 상태 머신 리셋 및 에포크 동기화 |
-
-### DSP 및 전환 설정
-
-| 메서드 | 경로 | 바디 파라미터 | 설명 |
-|---|---|---|---|
-| `POST` | `/mixer/crossfade` | `{ guildId, enabled, durationMs? }` | 크로스페이드 설정 (500–30000ms) |
-| `POST` | `/mixer/fade-in` | `{ guildId, durationMs }` | 시작 페이드인 시간 설정 (0–10000ms) |
-| `POST` | `/mixer/bpm` | `{ guildId, enabled, scanMs?, beatmatchEnabled?, maxTempoChange?, minConfidence? }` | BPM 분석 및 오토믹스 전체 설정 |
-| `POST` | `/mixer/beatmatch` | `{ guildId, enabled, maxTempoChange?, minConfidence? }` | 비트 매칭 기능만 독립 토글 |
-| `POST` | `/mixer/silence` | `{ guildId, enabled, thresholdDb?, minSoundMs?, headScanMs?, tailScanMs?, confirmMs? }` | 무음 건너뛰기 설정 |
-| `POST` | `/mixer/normalization` | `{ guildId, enabled, targetLufs? }` | EBU R128 음량 정규화 설정 |
-
-### 오버레이 및 공지사항
-
-| 메서드 | 경로 | 바디 파라미터 | 설명 |
-|---|---|---|---|
-| `POST` | `/mixer/announce` | `{ guildId, identifier?, encodedTrack?, duckLevel?, mode?, channel? }` | 안내 음성 재생 (`mode`: `sequential` \| `parallel`, `channel`: `both` \| `left` \| `right`) |
-| `POST` | `/mixer/announce/cancel` | `{ guildId }` | 현재 공지 즉시 중단 및 음악 볼륨 복원 |
-| `DELETE` | `/mixer/announce/queue` | 쿼리: `?guildId=` | 대기 중인 모든 공지 취소 |
-
----
-
-## WebSocket 이벤트 명세 (`op: "mixer"`)
-
-Lavalink 웹소켓 클라이언트로 전달되는 이벤트 예시입니다:
-
-```jsonc
-// 1. 다음 곡 장전 필요 (JIT 창 도달)
-{ "op": "mixer", "type": "MixerNeedNextTrackEvent", "guildId": "123", "remainingMs": 12000, "currentTrackEncoded": "..." }
-
-// 2. 크로스페이드 믹싱 시작
-{ "op": "mixer", "type": "overlapStart", "guildId": "123", "crossfadeMs": 4000, "handoffInMs": 4000, "incomingStartMs": 13520, "beatMatched": true, "fadeBeats": 8, "targetBpm": 124.0, "rateRatio": 1.016 }
-
-// 3. 서버 측 재생 진행 완료 (클라이언트 큐 동기화 필요)
-{ "op": "mixer", "type": "MixerAdvancedEvent", "guildId": "123", "epoch": 2, "encodedTrack": "...", "handoffType": "CROSSFADE", "handoffId": "uuid" }
-
-// 4. 크로스페이드 완료
-{ "op": "mixer", "type": "overlapEnd", "guildId": "123", "reason": "handoff", "beatMatched": true }
-
-// 5. 유저 오버라이드 실행 완료
-{ "op": "mixer", "type": "MixerOverriddenEvent", "guildId": "123", "epoch": 3, "requestId": "key", "action": "PLAY_NOW" }
-```
-
----
-
-## REST로 오토믹스 활성화 및 테스트
-
-실행 중인 Lavalink 서버에서 비트 매칭 오토믹스를 활성화하는 방법:
-
-```http
-POST /mixer/crossfade
-Content-Type: application/json
-
-{
-  "guildId": "123456789012345678",
-  "enabled": true,
-  "durationMs": 5000
-}
-```
+비트 매칭에는 크로스페이드, BPM 검출, 비트 매칭이 모두 활성화되어 있어야 합니다. `/mixer/bpm`에서 검출과 매칭을 함께 활성화할 수 있습니다.
 
 ```http
 POST /mixer/bpm
+Authorization: <Lavalink password>
 Content-Type: application/json
 
 {
-  "guildId": "123456789012345678",
-  "enabled": true,
-  "beatmatchEnabled": true,
-  "scanMs": 30000,
-  "maxTempoChange": 0.06,
-  "minConfidence": 0.30
+	"guildId": "123456789012345678",
+	"enabled": true,
+	"beatmatchEnabled": true,
+	"scanMs": 30000,
+	"maxTempoChange": 0.06,
+	"minConfidence": 0.30
 }
 ```
 
-전환 결정 결과는 언제든 다음 요청으로 확인할 수 있습니다:
-```http
-GET /mixer/state?guildId=123456789012345678
+`/mixer/beatmatch`는 매칭만 변경하며 BPM 검출을 켜지 않습니다. 크로스페이드를 꺼 두었다면 `/mixer/crossfade`에서도 활성화합니다.
+
+분석기는 곡 앞뒤의 비트 그리드와 전환 구간 특성을 추출합니다. 전환 계획은 경계 보존, 무음 제거, 이퀄 파워 크로스페이드, 비트 매칭 중 하나를 선택합니다. 비트 매칭 중에는 다음 곡을 현재 곡의 템포에 맞춘 뒤 핸드오프 전에 원래 속도로 복귀시킵니다. `overlapMs`는 두 곡의 페이드 구간이며, `recoveryMs`는 전체 전환 시간 안에서 다음 곡만 재생하며 속도를 복구하는 구간입니다.
+
+그리드가 없거나 신뢰도가 낮고, 곡 조합이 적합하지 않거나 템포 차이가 너무 크면 일반 크로스페이드로 폴백합니다. 호환성을 위한 `short_crossfade` 이름은 설정한 크로스페이드 길이를 유지하되 현재 곡의 남은 콘텐츠 길이로 제한한다는 뜻입니다. 고정된 1.5초 페이드를 의미하지 않습니다.
+
+비트 그리드 위상은 음악적 마디의 첫 박자가 아닙니다. 신뢰도는 주기성을 나타내며, 적응형 임계값은 대표적인 실제 음악으로 추가 보정이 필요한 휴리스틱입니다. 검출기 세부 동작과 한계는 [BPM 설계 문서](docs/bpm-detector-design.md)를 참고합니다.
+
+### 크로스페이드, 무음 제거, 음량 정규화
+
+크로스페이드는 이퀄 파워 게인과 합성 진폭 절댓값 `0.9` 이상의 소프트 리미팅을 사용합니다. 핸드오프 위치는 앞서 디코딩된 버퍼 위치가 아닌, 템포 조절을 반영해 실제 소비한 다음 곡 소스 샘플 수로 계산합니다.
+
+무음 분석은 탐색 가능한 곡의 시작과 끝 부근을 디코딩합니다. 실시간 감지는 게인 적용 전 메인 PCM을 확인합니다. 길이를 아는 곡은 처음 5초 이후의 끝 구간에서 무음이 확인되어야 조기 전환할 수 있습니다. 스트림은 최소 `max(tailConfirmMs, 3000)` ms의 무음이 필요합니다. 장전된 다음 곡이 있으면 해당 곡으로 전환합니다.
+
+정규화는 K-weighting, 75% 겹침의 400 ms 윈도, 절대·상대 음량 게이트를 사용합니다. 게인은 최대 `1.0`이므로 조용한 곡을 증폭하지 않습니다. REST로 목표 음량을 -30에서 -6 LUFS 사이로 설정할 수 있습니다.
+
+### 공지 오디오
+
+`POST /mixer/announce`에 인코딩된 트랙이나 소스 식별자를 보냅니다. 서버에 구성한 TTS 소스의 오디오를 포함해 제공된 음성을 재생하며, 플러그인 자체가 음성을 합성하지는 않습니다.
+
+순차 공지는 크로스페이드와 서브 플레이어를 공유하며 사용 중이면 기다립니다. 병렬 공지는 별도 플레이어를 사용하고 `maxParallelOverlays`의 제한을 받습니다. 두 모드 모두 `channel: "both"`, `"left"`, `"right"`를 지원하며 메인 음악을 덕킹합니다. `/mixer/announce/cancel`은 재생 중인 순차 공지를 중단합니다. 대기 공지는 `DELETE /mixer/announce/queue?guildId=...`로 따로 비웁니다.
+
+## 큐 프로토콜 v2
+
+다음 곡 선택은 봇이 담당합니다. 첫 곡을 시작한 뒤 장전된 곡으로 전환하는 일은 플러그인이 담당합니다.
+
+1. 서버가 프리페치 구간에서 `MixerNeedNextTrackEvent`를 보냅니다.
+2. 봇이 정확한 Lavalink 인코딩 트랙, 에포크, `Idempotency-Key`로 `/mixer/queue/arm`을 호출합니다. 큐가 비었으면 `isEmpty: true`를 보냅니다.
+3. 서버가 장전을 수락하고 분석을 예약합니다. `ARMED`는 곡을 수락했다는 뜻이며 분석 완료를 보장하지 않습니다.
+4. 서버가 전환한 뒤 `handoffType: "CROSSFADE"` 또는 `"GAPLESS"`인 `MixerAdvancedEvent`를 보냅니다.
+5. 봇이 같은 곡을 다시 재생하지 않고 로컬 큐를 동기화합니다.
+
+프리페치 구간은 `crossfadeMs + 7000` ms입니다. BPM 검출과 비트 매칭을 켜면 `crossfadeMs + min(2 * bpmScanMs + 7000, 120000)` ms로 늘어납니다. 짧은 곡에는 500 ms의 안정화 지연이 있으며 리셋 유예 시간에 따라 발송이 더 늦어질 수 있습니다.
+
+새 작업마다 새 키를 사용하고 같은 요청을 재시도할 때만 키를 재사용합니다. 서버는 길드별 최근 작업 지문 64개를 메모리에 저장합니다. 저장된 키와 지문이 일치하면 중복 응답을 반환하고, 지문이 다르면 HTTP 422를 반환합니다. 새 요청의 에포크가 이전 값보다 낮으면 HTTP 409이며 같은 에포크는 허용합니다. 리셋, 캐시 퇴출, 프로세스 재시작 이후에는 중복 방지 범위가 제한됩니다.
+
+큐의 첫 곡이 바뀌면 더 높은 에포크와 새 키로 `/mixer/queue/invalidate`를 호출합니다. 장전된 곡을 비우고 프리페치 구간 안에서 다음 곡을 다시 요청할 수 있습니다. 사용자 스킵과 정지는 `/mixer/queue/override`의 `PLAY_NOW` 또는 `STOP`을 사용합니다. 플레이어 변경은 순서가 보장되는 실행기에서 처리하므로 `MixerOverriddenEvent`로 실행 완료를 확인합니다.
+
+봇 시작이나 세션 재개 시 `/mixer/reset`으로 에포크를 동기화합니다. 리셋은 기존 값과 요청 값 중 큰 에포크를 유지하며 기본 1500 ms의 유예 구간을 엽니다. HTTP 409는 `lastKnownEpoch`를 기준으로 처리하고, `PRE_RESET_ARRIVAL`이면 `windowOpenAt`도 확인합니다.
+
+### 전환 보존과 곡 경계 건너뛰기
+
+장전 요청은 다음 선택 필드를 지원합니다.
+
+| 필드 | 동작 |
+| --- | --- |
+| `preserveTransition` | 이 경계의 자동 겹침과 무음 제거를 생략합니다. 한 번의 장전에만 적용되며 지속적인 앨범 모드가 아닙니다. |
+| `startPositionMs` | 다음 곡의 최소 시작 위치입니다. 겹침 없는 전환과 보존 전환에도 적용됩니다. 0이 아닌 값은 탐색 가능하며 500 ms보다 많은 재생 시간이 남은 곡에만 허용됩니다. |
+| `outgoingEndPositionMs` | 현재 곡의 유효 종료점입니다. 여기서 페이드를 끝내거나 겹침 없이 다음 곡으로 전환합니다. 탐색 가능한 현재 곡, 비어 있지 않은 다음 곡, `preserveTransition: false`가 필요합니다. |
+
+각 노드의 `/mixer/info`에서 `incomingStartPositionSupported`와 `outgoingEndPositionSupported`를 확인합니다. 두 위치 필드는 ms 단위이며 장전 요청의 멱등성 판정에 포함됩니다. `isEmpty: true`와 함께 보내지 않습니다. 현재 곡 종료점은 곡의 시작과 끝에서 각각 500 ms보다 멀어야 합니다. 장전 시 이미 지났거나 현재 위치에서 500 ms 이내인 종료점은 무시합니다.
+
+봇은 SponsorBlock 구간처럼 인트로·아웃트로 경계를 이 옵션에 전달할 수 있습니다. 구간 조회와 선택은 봇이 담당합니다. `overlapStart.incomingStartMs`는 실제 겹침 재생에 선택된 다음 곡 시작 위치입니다.
+
+## REST API
+
+모든 요청은 `Bearer` 접두사 없이 Lavalink 비밀번호를 `Authorization` 헤더로 보냅니다. JSON의 길드 ID는 문자열입니다. 정확한 스키마, 응답, 수치 범위는 [OpenAPI](api/openapi.yaml)를 참고합니다. 생략한 선택 설정은 기존 값을 유지하며, 전달한 숫자는 명세의 허용 범위로 제한됩니다.
+
+### 큐 및 재생
+
+아래 네 큐 제어 작업에는 `Idempotency-Key`가 필요합니다.
+
+| 메서드 | 경로 | 요청 | 결과 |
+| --- | --- | --- | --- |
+| `GET` | `/mixer/info` | 없음 | 실행 버전, 프로토콜 버전, 시작·종료 위치 지원 여부 |
+| `GET` | `/mixer/state?guildId=...` | 길드 ID 쿼리 | 상태, 설정, 분석, 게인, BPM, 전환 진단 |
+| `POST` | `/mixer/analyze` | `{ guildId, encodedTrack }` | HTTP 202와 `accepted`. 캐시 예열이며 장전·재생하지 않음 |
+| `POST` | `/mixer/queue/arm` | `{ guildId, epoch, encodedTrack?, isEmpty?, preserveTransition?, startPositionMs?, outgoingEndPositionMs? }` | 다음 곡 또는 빈 큐 수락 |
+| `POST` | `/mixer/queue/invalidate` | `{ guildId, epoch }` | 장전 취소 및 조건에 따른 다음 곡 재요청 |
+| `POST` | `/mixer/queue/override` | `{ guildId, epoch, action, encodedTrack? }` | `STOP` 또는 트랙이 필요한 `PLAY_NOW` 예약 |
+| `POST` | `/mixer/reset` | `{ guildId, epoch, windowOpenGraceMs? }` | 에포크 동기화 및 대기 전환 상태 초기화 |
+
+### DSP 설정 및 공지
+
+다음 API에는 `Idempotency-Key`가 필요하지 않습니다.
+
+| 메서드 | 경로 | 요청 |
+| --- | --- | --- |
+| `POST` | `/mixer/crossfade` | `{ guildId, enabled, durationMs? }`, 500–30000 ms |
+| `POST` | `/mixer/fade-in` | `{ guildId, durationMs }`, 0–10000 ms |
+| `POST` | `/mixer/bpm` | `{ guildId, enabled, scanMs?, beatmatchEnabled?, maxTempoChange?, minConfidence? }` |
+| `POST` | `/mixer/beatmatch` | `{ guildId, enabled, maxTempoChange?, minConfidence? }` |
+| `POST` | `/mixer/silence` | `{ guildId, enabled, thresholdDb?, minSoundMs?, headScanMs?, tailScanMs?, tailConfirmMs? }` |
+| `POST` | `/mixer/normalization` | `{ guildId, enabled, targetLufs? }` |
+| `POST` | `/mixer/announce` | `{ guildId, identifier?, encodedTrack?, duckLevel?, mode?, channel? }`, HTTP 202 |
+| `POST` | `/mixer/announce/cancel` | `{ guildId }` |
+| `DELETE` | `/mixer/announce/queue?guildId=...` | 길드 ID 쿼리 |
+
+## WebSocket 이벤트
+
+기존 Lavalink WebSocket 연결에서 다음 사용자 정의 메시지를 처리합니다.
+
+```jsonc
+// 요청을 받으면 다음 곡을 장전합니다.
+{ "op": "mixer", "type": "MixerNeedNextTrackEvent", "guildId": "123", "remainingMs": 12000, "currentTrackEncoded": "..." }
+
+// 비트 매칭 시작. 전체 전환 시간에는 다음 곡만 재생하는 속도 복구 구간도 포함됩니다.
+{ "op": "mixer", "type": "overlapStart", "guildId": "123", "crossfadeMs": 4500, "overlapMs": 4000, "recoveryMs": 500, "handoffInMs": 4500, "incomingStartMs": 13520, "beatMatched": true, "fadeBeats": 8, "targetBpm": 120.0, "rateRatio": 1.016, "transitionKind": "beat_matched", "track": { "identifier": "next-track", "title": "Next track" } }
+
+// 서버는 이미 다음 곡으로 전환했습니다. 로컬 큐를 동기화합니다.
+{ "op": "mixer", "type": "MixerAdvancedEvent", "guildId": "123", "epoch": 2, "encodedTrack": "...", "handoffType": "CROSSFADE", "handoffId": "550e8400-e29b-41d4-a716-446655440000" }
+
+{ "op": "mixer", "type": "overlapEnd", "guildId": "123", "reason": "handoff", "beatMatched": true }
+{ "op": "mixer", "type": "MixerOverriddenEvent", "guildId": "123", "epoch": 3, "requestId": "key", "action": "PLAY_NOW" }
+
+// 병렬 공지 시작 및 종료.
+{ "op": "mixer", "type": "announceStart", "guildId": "123", "announcementId": 1, "mode": "parallel", "track": { "identifier": "notice", "title": "Notice" } }
+{ "op": "mixer", "type": "announceEnd", "guildId": "123", "announcementId": 1 }
 ```
-- `"transitionKind": "beat_matched"` → 비트 매칭 오토믹스 정상 수행.
-- `"transitionKind": "short_crossfade"` → 이퀄 파워 크로스페이드로 전환 (예: 분석 데이터 부족, 설정한 템포 차이 한도 초과, 조성 충돌). 호환성을 위해 유지하는 이름이며, 길이가 항상 짧다는 뜻은 아닙니다. 설정한 `crossfadeMs`를 사용하되 곡의 사용 가능한 길이를 넘지 않습니다. 분석 데이터가 없거나 불확실하다고 10초 설정을 1.5초로 줄이지 않습니다.
 
-테일 분석의 완료 여부는 끝무음을 제거한 음악 끝 지점으로 판단합니다.
-끝무음을 제외하고 정상적으로 수집한 분석 결과도 BPM·전환 캐시에 반영됩니다.
+`handoffId`는 크로스페이드 전환에 사용됩니다. 중단된 겹침은 `reason: "aborted"`를 보냅니다. `overlapStart` 이후 네이티브 템포 조절이 실패하면 `overlapEnd`는 `beatMatched: false`, `fallbackReason: "timescale_native_failed"`를 보낼 수 있습니다. 순차 공지의 `announceEnd`에는 `announcementId`가 없습니다.
 
----
+## 재생 상태 확인
 
-## 아키텍처 및 오디오 흐름
+테스트 중 `GET /mixer/state?guildId=...`를 확인합니다.
 
-Discord 음성 채널은 연결당 단 하나의 Opus 스트림만 수용하므로, 두 개의 소리는 **인코딩 전 PCM 단계**에서 섞여야 합니다:
+- 겹침 오디오가 들리지 않으면 `mixerFilterActive`, `nextTrackIdentifier`, `subTrackIdentifier`를 확인합니다.
+- 큐 소유권이나 분석이 멈춘 것 같으면 `state`, `lastKnownEpoch`, `hasNext`, `analysisState`를 확인합니다. `analysisState`는 진행 중인 분석이나 다음 곡 슬롯을 반영합니다. `ready`가 BPM 그리드 준비까지 보장하지는 않습니다.
+- 최근 전환 결정과 진행 중인 핸드오프 시간은 `transitionKind`, `decisionReason`, `crossfadeHandoffInMs`로 확인합니다. `beat_matched`는 선택한 계획이므로 완료 이벤트에서도 폴백 여부를 확인합니다.
+- `currentTrackBpm`을 표시하기 전에 `currentTrackBpmIdentifier`가 현재 곡과 일치하는지 확인합니다. 분석이 진행 중이거나 비활성화된 경우 BPM·게인 값이 아직 없을 수 있습니다.
+
+`POST /mixer/analyze`는 탐색 가능한 후보곡의 활성화된 무음·BPM·전환 특성 캐시를 미리 채웁니다. HTTP 202는 분석 완료를 뜻하지 않습니다. 정규화 분석은 일반 장전 경로에서 수행합니다. 분석은 실제 서브 재생과 별도 디코더에서 진행합니다.
+
+## 아키텍처
 
 ```text
-[메인 플레이어] ──> [메인 디코더] ──> [MixerFilter] ──> [볼륨 / EQ 필터] ──> [Opus 인코더] ──> [Discord 음성]
-                                           ▲
-                                           │ (PCM 합성: main * mainGain + sub * subGain)
-[서브 플레이어] ──> [서브 디코더] ──> [SiphonQueue]
-(다음 곡 / TTS)
+Main decoder --------------------> MixerFilter --> downstream filters --> Opus --> Discord
+                                        ^
+Secondary decoder --> tempo stretch --> SiphonQueue
+Parallel announcement decoders -------> overlay queues
+Analysis decoder ---------------------> analysis caches
 ```
 
-1. **사이폰 필터(Siphon Filter)**: 독립된 서브 플레이어가 음성 연결 없이 백그라운드에서 다음 곡/TTS를 디코딩하여 링 버퍼에 저장합니다.
-2. **믹서 필터(MixerFilter)**: 메인 플레이어 필터 체인의 최전단에 위치하여, 디코딩된 PCM 청크를 직접 합성합니다.
-3. **단일 큐 엔진**: 재생/정지(`play()`/`stop()`) 등의 상태 변경은 이벤트 큐를 통해 단일 스레드로 처리되어 음성 스트리밍 스레드에 락 경합이나 데드락을 유발하지 않습니다.
+오디오 콜백은 PCM을 합성하고 다음 필터로 전달합니다. 트랙 로드, 분석, 블로킹 대기는 다른 경로에서 처리합니다. 샘플 단위의 제한된 큐가 디코더 청크 크기 차이를 흡수하며, 부족한 샘플은 0으로 채우고 초과 버퍼는 제한합니다.
 
----
+상태는 오디오 콜백, 플레이어 콜백, 스케줄러, 순서가 보장되는 프로토콜 실행기가 함께 접근합니다. 길드 상태 락과 별도의 플레이어 변경 락으로 전환을 조율합니다. 필터는 처리 시 길드 믹서를 조회하며, 피더 선출로 겹친 필터 체인이 같은 서브 오디오를 중복 소비하지 않게 합니다. 소유권과 락 순서는 [아키텍처 문서](docs/architecture.md)를 참고합니다.
 
-## 소스 코드 빌드
+## 소스 빌드
 
-요구 사항: **JDK 17 이상**
+CI와 같은 JDK 17을 사용합니다. 현재 코드는 Kotlin 2.1.20과 Gradle 8.14.1 래퍼를 사용합니다. 최초 의존성 다운로드에는 Maven Central과 `maven.lavalink.dev` 접근이 필요합니다.
 
 ```bash
-# 플러그인 JAR 빌드
+# 컴파일, 테스트, 플러그인 패키징
+./gradlew build
+
+# 테스트 없이 JAR 패키징
 ./gradlew jar
 
-# 전체 단위 및 오디오 통합 테스트 실행
-./gradlew test
-
-# 배포용 아티팩트 빌드
-./gradlew build -Pversion=0.3.9
+# 아티팩트 버전 지정
+./gradlew build -Pversion=1.2.3
 ```
 
-빌드 결과물: `build/libs/lavalink_mixer-0.3.9.jar`.
+결과물은 `build/libs/lavalink_mixer-<version>.jar`입니다. 버전은 `MIXER_VERSION`, `-Pversion`, 현재 커밋의 정확한 Git 태그, `0.0.0-SNAPSHOT` 순서로 결정합니다. 앞의 `v`는 제거합니다. `/mixer/info`는 실행 중인 JAR에 포함된 버전을 반환합니다.
 
----
+선택 테스트와 실제 연동 검증은 [개발 가이드](docs/development.md)를 참고합니다. 로컬 오디오 통합 테스트는 생성한 WAV 파일로 Lavaplayer를 검증합니다. 실제 Discord 음성 연결을 통한 재생까지 보장하지는 않습니다.
 
 ## 라이선스
 
-이 프로젝트는 퍼블릭 도메인 [Unlicense](UNLICENSE)에 따라 자유롭게 사용할 수 있습니다.
+[Unlicense](UNLICENSE)에 따라 퍼블릭 도메인으로 배포합니다.

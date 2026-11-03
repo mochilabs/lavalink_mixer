@@ -7,8 +7,9 @@ queue from server events.
 
 ## 1. Install the plugin
 
-Copy `mixer-*.jar` into Lavalink's `plugins/` directory and restart the server.
-Verify the plugin appears in `GET /version`.
+Copy `lavalink_mixer-<version>.jar` into Lavalink's `plugins/` directory and restart
+the server. Verify the plugin responds to `GET /mixer/info` with Lavalink's
+`Authorization` header.
 
 Optional server defaults in `application.yml`:
 
@@ -40,22 +41,28 @@ JSON; Discord snowflakes are not safe as JavaScript numbers.
 
 ## 2. Enable the mixer filter
 
-Send the Lavalink WebSocket filters op for each guild before starting playback:
+Before playback, use Lavalink v4's
+[Update Player endpoint](https://lavalink.dev/api/rest#update-player):
 
-```json
+```http
+PATCH /v4/sessions/{sessionId}/players/123456789012345678
+Authorization: <Lavalink password>
+Content-Type: application/json
+
 {
-  "op": "filters",
-  "guildId": "123456789012345678",
-  "pluginFilters": {
-    "mixer": { "guildId": "123456789012345678" }
-  }
+	"filters": {
+		"pluginFilters": {
+			"mixer": { "guildId": "123456789012345678" }
+		}
+	}
 }
 ```
 
-Preserve this `pluginFilters.mixer` entry when replacing the filter object. The
-filter is required for crossfade, overlays, fade, and PCM mixing. Confirm it
-with `GET /mixer/state?guildId=123456789012345678` and check
-`mixerFilterActive`.
+Use the Lavalink session ID from the WebSocket `ready` message. Filter updates
+replace the full filter object, so include any other desired filters and preserve
+`pluginFilters.mixer`. Reapply it for a replacement player. The filter is required
+for crossfade, overlays, fade, and PCM mixing. Confirm it with
+`GET /mixer/state?guildId=123456789012345678` and check `mixerFilterActive`.
 
 ## 3. Configure optional features
 
@@ -153,7 +160,7 @@ server's epoch baseline. Follow `409` conflicts using the server's
   unsuitable/missing grids fall back to normal crossfade.
 - **Announcements**: POST `/mixer/announce`; DELETE
   `/mixer/announce/queue?guildId=...` clears waiting items; POST
-  `/mixer/announce/cancel` stops an active overlay. Sequential overlays duck
+  `/mixer/announce/cancel` stops the active sequential overlay. Sequential overlays duck
   music; `mode: "parallel"` uses an isolated overlay player.
 - **Diagnostics**: GET `/mixer/state?guildId=...` for queue, transition,
   feature, and analysis state. POST `/mixer/analyze` optionally warms analysis

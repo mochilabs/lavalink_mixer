@@ -179,7 +179,7 @@ Exact native per-output input positions are unavailable: FIFO source integration
 is tested to a tolerance, not claimed sample-exact WSOLA correspondence.
 
 `requestPreanalysis` retains the latest warmup while another scan is queued or
-active, and writes only BPM and feature caches. It never arms, promotes or changes
+active, and writes enabled silence, BPM, and feature caches. It never arms, promotes or changes
 live gain. Current-track BPM analysis can run without a queued next track. Results are track-keyed; normal JIT
 arming and epoch checks remain the authority for playback. Explicit preservation
 is an optional arm field included in the idempotency fingerprint, never a global
@@ -206,12 +206,8 @@ an item if the secondary player becomes busy. Parallel announcements own
 separate players, queues, and gain ramps. Their count defaults to four and
 is clamped to 1–16 per guild.
 
-## Known documentation and implementation differences
+## Version and design references
 
-- The README describes `ARMED` as analysis complete. The implementation accepts
-  the arm before analysis finishes.
-- The README describes the engine as single-threaded. The state lock coordinates
-  several callback and executor threads.
 - `/mixer/info` returns the version resolved from the packaged plugin
   descriptor, which Gradle fills from the build version; the value matches the
   running JAR.

@@ -23,9 +23,11 @@ The plugin requires no Lavalink source changes. Analysis runs in Kotlin/JVM on a
 
 - [REST and WebSocket reference](api/openapi.yaml)
 - [Bot integration guide](examples/lavalink-client/README.md)
+- [Detailed bot integration guide in Korean](examples/lavalink-client/README.ko.md)
 - [Architecture and threading](docs/architecture.md)
 - [Build and testing guide](docs/development.md)
 - [BPM detector design](docs/bpm-detector-design.md) and [BPM calibration](docs/bpm-calibration.md)
+- [BPM extraction algorithm explained in Korean](docs/bpm-extraction.ko.md)
 - [Adaptive transition calibration](docs/adaptive-calibration.md)
 
 ## Quickstart
@@ -259,17 +261,92 @@ Use `GET /mixer/state?guildId=...` while testing:
 
 ## Architecture
 
-```text
-Main decoder --------------------> MixerFilter --> downstream filters --> Opus --> Discord
-                                        ^
-Secondary decoder --> tempo stretch --> SiphonQueue
-Parallel announcement decoders -------> overlay queues
-Analysis decoder ---------------------> analysis caches
+The bot selects queue items. The plugin controls transitions after the first
+track starts. Each guild has a mixer, a protocol controller, a secondary player,
+and an isolated analysis path. Parallel announcements have separate players.
+
+```mermaid
+flowchart TD
+	bot["Bot: queue and user commands"] --> rest["MixerRestHandler: /mixer/*"]
+	rest --> registry["MixerPlugin: guild registry"]
+	registry --> guild["GuildMixer: playback and transitions"]
+	guild --> protocol["ProtocolController: epoch, key, armed track"]
+	guild --> main["Lavalink main player"]
+	guild --> secondary["Secondary: overlap or sequential announcement"]
+	guild --> analysis["Isolated analysis player"]
+	guild --> overlays["Parallel announcement players"]
+	analysis --> caches["Track-keyed analysis caches"]
+	caches -.->|"grids, features, trim, gain"| guild
+	main --> socket["Main session WebSocket"]
+	socket -->|"op: mixer events"| bot
 ```
 
-The audio callback mixes PCM and forwards it downstream. Track loading, analysis, and blocking waits run elsewhere. A bounded sample queue absorbs decoder chunk-size differences, with zero-filled underflow and bounded overflow.
+### PCM path and analysis isolation
 
-State spans audio callbacks, player callbacks, schedulers, and the ordered protocol executor. A guild state lock and a separate player-mutation lock coordinate transitions. The filter resolves its guild mixer lazily, and feeder election prevents overlapping filter chains from consuming shared secondary audio twice. See the [architecture reference](docs/architecture.md) for ownership and lock order.
+```mermaid
+flowchart LR
+	main["Main PCM"] --> mix["MixerFilter"] --> downstream["Downstream filters"] --> voice["Opus to Discord"]
+	secondary["Secondary PCM"] --> tempo["Optional tempo stretch"] --> queue["SiphonQueue"] --> mix
+	overlay["Parallel overlay PCM queues"] --> mix
+	analysis["Analysis PCM"] --> measurements["Silence, loudness, BPM, features"]
+```
+
+Only the main player feeds Discord. The secondary capture queue carries both PCM
+and source-progress accounting. Analysis PCM stays on a separate player and queue;
+only its measurements influence planning and gain. Sequential announcements share
+the secondary player with overlap, while parallel announcements have their own queues.
+
+### Handoff and queue synchronization
+
+```mermaid
+sequenceDiagram
+	participant Bot
+	participant Mixer
+	participant Main as Main player
+	Mixer-->>Bot: MixerNeedNextTrackEvent
+	Bot->>Mixer: Arm encoded track with epoch and key
+	Mixer-->>Bot: ARMED accepted, analysis may still be pending
+	Mixer->>Mixer: Plan transition and mix incoming secondary PCM
+	Mixer-->>Bot: overlapStart when overlap is used
+	Mixer->>Main: Play incoming clone at consumed source position
+	Mixer-->>Bot: MixerAdvancedEvent
+	Bot->>Bot: Commit the reserved queue item without play
+```
+
+The main player stays in place at handoff. The plugin clones the incoming track
+and seeks from its start position plus consumed source samples. Decoder position
+can run ahead because of buffering, and tempo-adjusted source progress differs
+from output duration. This distinction prevents a handoff from seeking to audio
+that was decoded but has not been heard.
+
+| Concern | Responsible component |
+| --- | --- |
+| Full queue, repeated-track identity, user selection | Bot |
+| Armed next slot, epoch checks, JIT requests | `ProtocolController` and `EpochGate` |
+| Secondary playback, transition plan, gains, overlays | `GuildMixer` |
+| Background measurements and shared caches | `TrackAnalysisService` and `AnalysisCaches` |
+| PCM gains, mixing, downstream forwarding | `MixerFilter` |
+
+### Threading and replacement players
+
+The scheduler pumps secondary output every 20 ms and polls transitions every
+fifth tick. Analysis uses a shared worker pool; protocol actions use a per-guild
+ordered executor. Audio and player callbacks also access mixer state.
+
+The audio callback mixes PCM and forwards it downstream. Track loading, analysis,
+and blocking waits run elsewhere. A bounded sample queue handles decoder chunk
+sizes, with zero-filled underflow and bounded overflow.
+
+The guild state lock protects transition decisions, while `playerMutationLock`
+serializes main-player changes. Player changes release the state lock and recheck
+epochs, sequence numbers, and identity before committing. The filter looks up its
+guild mixer on each chunk so replacement players can use the current instance.
+Feeder election lets only one filter chain advance shared gains and secondary PCM.
+
+The [architecture reference](docs/architecture.md) includes execution-context,
+lock-order, audio-flow, and protocol-state charts. The
+[detailed integration guide](examples/lavalink-client/README.ko.md) covers queue
+reservations, duplicate events, retry recovery, reconnects, and boundary options.
 
 ## Build from source
 

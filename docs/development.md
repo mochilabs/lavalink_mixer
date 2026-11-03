@@ -57,6 +57,12 @@ libraries, so distinguish native-loading failures from behavioral failures.
 Use unique track identifiers in new analysis tests because caches are shared.
 Release players and executors in test cleanup.
 
+For protocol timing and re-requests after an empty arm, also run
+`ProtocolPrefetchTest`. For the detector's stages and interpretation of results,
+see the [BPM extraction explanation](bpm-extraction.ko.md). The
+[detailed bot integration guide](../examples/lavalink-client/README.ko.md) describes
+queue reservations, uncertain request outcomes, and reconnect reconciliation.
+
 After code changes, run `./gradlew build` to cover interactions beyond the
 selected tests. For documentation-only changes, check referenced symbols,
 commands, paths, and links against the repository.

@@ -1,5 +1,9 @@
 # BPM detector: evidence and current policy
 
+For a step-by-step explanation in Korean, see
+[BPM extraction algorithm](bpm-extraction.ko.md). This document records research,
+policy decisions, and previous measurements rather than an input-to-output walkthrough.
+
 Reviewed 2026-11-02. Production remains pure Kotlin/JVM, with no additional
 runtime dependency. The references below were read as papers and source code;
 their complete implementations were not benchmarked against this plugin.

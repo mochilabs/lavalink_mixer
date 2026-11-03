@@ -1,5 +1,9 @@
 # Architecture reference
 
+This reference describes the running implementation. For a walkthrough in Korean,
+see the [BPM extraction explanation](bpm-extraction.ko.md) and the
+[bot integration guide](../examples/lavalink-client/README.ko.md).
+
 ## Runtime boundary
 
 `lavalink_mixer` is a plugin loaded by a Lavalink server. There is no standalone
@@ -10,6 +14,48 @@ application entry point. Spring discovers the services in
 The build uses Kotlin 2.1.20 and targets JVM 17. Its host dependencies are
 Lavalink plugin API 4.2.2, Lavaplayer 2.2.6, and lavadsp 0.7.8.
 These versions describe this repository's build, not the latest upstream releases.
+
+## System boundary and ownership
+
+```mermaid
+flowchart LR
+	bot["Bot: queue selection and user commands"]
+	rest["MixerRestHandler: /mixer/*"]
+	protocol["ProtocolController: epochs and armed metadata"]
+	registry["MixerPlugin: guild registry"]
+	guild["GuildMixer: playback and transition state"]
+	main["Lavalink main player"]
+	secondary["Secondary player: overlap or sequential announcement"]
+	analysis["TrackAnalysisService: isolated analysis player"]
+	parallel["Parallel announcement players"]
+	cache["AnalysisCaches: shared by track identifier"]
+	bot -->|"HTTP commands"| rest
+	rest --> registry
+	registry -->|"getOrCreate by guild ID"| guild
+	guild --> protocol
+	guild --> main
+	guild --> secondary
+	guild --> analysis
+	guild --> parallel
+	analysis --> cache
+	cache -->|"measurements"| guild
+	protocol -->|"op: mixer through main socket context"| bot
+```
+
+The bot stores the full queue and chooses its next item. The plugin stores one
+armed next track, not a copy of that queue. Initial playback uses Lavalink's
+normal player API. Later server-driven advancement consumes the armed slot.
+`MixerAdvancedEvent` tells the bot to update its local queue.
+
+The main player belongs to Lavalink. `MixerEvents.onNewPlayer()` attaches it to
+the guild mixer. The secondary and analysis players are created as needed and
+do not own Discord voice connections. Each parallel announcement has its own
+player. A crossfade handoff clones the incoming track into the existing main
+player. It does not replace the Lavalink player with the secondary player.
+
+The registry is process-wide, while player state and protocol state are per
+guild. Analysis caches are shared across guilds. Destroying an obsolete player
+from an old session does not remove a mixer attached to a newer player.
 
 ## Ownership and execution
 
@@ -40,7 +86,71 @@ Player operations that can trigger callbacks occur outside the state lock in
 the transition paths. Epoch, sequence, generation, and track-identity checks
 reject work superseded while that lock was released.
 
+### Execution contexts
+
+| Context | Work performed | Coordination |
+| --- | --- | --- |
+| REST request thread | Parse requests, check epochs, accept arms and settings | Guild state lock around compound changes |
+| `mixer-v2-action` | Ordered overrides and delayed JIT dispatch | Player-mutation lock and state rechecks for main-player changes |
+| `mixer-loop` | Drain secondary frames every 20 ms, poll every fifth tick, retry analysis, start announcements | Plans state changes before callback-producing operations |
+| `mixer-analysis` pool | Decode clones, measure silence and loudness, extract BPM and features | One active analysis per guild, shared worker limit across guilds |
+| Lavaplayer callbacks | Track start, end, stuck, and failure handling | Identity and generation checks reject obsolete work |
+| PCM filter callback | Advance the elected feeder's sample clock, apply gains, consume queues, mix, forward PCM | Atomics, gain snapshots, and bounded queue operations |
+
+The shared scheduler is not a worker per guild. A slow operation on that scheduler
+can delay other guilds, which is why analysis decoding runs on the separate pool.
+`analysisThreads` limits concurrently running workers. It does not guarantee that
+every submitted analysis starts immediately.
+
+### Player-mutation lock order
+
+```mermaid
+flowchart TD
+	plan["Under guild lock: capture track, epoch, sequence, and generation"]
+	release["Release guild lock"]
+	mutation["Acquire playerMutationLock"]
+	recheck["Acquire guild lock briefly and recheck the captured state"]
+	valid{"Still current?"}
+	operate["Release guild lock, then call player.play or player.stop"]
+	abort["Release locks and discard obsolete work"]
+	finish["Release playerMutationLock"]
+	plan --> release --> mutation --> recheck --> valid
+	valid -->|"yes"| operate --> finish
+	valid -->|"no"| abort
+```
+
+This diagram describes the main-player mutation paths, not every method in the
+class. Never acquire `playerMutationLock` while holding `GuildMixer.lock`.
+The reverse order is allowed for a short recheck. `play()` and `stop()` can
+synchronously trigger player callbacks, so invoking them under the state lock
+would make callbacks part of the locked transition.
+
+An epoch rejects older client work. `advanceSeq` distinguishes playback advances.
+Slot revisions and sub-player generations distinguish replacements within those
+operations. Track-object identity prevents a transition planned for one main
+track from handing off after another track has replaced it. These checks have
+different scopes and are not interchangeable.
+
 ## Audio flow
+
+```mermaid
+flowchart LR
+	mainDecoder["Main decoder"] --> mixer["MixerFilter"]
+	mixer --> downstream["Downstream Lavalink filters"] --> opus["Opus output"] --> voice["Discord voice"]
+	subDecoder["Secondary decoder"] --> tempo["TempoStretcher when configured"]
+	tempo --> siphon["SiphonFilter"]
+	siphon --> subQueue["SiphonQueue: PCM and source progress"] --> mixer
+	siphon --> subBuffer["Secondary frame buffer"]
+	pump["mixer-loop: provide and drain"] -.-> subBuffer
+	overlayDecoder["Parallel overlay decoder"] --> overlayQueue["Per-overlay PCM queue"] --> mixer
+	analysisDecoder["Analysis decoder"] --> analysisTap["Analysis capture queue"] --> measures["Silence, loudness, BPM, features"]
+	measures -.->|"metadata only"| plans["Transition planning"]
+```
+
+Solid arrows carry audio or analysis data. Dashed arrows describe pumping or
+metadata. Analysis PCM does not feed the live secondary queue. Draining a
+secondary player's output advances its decoder even though its own encoded
+frames are not sent to Discord.
 
 The main decoder sends PCM through `MixerFilter` and then downstream toward
 Lavalink's output. The secondary decoder sends PCM through an optional
@@ -80,6 +190,73 @@ to align with the main sample timeline. Skipped source progress contributes
 to the handoff seek, but not to the audible secondary sample counter.
 An underrun preserves the remaining catch-up work for the next read.
 
+### The three playback positions
+
+| Position | Meaning | Used for |
+| --- | --- | --- |
+| Secondary decoder position | How far the decoder has produced, including buffered output | Diagnostics |
+| Secondary output samples | Audio samples supplied on the output timeline | Audible output and overlap timing |
+| Secondary source progress | Source samples represented by consumed or deliberately skipped queued output, adjusted for speed | Seek position at handoff |
+
+For a source speed `r`, one output sample represents approximately `r` source
+samples. The queue integrates that progress across rate spans:
+
+```text
+sourceSamples = sum(outputSamplesInSpan * sourceSpeedInSpan)
+handoffMs = incomingStartMs + sourceSamples * 1000 / 48000
+```
+
+For example, four seconds of output at `1.02` speed represent 4080 ms of source
+audio. A one-second linear recovery from `1.02` to `1.0` represents approximately
+1010 ms more. The handoff is then about `incomingStartMs + 5090`, not the decoder's
+possibly later position. This is an accounting example, not a measurement of
+native stretcher latency or sample-exact WSOLA input positions.
+
+The queue records progress in thousandths of a source sample to reduce repeated
+rounding. Overflow advances its output/source cursor when dropping old data.
+A read that needs to catch up advances the same cursor. Zero-filled underflow
+does not invent source progress. Native processing can emit output after a
+delay, so `TempoStretcher` attributes output to submitted rate spans in FIFO order.
+
+### Crossfade lifecycle
+
+```mermaid
+sequenceDiagram
+	participant Bot
+	participant Protocol as ProtocolController
+	participant Analysis as Analysis worker
+	participant Guild as GuildMixer
+	participant PCM as MixerFilter
+	participant Main as Main player
+	Protocol-->>Bot: MixerNeedNextTrackEvent
+	Bot->>Protocol: arm encoded track, epoch, key
+	Protocol->>Guild: Retain armed track and next slot
+	Guild->>Analysis: Schedule clone analysis asynchronously
+	Protocol-->>Bot: HTTP 200 ARMED
+	opt Measurements available before planning
+		Analysis-->>Guild: Cache grids, features, trim, and gain when available
+	end
+	Guild->>Guild: Poll and select a plan from available metadata
+	Guild->>Guild: Seek and start the secondary track
+	Guild-->>Bot: overlapStart
+	loop Main PCM chunks
+		PCM->>Guild: Claim feeder and advance output clock
+		Guild-->>PCM: Gains and positioned secondary PCM
+		PCM->>PCM: Mix and forward downstream
+	end
+	Guild->>Guild: Capture consumed source progress and validate handoff
+	Guild->>Main: Play incoming clone at the handoff source position
+	Guild-->>Bot: MixerAdvancedEvent
+	Guild-->>Bot: overlapEnd
+	Bot->>Bot: Commit local queue advancement
+```
+
+This is the overlap path. Analysis can finish after planning, or return no usable
+grid. Playback does not wait indefinitely for a beat result. A gapless path
+consumes the ready or pending track directly and emits `MixerAdvancedEvent`
+without requiring an `overlapStart` event. The relative arrival of the HTTP arm
+response and background analysis is not a readiness guarantee.
+
 ## Protocol v2
 
 `MixerRestHandler` exposes `/mixer/*`. The full request and response reference
@@ -96,6 +273,28 @@ that sends custom WebSocket messages with `op: "mixer"` to the main player's ses
 The protocol's armed slot and the mixer's pending/ready analysis slots are
 distinct. `arm()` sets `ARMED` before scheduling analysis. It does not imply
 that analysis is complete.
+
+```mermaid
+stateDiagram-v2
+	[*] --> IDLE
+	IDLE --> PLAYING: main track starts
+	PLAYING --> ARMED: arm with a track
+	PLAYING --> NO_NEXT: arm with isEmpty
+	ARMED --> ARMED: replace the arm
+	ARMED --> NO_NEXT: arm with isEmpty
+	NO_NEXT --> ARMED: arm with a track
+	ARMED --> PLAYING: handoff or invalidate
+	NO_NEXT --> PLAYING: invalidate while a track plays
+	PLAYING --> IDLE: playback ends without a next track
+	ARMED --> IDLE: STOP override
+	NO_NEXT --> IDLE: STOP override
+	PLAYING --> IDLE: STOP override
+```
+
+This chart shows common control paths. Reset selects `PLAYING` or `IDLE` from
+the attached main player. `PLAY_NOW` selects `PLAYING` and schedules a main-player
+mutation. State changes, player mutation, PCM consumption, and event delivery
+are separate steps. `ARMED` is not an additional audio player or an analysis state.
 
 `checkJitWindow()` requests the next track when the known duration has at most
 `crossfadeMs + 7000` ms remaining, or `crossfadeMs + min(2 * bpmScanMs + 7000, 120000)`

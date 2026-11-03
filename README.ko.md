@@ -23,9 +23,11 @@ Lavalink 소스를 수정할 필요가 없습니다. 분석은 별도 디코더�
 
 - [REST 및 WebSocket 명세](api/openapi.yaml)
 - [봇 연동 가이드](examples/lavalink-client/README.md)
+- [한국어 상세 봇 연동 가이드](examples/lavalink-client/README.ko.md)
 - [아키텍처 및 스레딩](docs/architecture.md)
 - [빌드 및 테스트 가이드](docs/development.md)
 - [BPM 검출기 설계](docs/bpm-detector-design.md)와 [BPM 캘리브레이션](docs/bpm-calibration.md)
+- [BPM 추출 알고리즘 해설](docs/bpm-extraction.ko.md)
 - [적응형 전환 캘리브레이션](docs/adaptive-calibration.md)
 
 ## 빠른 시작
@@ -259,17 +261,72 @@ Content-Type: application/json
 
 ## 아키텍처
 
-```text
-Main decoder --------------------> MixerFilter --> downstream filters --> Opus --> Discord
-                                        ^
-Secondary decoder --> tempo stretch --> SiphonQueue
-Parallel announcement decoders -------> overlay queues
-Analysis decoder ---------------------> analysis caches
+봇은 전체 큐와 다음 곡 선택을 담당하고, 플러그인은 첫 곡 이후의 자동 전환을 담당합니다. 길드마다 믹서·프로토콜 제어기·서브 플레이어·별도 분석 경로가 있으며 병렬 공지는 각각 전용 플레이어를 사용합니다.
+
+```mermaid
+flowchart TD
+	bot["봇: 큐와 사용자 명령"] --> rest["MixerRestHandler"]
+	rest --> registry["MixerPlugin"]
+	registry --> guild["GuildMixer"]
+	guild --> protocol["ProtocolController"]
+	guild --> main["메인 플레이어"]
+	guild --> secondary["서브 플레이어"]
+	guild --> analysis["분석 플레이어"]
+	guild --> overlays["병렬 공지"]
+	analysis --> caches["트랙별 분석 캐시"]
+	caches -.->|"그리드, 특성, 무음, 게인"| guild
+	main --> socket["메인 세션 WebSocket"]
+	socket -->|"op: mixer 이벤트"| bot
 ```
 
-오디오 콜백은 PCM을 합성하고 다음 필터로 전달합니다. 트랙 로드, 분석, 블로킹 대기는 다른 경로에서 처리합니다. 샘플 단위의 제한된 큐가 디코더 청크 크기 차이를 흡수하며, 부족한 샘플은 0으로 채우고 초과 버퍼는 제한합니다.
+### PCM 경로와 분석 격리
 
-상태는 오디오 콜백, 플레이어 콜백, 스케줄러, 순서가 보장되는 프로토콜 실행기가 함께 접근합니다. 길드 상태 락과 별도의 플레이어 변경 락으로 전환을 조율합니다. 필터는 처리 시 길드 믹서를 조회하며, 피더 선출로 겹친 필터 체인이 같은 서브 오디오를 중복 소비하지 않게 합니다. 소유권과 락 순서는 [아키텍처 문서](docs/architecture.md)를 참고합니다.
+```mermaid
+flowchart LR
+	main["메인 PCM"] --> mix["MixerFilter"] --> downstream["후속 필터"] --> voice["Opus 인코딩 후 Discord"]
+	secondary["서브 PCM"] --> tempo["선택적 템포 조절"] --> queue["SiphonQueue"] --> mix
+	overlay["병렬 공지 PCM 큐"] --> mix
+	analysis["분석 PCM"] --> measurements["무음, 음량, BPM, 전환 특성"]
+```
+
+Discord로 출력하는 플레이어는 메인 하나입니다. 서브 캡처 큐는 PCM과 소스 진행량을 함께 보관합니다. 분석용 PCM은 별도 플레이어·큐에 머물고 측정 결과만 전환과 게인에 반영합니다. 순차 공지는 겹침 재생과 서브 플레이어를 공유하지만 병렬 공지는 각각 별도 큐를 사용합니다.
+
+### 핸드오프와 봇 큐 동기화
+
+```mermaid
+sequenceDiagram
+	participant Bot as 봇
+	participant Mixer as 믹서
+	participant Main as 메인 플레이어
+	Mixer-->>Bot: MixerNeedNextTrackEvent
+	Bot->>Mixer: 트랙, 에포크, 키로 장전
+	Mixer-->>Bot: ARMED 수락, 분석은 진행 중일 수 있음
+	Mixer->>Mixer: 전환 계획 후 서브 PCM 합성
+	Mixer-->>Bot: 겹침을 사용하면 overlapStart
+	Mixer->>Main: 소비한 소스 위치에서 다음 곡 복제본 재생
+	Mixer-->>Bot: MixerAdvancedEvent
+	Bot->>Bot: 재생 호출 없이 예약한 큐 항목 확정
+```
+
+핸드오프에서도 메인 플레이어는 유지합니다. 다음 곡의 복제본을 만들고 실제 시작 위치에 소비한 소스 샘플의 진행량을 더해 탐색합니다. 디코더는 버퍼 때문에 청취 지점보다 앞설 수 있으며 템포 조절 시 출력 시간과 소스 진행량도 다릅니다. 디코더 위치를 그대로 쓰면 아직 듣지 않은 부분을 건너뛸 수 있습니다.
+
+| 관심사 | 담당 |
+| --- | --- |
+| 전체 큐, 반복된 같은 음원의 항목 구분, 사용자 선택 | 봇 |
+| 다음 곡 장전 슬롯, 에포크 검증, JIT 요청 | `ProtocolController`, `EpochGate` |
+| 서브 재생, 전환 계획, 게인, 오버레이 | `GuildMixer` |
+| 백그라운드 측정과 공용 캐시 | `TrackAnalysisService`, `AnalysisCaches` |
+| PCM 게인 적용, 합성, 다음 필터 전달 | `MixerFilter` |
+
+### 스레딩과 교체 플레이어
+
+공용 스케줄러는 20 ms마다 서브 출력을 배출하고 다섯 틱마다 전환을 검사합니다. 분석은 공용 워커 풀, 프로토콜의 순서가 필요한 작업은 길드별 실행기를 사용합니다. 오디오 콜백과 플레이어 콜백도 상태에 접근합니다.
+
+오디오 콜백에서는 PCM을 합성하고 후속 필터로 전달합니다. 트랙 로드, 분석, 블로킹 대기는 다른 경로에서 처리합니다. 샘플 단위의 제한된 큐가 청크 크기 차이를 흡수하고, 언더플로는 0으로 채우며 오버플로는 오래된 오디오를 제거합니다.
+
+길드 상태 락은 전환 결정을 보호하고 `playerMutationLock`은 메인 플레이어 변경을 직렬화합니다. 실제 플레이어 변경 전에는 상태 락을 놓고 에포크·순번·트랙 동일성을 다시 검사합니다. 필터는 청크마다 현재 길드 믹서를 조회하므로 재접속으로 교체된 인스턴스를 사용할 수 있습니다. 피더 선출로 한 필터 체인만 공용 게인과 서브 PCM을 진행시킵니다.
+
+[아키텍처 문서](docs/architecture.md)에 실행 문맥, 락 순서, 오디오 흐름, 프로토콜 상태 차트가 있습니다. [상세 연동 가이드](examples/lavalink-client/README.ko.md)는 큐 예약, 이벤트 중복 처리, 재시도·재접속 복구, 곡 경계 옵션을 설명합니다.
 
 ## 소스 빌드
 

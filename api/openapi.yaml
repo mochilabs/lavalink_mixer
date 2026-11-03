@@ -47,7 +47,8 @@ info:
     validated format. The server retains 64 recent fingerprints in memory.
     A retained matching key returns a duplicate response before epoch/window checks.
     A mismatched fingerprint returns HTTP 422. Fingerprints are operation-specific,
-    not full JSON hashes: arm uses the encoded track or empty marker, invalidate
+    not full JSON hashes: arm uses the encoded track or empty marker plus
+    preserve/start/end options, invalidate
     uses the operation name, override uses action plus encoded track, and reset
     uses the supplied epoch. For arm, invalidate, and override, new keys with
     equal epochs are accepted; lower epochs return HTTP 409. Use a new key for each new logical command.
@@ -159,12 +160,12 @@ components:
           type: integer
           format: int64
           minimum: 0
-          description: Optional minimum start position of the incoming track in milliseconds. Omit for 0. Requires a non-empty seekable track with at least 500ms remaining. Applied before overlap or gapless playback, including when preserveTransition is true. Included in the idempotency fingerprint.
+          description: Optional minimum start position of the incoming track in milliseconds. Omit for 0. Requires a non-empty track. A nonzero position requires a seekable track with more than 500ms remaining. Applied before overlap or gapless playback, including when preserveTransition is true. Included in the idempotency fingerprint.
         outgoingEndPositionMs:
           type: integer
           format: int64
           minimum: 501
-          description: Optional effective end of the currently playing track in milliseconds, for example the start of a SponsorBlock outro. The mixer ends its fade and hands off by this point. Requires a non-empty next track, a seekable current track, and preserveTransition=false. A cutoff already passed when armed is ignored safely. Included in the idempotency fingerprint.
+          description: Optional effective end of the currently playing track in milliseconds, for example the start of a SponsorBlock outro. The mixer ends its fade and hands off by this point. Requires a non-empty next track, a seekable current track, and preserveTransition=false. The cutoff must be more than 500ms from both track boundaries. A cutoff already passed or within 500ms of the current position when armed is ignored safely. Included in the idempotency fingerprint.
     AnalyzeRequest:
       type: object
       required: [guildId, encodedTrack]

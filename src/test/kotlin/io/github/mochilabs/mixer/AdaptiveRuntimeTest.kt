@@ -76,14 +76,16 @@ class AdaptiveRuntimeTest {
     }
 
     @Test
-    fun `queued warmup never owns or promotes next slot and rejects duplicate queued requests`() {
+    fun `queued warmup never owns or promotes next slot and retains the latest request`() {
         Fixture().use { f ->
             val next = track()
             val warmup = track()
             f.mixer.queueNext(CompletableFuture.completedFuture(next))
             val before = f.mixer.playbackState
             assertTrue(f.mixer.requestPreanalysis(warmup))
-            assertFalse(f.mixer.requestPreanalysis(track()))
+            val latestWarmup = track()
+            assertTrue(f.mixer.requestPreanalysis(latestWarmup), "the latest queued request must be retained")
+            assertEquals(1, f.tasks.size, "only one warmup decoder may be queued")
             assertEquals(next.identifier, f.mixer.nextTrackIdentifier())
             // Complete through the cached path without invoking a decoder: this exercises
             // the same cache-only completion guard used by an already-warmed request.

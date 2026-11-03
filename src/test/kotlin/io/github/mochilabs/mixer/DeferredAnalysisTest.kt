@@ -69,6 +69,68 @@ class DeferredAnalysisTest {
     }
 
     @Test
+    fun `next track warmup waits for the current analysis instead of being dropped`() {
+        val manager = manager()
+        val currentFile = toneFile("mixer-warm-current", 440.0, 6)
+        val nextFile = toneFile("mixer-warm-next", 660.0, 6)
+        val tasks = ArrayDeque<Runnable>()
+        val mixer = GuildMixer(35L, manager, MixerConfig().apply {
+            bpmDetectionEnabled = true
+            bpmScanMs = 5000
+            silenceSkipEnabled = true
+            silenceHeadScanMs = 1500
+            silenceTailScanMs = 2000
+        }, Executor { tasks.addLast(it) })
+        try {
+            val current = loadTrack(manager, currentFile)
+            val next = loadTrack(manager, nextFile)
+            assertTrue(mixer.requestPreanalysis(current))
+            assertTrue(mixer.requestPreanalysis(next), "busy analysis must retain the next warmup")
+            assertEquals(1, tasks.size, "at most one decoder scan should be queued")
+            tasks.removeFirst().run()
+            assertEquals(1, tasks.size, "the deferred next track should be scheduled after the first scan")
+            tasks.removeFirst().run()
+            assertNotNull(AnalysisCaches.featuresHead[next.identifier])
+            assertNotNull(AnalysisCaches.featuresTail[next.identifier])
+            assertNull(mixer.maybeRetryAnalysis())
+        } finally {
+            mixer.destroy()
+            manager.shutdown()
+            currentFile.delete()
+            nextFile.delete()
+        }
+    }
+
+    @Test
+    fun `baseline scan releases a deferred next track warmup`() {
+        val manager = manager()
+        val currentFile = toneFile("mixer-baseline-current", 440.0, 6)
+        val nextFile = toneFile("mixer-baseline-next", 660.0, 6)
+        val tasks = ArrayDeque<Runnable>()
+        val mixer = GuildMixer(36L, manager, MixerConfig().apply {
+            bpmDetectionEnabled = true
+            bpmScanMs = 5000
+        }, Executor { tasks.addLast(it) })
+        try {
+            val current = loadTrack(manager, currentFile)
+            val next = loadTrack(manager, nextFile)
+            mixer.scheduleBaselineAnalysis(current)
+            assertTrue(mixer.requestPreanalysis(next))
+            assertEquals(1, tasks.size)
+            tasks.removeFirst().run()
+            assertEquals(1, tasks.size, "baseline completion should schedule the deferred warmup")
+            tasks.removeFirst().run()
+            assertNotNull(AnalysisCaches.featuresHead[next.identifier])
+            assertNotNull(AnalysisCaches.featuresTail[next.identifier])
+        } finally {
+            mixer.destroy()
+            manager.shutdown()
+            currentFile.delete()
+            nextFile.delete()
+        }
+    }
+
+    @Test
     fun `analysis completes and promotes the pending slot without a live overlap deferring it`() {
         val manager = manager()
         val file = toneFile("mixer-deferred-analysis", 440.0, 8)

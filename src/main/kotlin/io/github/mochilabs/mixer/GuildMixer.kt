@@ -162,6 +162,9 @@ class GuildMixer(
         override val mainPlayer: IPlayer? get() = main
         override val playingTrack: AudioTrack? get() = main?.audioPlayer?.playingTrack
         override val crossfadeMs: Long get() = this@GuildMixer.crossfadeMs
+        override val prefetchLeadMs: Long get() = if (bpmDetectionEnabled && beatmatchEnabled) {
+            (bpmScanMs * 2 + 7000L).coerceAtMost(120_000L)
+        } else 7000L
         override val isXfadeActive: Boolean get() = xfadeActive
         override val isOverlayActive: Boolean get() = overlayActive
 
@@ -246,6 +249,8 @@ class GuildMixer(
     private var pendingNextTrack: AudioTrack? = null
     private var slotRevision: Long = 0L
     private var analysisQueued: Boolean = false
+    /** Latest cache-only request waiting for the guild's single analysis player. */
+    private var deferredWarmup: AudioTrack? = null
     private var preservedStartTrack: AudioTrack? = null
     private data class PlannedTrim(val outgoing: AudioTrack, val incoming: AudioTrack, val decision: AdaptiveTransitionDecision.SilenceTrim)
     private var adaptiveTrim: PlannedTrim? = null
@@ -1414,6 +1419,7 @@ class GuildMixer(
         val (sub, parallels) = synchronized(lock) {
             pendingNextTrack = null
             readyNextTrack = null
+            deferredWarmup = null
             protocol.clearArmedLocked()
             subTrack = null
             xfadeActive = false
@@ -2156,6 +2162,7 @@ class GuildMixer(
                 track.makeClone()
             } catch (e: Exception) {
                 synchronized(lock) { analysisState.active = false }
+                drainDeferredWarmup()
                 return@execute
             }
             try {
@@ -2175,6 +2182,7 @@ class GuildMixer(
                 log.warn("baseline loudness scan failed on guild {}", guildId, e)
             } finally {
                 synchronized(lock) { analysisState.active = false }
+                drainDeferredWarmup()
             }
         }
     }
@@ -2214,21 +2222,43 @@ class GuildMixer(
         synchronized(lock) {
             val needSilence = includeSilence && !AnalysisCaches.trim.contains(id)
             val needBpm = bpmDetectionEnabled && needsBpmAnalysisLocked(id)
-            if ((!needSilence && !needBpm) || !track.isSeekable || track.duration <= 0 ||
-                analysisQueued || analysisState.active) return false
-            analysisQueued = true
-        }
-        try {
-            analysisExecutor.execute {
-                try { analyzeBlocking(track, cacheOnly = true, includeSilence = includeSilence) }
-                catch (e: Exception) { log.warn("preanalysis failed on guild {}", guildId, e) }
-                finally { synchronized(lock) { analysisQueued = false } }
+            if ((!needSilence && !needBpm) || !track.isSeekable || track.duration <= 0) return false
+            if (analysisQueued || analysisState.active) {
+                deferredWarmup = track
+                return true
             }
+            analysisQueued = true
+            deferredWarmup = null
+        }
+        return scheduleWarmup(track)
+    }
+
+    private fun scheduleWarmup(track: AudioTrack): Boolean {
+        return try {
+            analysisExecutor.execute {
+                try { analyzeBlocking(track, cacheOnly = true, includeSilence = silenceSkipEnabled) }
+                catch (e: Exception) { log.warn("preanalysis failed on guild {}", guildId, e) }
+                finally {
+                    synchronized(lock) { analysisQueued = false }
+                    drainDeferredWarmup()
+                }
+            }
+            true
         } catch (e: java.util.concurrent.RejectedExecutionException) {
             synchronized(lock) { analysisQueued = false }
-            return false
+            false
         }
-        return true
+    }
+
+    private fun drainDeferredWarmup() {
+        val next = synchronized(lock) {
+            if (analysisQueued || analysisState.active) return
+            deferredWarmup?.also {
+                deferredWarmup = null
+                analysisQueued = true
+            }
+        }
+        if (next != null) scheduleWarmup(next)
     }
 
     private fun needsBpmAnalysisLocked(identifier: String): Boolean =
@@ -2257,6 +2287,9 @@ class GuildMixer(
                 return
             }
             if (analysisState.active) {
+                // A queued cache-only warmup may reach this gate after a normal scan starts.
+                // Retain it; the scan owner or warmup worker will drain it when idle.
+                if (cacheOnly && deferredWarmup == null) deferredWarmup = track
                 log.debug(
                     "analysis deferred on guild {}: another scan is running; will retry",
                     guildId,
@@ -2367,6 +2400,7 @@ class GuildMixer(
             synchronized(lock) { analysisState.noteFailureLocked(identifier) }
         } finally {
             synchronized(lock) { analysisState.active = false }
+            drainDeferredWarmup()
         }
     }
 

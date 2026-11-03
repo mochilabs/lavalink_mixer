@@ -39,11 +39,11 @@ Lavalink의 `application.yml` 파일에 플러그인 의존성을 추가합니�
 ```yaml
 lavalink:
   plugins:
-    - dependency: "io.github.mochilabs.mixer:mixer-plugin:0.3.8"
+    - dependency: "io.github.mochilabs.mixer:mixer-plugin:0.3.9"
       repository: "https://maven.pkg.github.com/mochilabs/lavalink_mixer"
 ```
 
-또는 [Releases](https://github.com/mochilabs/lavalink_mixer/releases)에서 `lavalink_mixer-0.3.8.jar`를 다운로드하여 Lavalink의 `plugins/` 디렉터리에 넣고 Lavalink를 재시작합니다.
+또는 [Releases](https://github.com/mochilabs/lavalink_mixer/releases)에서 `lavalink_mixer-0.3.9.jar`를 다운로드하여 Lavalink의 `plugins/` 디렉터리에 넣고 Lavalink를 재시작합니다.
 
 ### 2. 필터 활성화 (길드별 1회 필수)
 
@@ -171,7 +171,7 @@ $$
 ```text
 [곡 A 재생 중]
         │
-        ▼ (남은 재생 시간이 crossfadeMs + 7000ms 에 도달)
+        ▼ (남은 재생 시간이 프리페치 구간에 도달; BPM 비트매칭 시 더 일찍)
 서버가 WebSocket 이벤트 발송: MixerNeedNextTrackEvent
         │
         ▼
@@ -193,6 +193,7 @@ $$
 - **단조 증가 에포크(Epoch)**: 지연된 이전 요청이 뒤늦게 도착하더라도 에포크 검증을 통해 `HTTP 409 Conflict`로 안전하게 무시합니다.
 - **멱등성 키(Idempotency-Key)**: 네트워크 재시도 시 동일 키에 대해 중복 연산 없이 안전하게 결과를 반환합니다.
 - **클라이언트 강제 오버라이드**: 사용자가 즉시 스킵(`PLAY_NOW`)하거나 정지(`STOP`)하면 진행 중이던 크로스페이드 상태를 즉시 무효화하고 즉각 전환합니다.
+- **다음 곡 요청 시점**: 기본값은 `crossfadeMs + 7000ms` 전입니다. BPM 검출과 비트 매칭이 켜지면 `crossfadeMs + min(2 × bpmScanMs + 7000ms, 120000ms)` 전으로 앞당깁니다. 빈 큐를 응답한 뒤 곡이 추가되면 `queue/invalidate`로 다시 요청할 수 있습니다.
 
 ---
 
@@ -204,7 +205,7 @@ $$
 
 | 메서드 | 경로 | 헤더 | 바디 | 설명 |
 |---|---|---|---|---|
-| `GET` | `/mixer/info` | — | — | 플러그인 정보 반환 `{ protocolVersion: 2, version: "0.3.8" }` |
+| `GET` | `/mixer/info` | — | — | 플러그인 정보 반환 `{ protocolVersion: 2, version: "0.3.9" }` |
 | `GET` | `/mixer/state?guildId=` | — | — | 믹서 상태, 현재 설정, 전환 판정 이유, BPM 조회 |
 | `POST` | `/mixer/analyze` | — | `{ guildId, encodedTrack }` | 다음 후보곡 사전 분석 캐싱 요청 (202 반환) |
 | `POST` | `/mixer/queue/arm` | `Idempotency-Key` | `{ guildId, epoch, encodedTrack?, isEmpty, preserveTransition? }` | 다음 곡 장전 (JIT 전환 준비) |
@@ -327,10 +328,10 @@ Discord 음성 채널은 연결당 단 하나의 Opus 스트림만 수용하므�
 ./gradlew test
 
 # 배포용 아티팩트 빌드
-./gradlew build -Pversion=0.3.8
+./gradlew build -Pversion=0.3.9
 ```
 
-빌드 결과물: `build/libs/lavalink_mixer-0.3.8.jar`.
+빌드 결과물: `build/libs/lavalink_mixer-0.3.9.jar`.
 
 ---
 

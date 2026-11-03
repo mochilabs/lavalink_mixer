@@ -22,7 +22,9 @@ info:
        POST /mixer/bpm can enable detection and beat matching together.
        POST /mixer/beatmatch does not enable BPM detection.
     3. Track transitions are driven by the server: the plugin fires
-       `MixerNeedNextTrackEvent` when ~7s + crossfadeMs remain. The client
+       `MixerNeedNextTrackEvent` when crossfadeMs + 7s remain, or earlier when
+       BPM detection and beat matching are enabled (crossfadeMs plus up to
+       120s based on the configured BPM scan window). The client
        MUST respond by POSTing to `queue/arm` with the next track and the
        expected monotonic epoch. If the user changes the queue, the client
        sends `queue/invalidate`. On explicit user stops/skips, the client
@@ -60,7 +62,9 @@ info:
     through a handler that supports protocol v2.
     - `{"op":"mixer","type":"MixerNeedNextTrackEvent","guildId":"<id>",
        "remainingMs":<ms>,"currentTrackEncoded":"<base64>"}`
-      - JIT event fired at T_window (crossfadeMs + 7000ms) before track end.
+      - JIT event fired at T_window before track end: crossfadeMs + 7000ms,
+        or crossfadeMs + min(2 * bpmScanMs + 7000ms, 120000ms) with BPM
+        detection and beat matching enabled.
     - `{"op":"mixer","type":"MixerAdvancedEvent","guildId":"<id>","epoch":<n>,
        "encodedTrack":"<base64>","handoffType":"CROSSFADE"|"GAPLESS",
        "handoffId":"<uuid>"}`
@@ -718,8 +722,9 @@ paths:
       summary: Warm BPM and adaptive feature caches without arming playback
       description: |
         Optional best-effort warmup before the normal JIT arm. Requires BPM detection
-        and a seekable, known-length track. At most one warmup is queued per guild;
-        busy, disabled, already cached or unsupported tracks return accepted=false.
+        and a seekable, known-length track. One active or queued scan and the latest
+        deferred warmup are retained per guild. Busy scans accept the latest
+        warmup request; disabled, already cached or unsupported tracks return accepted=false.
         A 202 receipt does not mean analysis succeeded. Normal JIT analysis remains
         the fallback. No epoch or Idempotency-Key is required: results are track-keyed
         cache metadata and never create or replace an armed slot.

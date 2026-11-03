@@ -28,6 +28,7 @@ internal interface MixerCore {
     val mainPlayer: IPlayer?
     val playingTrack: AudioTrack?
     val crossfadeMs: Long
+    val prefetchLeadMs: Long
     val isXfadeActive: Boolean
     val isOverlayActive: Boolean
 
@@ -73,6 +74,7 @@ internal class ProtocolController(
     val advanceSeq = AtomicLong(0L)
     /** Last advanceSeq whose MixerNeedNextTrackEvent was actually dispatched (dedup). */
     @Volatile private var needNextDispatchedAtSeq: Long = -1L
+    private var needNextRequestGeneration: Long = 0L
 
     // Order-sensitive submissions (override STOP/PLAY_NOW, invalidate refires,
     // JIT delayed fires): a single-thread scheduled executor preserves FIFO order
@@ -186,6 +188,9 @@ internal class ProtocolController(
 
             core.clearNextLocked()
             clearArmedLocked()
+            needNextRequestGeneration++
+            needNextFiredAtSeq = -1L
+            needNextDispatchedAtSeq = -1L
             if (playbackState == PlaybackState.ARMED || playbackState == PlaybackState.NO_NEXT) {
                 playbackState = PlaybackState.PLAYING
             }
@@ -195,10 +200,11 @@ internal class ProtocolController(
                 if (playing != null) {
                     val pos = core.safePosition(playing)
                     val dur = playing.duration
-                    val tWindow = core.crossfadeMs + 7000L
+                    val tWindow = core.crossfadeMs + core.prefetchLeadMs
                     if (dur > 0 && (dur - pos <= tWindow || dur <= tWindow)) {
                         refired = true
                         val refireSeq = advanceSeq.get()
+                        val requestGeneration = needNextRequestGeneration
                         needNextFiredAtSeq = refireSeq
                         val now = System.currentTimeMillis()
                         val delayMs = maxOf(50L, if (now < gate.windowOpenAt) gate.windowOpenAt - now + 20L else 50L)
@@ -207,6 +213,7 @@ internal class ProtocolController(
                                 if (playbackState == PlaybackState.PLAYING &&
                                     core.playingTrack === playing &&
                                     advanceSeq.get() == refireSeq &&
+                                    needNextRequestGeneration == requestGeneration &&
                                     needNextDispatchedAtSeq != refireSeq
                                 ) {
                                     needNextDispatchedAtSeq = refireSeq
@@ -353,13 +360,15 @@ internal class ProtocolController(
 
         val pos = core.safePosition(playing)
         val duration = playing.duration
-        val tWindow = core.crossfadeMs + 7000L
+        val tWindow = core.crossfadeMs + core.prefetchLeadMs
 
         if (duration > 0 && (duration - pos <= tWindow || duration <= tWindow)) {
             val waitForWindowMs: Long
+            val requestGeneration: Long
             synchronized(core.lock) {
                 if (needNextFiredAtSeq == seq || needNextDispatchedAtSeq == seq) return
                 needNextFiredAtSeq = seq
+                requestGeneration = needNextRequestGeneration
                 val now = System.currentTimeMillis()
                 waitForWindowMs = if (now < gate.windowOpenAt) gate.windowOpenAt - now + 20L else 0L
             }
@@ -370,6 +379,7 @@ internal class ProtocolController(
                     if (playbackState == PlaybackState.PLAYING &&
                         core.playingTrack === playing &&
                         advanceSeq.get() == seq &&
+                        needNextRequestGeneration == requestGeneration &&
                         needNextDispatchedAtSeq != seq
                     ) {
                         needNextDispatchedAtSeq = seq

@@ -98,7 +98,9 @@ distinct. `arm()` sets `ARMED` before scheduling analysis. It does not imply
 that analysis is complete.
 
 `checkJitWindow()` requests the next track when the known duration has at most
-`crossfadeMs + 7000` ms remaining. Short tracks receive a 500 ms settle delay.
+`crossfadeMs + 7000` ms remaining, or `crossfadeMs + min(2 * bpmScanMs + 7000, 120000)`
+ms when BPM detection and beat matching are enabled. This reserves time for
+head and tail scans. Short tracks receive a 500 ms settle delay.
 The reset grace window can delay dispatch further. Sequence checks suppress
 duplicate notifications and notifications for replaced tracks.
 
@@ -161,9 +163,9 @@ its schedule. Keeping the native delegate alive at unity avoids discarding its t
 Exact native per-output input positions are unavailable: FIFO source integration
 is tested to a tolerance, not claimed sample-exact WSOLA correspondence.
 
-`requestPreanalysis` bounds queued warmup to one per guild and writes only BPM and
-feature caches. It never arms, promotes or changes live gain. Current-track BPM
-analysis can run without a queued next track. Results are track-keyed; normal JIT
+`requestPreanalysis` retains the latest warmup while another scan is queued or
+active, and writes only BPM and feature caches. It never arms, promotes or changes
+live gain. Current-track BPM analysis can run without a queued next track. Results are track-keyed; normal JIT
 arming and epoch checks remain the authority for playback. Explicit preservation
 is an optional arm field included in the idempotency fingerprint, never a global
 sticky album mode.

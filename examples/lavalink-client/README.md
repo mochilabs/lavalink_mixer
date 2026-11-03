@@ -99,6 +99,9 @@ Forward raw Lavalink WebSocket messages to the bot's event handler. On
 `MixerNeedNextTrackEvent`, choose the current next item and POST
 `/mixer/queue/arm` to that node. The request's `encodedTrack` must be the exact
 Lavalink-encoded track. If the bot queue is empty, send `isEmpty: true`.
+The event fires at `crossfadeMs + 7000ms` remaining, or at
+`crossfadeMs + min(2 * bpmScanMs + 7000ms, 120000ms)` when BPM detection and
+beat matching are enabled. This gives the server time to scan both tracks.
 
 ```http
 POST /mixer/queue/arm
@@ -113,7 +116,7 @@ Maintain one monotonically increasing epoch per guild. Use a new idempotency
 key for each logical operation; reuse it only when retrying that same request.
 If the queue head changes after arming, call `/mixer/queue/invalidate` with a
 higher epoch and a new key. The server can re-emit the JIT request when the
-track is still in its transition window.
+track is still in its transition window, including the earlier BPM window.
 
 When the server sends `MixerAdvancedEvent`, remove/advance the corresponding
 local queue item and update now-playing state. **Do not call `play()` for that

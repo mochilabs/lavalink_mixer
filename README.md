@@ -39,11 +39,11 @@ Add the plugin to your Lavalink `application.yml`:
 ```yaml
 lavalink:
   plugins:
-    - dependency: "io.github.mochilabs.mixer:mixer-plugin:0.3.8"
+    - dependency: "io.github.mochilabs.mixer:mixer-plugin:0.3.9"
       repository: "https://maven.pkg.github.com/mochilabs/lavalink_mixer"
 ```
 
-Or manually download `lavalink_mixer-0.3.8.jar` from [Releases](https://github.com/mochilabs/lavalink_mixer/releases) and place it into Lavalink's `plugins/` directory, then restart Lavalink.
+Or manually download `lavalink_mixer-0.3.9.jar` from [Releases](https://github.com/mochilabs/lavalink_mixer/releases) and place it into Lavalink's `plugins/` directory, then restart Lavalink.
 
 ### 2. Enable Filter (Required Once Per Guild)
 
@@ -171,7 +171,7 @@ To enable seamless crossfades, the server needs the next track *before* the curr
 ```text
 [Track A Playing]
         │
-        ▼ (Remaining time reaches crossfadeMs + 7000ms)
+        ▼ (Remaining time reaches the prefetch window; earlier with BPM beat matching)
 Server pushes WebSocket: MixerNeedNextTrackEvent
         │
         ▼
@@ -193,6 +193,7 @@ Client syncs its local queue (client keeps autoSkip: false)
 - **Monotonic Epochs**: Prevents race conditions when arming or skipping. Stale requests with older epochs are rejected with `HTTP 409 Conflict`.
 - **Idempotency Keys**: Network retries with the same `Idempotency-Key` and payload return cached success without duplicate actions. Payload mismatches return `HTTP 422`.
 - **Client Override**: User commands (`STOP`, `PLAY_NOW`) call `POST /mixer/queue/override` to atomically cancel pending crossfades and execute engine mutations immediately.
+- **Prefetch timing**: The window is `crossfadeMs + 7000ms`, or `crossfadeMs + min(2 × bpmScanMs + 7000ms, 120000ms)` when BPM detection and beat matching are enabled. The client can arm `isEmpty: true` and invalidate when its queue changes; the server requests the new head within the same window.
 
 ---
 
@@ -204,7 +205,7 @@ All endpoints accept standard Lavalink `Authorization` headers.
 
 | Method | Path | Header | Body | Description |
 |---|---|---|---|---|
-| `GET` | `/mixer/info` | — | — | Returns `{ protocolVersion: 2, version: "0.3.8" }` |
+| `GET` | `/mixer/info` | — | — | Returns `{ protocolVersion: 2, version: "0.3.9" }` |
 | `GET` | `/mixer/state?guildId=` | — | — | Returns current state, config, transition status, and BPM |
 | `POST` | `/mixer/analyze` | — | `{ guildId, encodedTrack }` | Pre-warms analysis cache before arming (returns 202) |
 | `POST` | `/mixer/queue/arm` | `Idempotency-Key` | `{ guildId, epoch, encodedTrack?, isEmpty, preserveTransition? }` | Arms the next track for JIT transition |
@@ -328,10 +329,10 @@ Requirements: **JDK 17+**
 ./gradlew test
 
 # Full build including artifacts
-./gradlew build -Pversion=0.3.8
+./gradlew build -Pversion=0.3.9
 ```
 
-Artifact output: `build/libs/lavalink_mixer-0.3.8.jar`.
+Artifact output: `build/libs/lavalink_mixer-0.3.9.jar`.
 
 ---
 

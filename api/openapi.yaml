@@ -283,7 +283,7 @@ components:
           description: Track identifier captured atomically with currentTrackBpm. Clients must compare it to their confirmed current track before displaying the value.
         transitionKind:
           type: string
-          description: Most recently selected transition (none, preserve, silence_trim, short_crossfade, crossfade, beat_matched).
+          description: Most recently selected transition (none, preserve, silence_trim, short_crossfade, crossfade, beat_matched). The short_crossfade compatibility label denotes an equal-power fallback; its duration honors crossfadeMs, bounded by available outgoing content.
         decisionReason: { type: [string, 'null'] }
         nextTrackBpm:
           type: [number, 'null']
@@ -919,7 +919,10 @@ paths:
         Changes beat-matching settings without changing BPM detection or crossfade.
         Both must be enabled separately. This endpoint does not require an
         Idempotency-Key. Missing grids, low confidence, or incompatible tempos
-        use ordinary equal-power crossfade when available. Overlap events report
+        use ordinary equal-power crossfade when available. Missing or unknown
+        analysis features retain the configured crossfade duration, bounded by
+        available outgoing content; they do not impose a fixed 1.5-second cap.
+        Overlap events report
         beatMatched and fallbackReason, including bpm_disabled when analysis is off.
         If crossfade cannot be planned, the existing non-overlap advance path remains.
       requestBody:

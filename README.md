@@ -39,11 +39,11 @@ Add the plugin to your Lavalink `application.yml`:
 ```yaml
 lavalink:
   plugins:
-    - dependency: "io.github.mochilabs.mixer:mixer-plugin:0.3.7"
+    - dependency: "io.github.mochilabs.mixer:mixer-plugin:0.3.8"
       repository: "https://maven.pkg.github.com/mochilabs/lavalink_mixer"
 ```
 
-Or manually download `lavalink_mixer-0.3.7.jar` from [Releases](https://github.com/mochilabs/lavalink_mixer/releases) and place it into Lavalink's `plugins/` directory, then restart Lavalink.
+Or manually download `lavalink_mixer-0.3.8.jar` from [Releases](https://github.com/mochilabs/lavalink_mixer/releases) and place it into Lavalink's `plugins/` directory, then restart Lavalink.
 
 ### 2. Enable Filter (Required Once Per Guild)
 
@@ -204,7 +204,7 @@ All endpoints accept standard Lavalink `Authorization` headers.
 
 | Method | Path | Header | Body | Description |
 |---|---|---|---|---|
-| `GET` | `/mixer/info` | — | — | Returns `{ protocolVersion: 2, version: "0.3.7" }` |
+| `GET` | `/mixer/info` | — | — | Returns `{ protocolVersion: 2, version: "0.3.8" }` |
 | `GET` | `/mixer/state?guildId=` | — | — | Returns current state, config, transition status, and BPM |
 | `POST` | `/mixer/analyze` | — | `{ guildId, encodedTrack }` | Pre-warms analysis cache before arming (returns 202) |
 | `POST` | `/mixer/queue/arm` | `Idempotency-Key` | `{ guildId, epoch, encodedTrack?, isEmpty, preserveTransition? }` | Arms the next track for JIT transition |
@@ -291,7 +291,10 @@ GET /mixer/state?guildId=123456789012345678
 ```
 Look at `transitionKind` and `decisionReason`:
 - `"transitionKind": "beat_matched"` → Successful beat-matched automix.
-- `"transitionKind": "short_crossfade"` → Equal-power crossfade fallback (e.g. tempo difference exceeded `maxTempoChange` or key clash).
+- `"transitionKind": "short_crossfade"` → Equal-power crossfade fallback (e.g. missing analysis, tempo difference exceeding `maxTempoChange`, or key clash). This compatibility label does not mean a fixed short fade: the configured `crossfadeMs` is retained, bounded by available outgoing content. Missing/unknown features no longer reduce a 10-second setting to 1.5 seconds.
+
+Tail analysis validates completion against the trimmed content end. A complete
+scan that excludes trailing silence remains usable for BPM and transition caches.
 
 ---
 
@@ -325,10 +328,10 @@ Requirements: **JDK 17+**
 ./gradlew test
 
 # Full build including artifacts
-./gradlew build -Pversion=0.3.7
+./gradlew build -Pversion=0.3.8
 ```
 
-Artifact output: `build/libs/lavalink_mixer-0.3.7.jar`.
+Artifact output: `build/libs/lavalink_mixer-0.3.8.jar`.
 
 ---
 

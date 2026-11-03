@@ -31,10 +31,7 @@ object AdaptiveTransitionPlanner {
         var selectedStart = incomingLeadMs.coerceAtLeast(0L)
 
         fun short(reason: String) = AdaptiveTransitionDecision.ShortCrossfade(
-            when (reason) {
-                "missing_features", "unknown_features" -> minOf(1500L, requestedCrossfadeMs, selectedEnd)
-                else -> minOf(requestedCrossfadeMs, selectedEnd)
-            },
+            minOf(requestedCrossfadeMs, selectedEnd),
             reason,
             selectedEnd,
             selectedStart,

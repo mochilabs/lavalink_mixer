@@ -211,7 +211,9 @@ internal class TrackAnalysisService(
             }
             if (duration > 0 && duration < Long.MAX_VALUE / 2) {
                 featuresHead = featuresHead?.let { guardFeatureWindow(it, minOf(duration, settings.bpmScanMs)) }
-                featuresTail = featuresTail?.let { guardFeatureWindow(it, duration) }
+                // A trimmed tail scan targets audible content, not the discarded file silence.
+                val tailEndMs = (duration - tail).coerceAtLeast(0L)
+                featuresTail = featuresTail?.let { guardFeatureWindow(it, tailEndMs) }
             }
             return TrackAnalysisResult(trim, loudness, bpm, analysisBroken, bpmHead, bpmTail, featuresHead, featuresTail)
         } finally {
@@ -262,7 +264,7 @@ internal class TrackAnalysisService(
             val collected = collectFrom(track, factory, tailStartMs, msToSamples(bpmScanMs + 2000))
             if (collected.isEmpty()) null else {
                 val grid = BpmDetector.analyzeGrid(collected, sampleRate = SAMPLE_RATE, windowStartMs = tailStartMs)
-                TailAnalysis(grid, guardFeatureWindow(TransitionFeatureAnalyzer.analyze(collected, tailStartMs, grid), duration))
+                TailAnalysis(grid, guardFeatureWindow(TransitionFeatureAnalyzer.analyze(collected, tailStartMs, grid), contentEndMs))
             }
         } finally {
             stopTrack()

@@ -81,7 +81,10 @@ POST /mixer/bpm
 
 Beat-matched transitions require crossfade, BPM detection, and beat matching all
 enabled. Measurements may not be ready for the first transition; the server
-uses available trim data and otherwise falls back to ordinary crossfade.
+uses available trim data and otherwise falls back to ordinary crossfade. Missing
+or unknown analysis features keep the configured crossfade duration, bounded by
+available outgoing content. The compatibility state label `short_crossfade` does
+not imply a 1.5-second fade.
 
 ## 4. Start the first track normally
 

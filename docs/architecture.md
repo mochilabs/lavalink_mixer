@@ -129,6 +129,9 @@ Analysis decodes through `TrackAnalysisService`, separate from live secondary
 playback. `AnalysisState` serializes scans per guild and limits repeated failures.
 Pending tracks can advance without completed analysis when content ends.
 BPM-only work can retry while the next track is already ready for playback.
+A tail scan validates coverage against trimmed content end, including explicit tail
+reanalysis. Comparing a trimmed scan with full file duration would discard valid
+results as incomplete and prevent cache publication and next-track promotion.
 A successful scan with no beat grid completes that scan rather than triggering
 repeated decodes. The per-guild analysis state remembers the last such completion.
 
@@ -147,6 +150,9 @@ key candidates and boundary candidates from the existing BPM PCM scans.
 `AdaptiveTransitionPlanner` compares candidate pairs within a 2-second nonsilent
 skip budget, and selects preserve, silence trim, short crossfade or beat matching.
 The thresholds are conservative heuristics awaiting representative music calibration.
+Equal-power fallback retains the configured crossfade duration, bounded by outgoing
+content; missing/unknown features do not impose a separate short-duration cap.
+The wire label `short_crossfade` remains for compatibility.
 `BeatMatchPolicy` chooses compatible beat grids and a 2-, 4-, or 8-beat fade.
 `CrossfadePlan.overlapMs` controls gain fading; `recoveryMs` reserves an incoming-only
 speed recovery inside the total window. `TempoEnvelope` runs on projected output

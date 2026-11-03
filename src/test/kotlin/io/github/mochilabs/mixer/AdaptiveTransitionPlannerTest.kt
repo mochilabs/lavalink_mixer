@@ -28,11 +28,27 @@ class AdaptiveTransitionPlannerTest {
     }
 
     @Test
-    fun `missing and unknown features choose bounded fallback`() {
-        val missing = assertIs<AdaptiveTransitionDecision.ShortCrossfade>(decide(out = null))
-        assertEquals("missing_features", missing.reason)
-        assertEquals(1500L, missing.durationMs)
-        assertIs<AdaptiveTransitionDecision.ShortCrossfade>(decide(out = features().copy(unknownReason = "short_window")))
+    fun `missing and unknown features preserve configured crossfade duration`() {
+        for ((out, inc, reason) in listOf(
+            Triple(null, features(), "missing_features"),
+            Triple(features(), null, "missing_features"),
+            Triple(features().copy(unknownReason = "short_window"), features(), "unknown_features"),
+        )) {
+            for (requested in listOf(500L, 5000L, 10000L)) {
+                val decision = assertIs<AdaptiveTransitionDecision.ShortCrossfade>(
+                    AdaptiveTransitionPlanner.decide(out, inc, grid, grid, 60000, requested),
+                )
+                assertEquals(reason, decision.reason)
+                val plan = assertNotNull(AdaptiveTransitionPlanner.toCrossfadePlan(decision, 60000))
+                assertEquals(requested, plan.overlapMs)
+                assertEquals(60000L - requested, plan.startMs)
+                assertTrue(!plan.beatMatched)
+            }
+        }
+        val shortTrack = assertIs<AdaptiveTransitionDecision.ShortCrossfade>(
+            AdaptiveTransitionPlanner.decide(null, null, null, null, 2000, 10000),
+        )
+        assertEquals(2000L, shortTrack.durationMs)
     }
 
     @Test

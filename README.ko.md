@@ -39,11 +39,11 @@ Lavalink의 `application.yml` 파일에 플러그인 의존성을 추가합니�
 ```yaml
 lavalink:
   plugins:
-    - dependency: "io.github.mochilabs.mixer:mixer-plugin:0.3.7"
+    - dependency: "io.github.mochilabs.mixer:mixer-plugin:0.3.8"
       repository: "https://maven.pkg.github.com/mochilabs/lavalink_mixer"
 ```
 
-또는 [Releases](https://github.com/mochilabs/lavalink_mixer/releases)에서 `lavalink_mixer-0.3.7.jar`를 다운로드하여 Lavalink의 `plugins/` 디렉터리에 넣고 Lavalink를 재시작합니다.
+또는 [Releases](https://github.com/mochilabs/lavalink_mixer/releases)에서 `lavalink_mixer-0.3.8.jar`를 다운로드하여 Lavalink의 `plugins/` 디렉터리에 넣고 Lavalink를 재시작합니다.
 
 ### 2. 필터 활성화 (길드별 1회 필수)
 
@@ -204,7 +204,7 @@ $$
 
 | 메서드 | 경로 | 헤더 | 바디 | 설명 |
 |---|---|---|---|---|
-| `GET` | `/mixer/info` | — | — | 플러그인 정보 반환 `{ protocolVersion: 2, version: "0.3.7" }` |
+| `GET` | `/mixer/info` | — | — | 플러그인 정보 반환 `{ protocolVersion: 2, version: "0.3.8" }` |
 | `GET` | `/mixer/state?guildId=` | — | — | 믹서 상태, 현재 설정, 전환 판정 이유, BPM 조회 |
 | `POST` | `/mixer/analyze` | — | `{ guildId, encodedTrack }` | 다음 후보곡 사전 분석 캐싱 요청 (202 반환) |
 | `POST` | `/mixer/queue/arm` | `Idempotency-Key` | `{ guildId, epoch, encodedTrack?, isEmpty, preserveTransition? }` | 다음 곡 장전 (JIT 전환 준비) |
@@ -290,7 +290,10 @@ Content-Type: application/json
 GET /mixer/state?guildId=123456789012345678
 ```
 - `"transitionKind": "beat_matched"` → 비트 매칭 오토믹스 정상 수행.
-- `"transitionKind": "short_crossfade"` → 이퀄 파워 크로스페이드로 전환 (예: BPM 차이가 6%를 초과하거나 조성이 충돌한 경우).
+- `"transitionKind": "short_crossfade"` → 이퀄 파워 크로스페이드로 전환 (예: 분석 데이터 부족, 설정한 템포 차이 한도 초과, 조성 충돌). 호환성을 위해 유지하는 이름이며, 길이가 항상 짧다는 뜻은 아닙니다. 설정한 `crossfadeMs`를 사용하되 곡의 사용 가능한 길이를 넘지 않습니다. 분석 데이터가 없거나 불확실하다고 10초 설정을 1.5초로 줄이지 않습니다.
+
+테일 분석의 완료 여부는 끝무음을 제거한 음악 끝 지점으로 판단합니다.
+끝무음을 제외하고 정상적으로 수집한 분석 결과도 BPM·전환 캐시에 반영됩니다.
 
 ---
 
@@ -324,10 +327,10 @@ Discord 음성 채널은 연결당 단 하나의 Opus 스트림만 수용하므�
 ./gradlew test
 
 # 배포용 아티팩트 빌드
-./gradlew build -Pversion=0.3.7
+./gradlew build -Pversion=0.3.8
 ```
 
-빌드 결과물: `build/libs/lavalink_mixer-0.3.7.jar`.
+빌드 결과물: `build/libs/lavalink_mixer-0.3.8.jar`.
 
 ---
 

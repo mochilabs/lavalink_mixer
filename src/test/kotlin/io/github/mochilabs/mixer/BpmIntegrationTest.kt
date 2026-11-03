@@ -148,14 +148,45 @@ class BpmIntegrationTest {
             val tail = assertNotNull(result.bpmTail)
             assertEquals(120f, tail.bpm)
             val features = assertNotNull(result.featuresTail)
+            assertNull(features.unknownReason, "a complete trimmed tail must be usable by the mixer")
             assertTrue(features.windowStartMs in 15_000..16_000, "tail starts at ${features.windowStartMs}")
             assertTrue(tail.phaseMs in 15_000..16_500, "tail phase=${tail.phaseMs}")
 
             val measured = assertNotNull(service.measureTailAnalysis(track, 12000, trim.trailMs))
             assertEquals(features.windowStartMs, measured.features.windowStartMs)
+            assertNull(measured.features.unknownReason, "explicit tail reanalysis must validate the trimmed endpoint")
             assertEquals(120f, assertNotNull(measured.grid).bpm)
         } finally {
             service.destroy()
+            manager.shutdown()
+            file.delete()
+        }
+    }
+
+    @Test
+    fun `trimmed tail analysis publishes usable grids for queued track`() {
+        val manager = manager()
+        val file = introThenBeatFile("mixer-trimmed-cache", introSec = 0, bpm = 120.0,
+            totalSec = 50, contentEndSec = 28, sourceRate = 44100)
+        val mixer = GuildMixer(47L, manager, MixerConfig().apply {
+            bpmDetectionEnabled = true
+            bpmScanMs = 12000
+            silenceSkipEnabled = true
+            silenceThresholdDb = -50f
+            silenceMinSoundMs = 1
+            silenceHeadScanMs = 5000
+            silenceTailScanMs = 25000
+        }, java.util.concurrent.Executor { it.run() })
+        try {
+            val track = loadTrack(manager, file)
+            mixer.queueNext(CompletableFuture.completedFuture(track))
+            mixer.analyzeBlocking(track)
+            assertEquals(120f, assertNotNull(mixer.peekNextBpm(), "completed analysis must reach the playback cache").bpm)
+            assertNull(assertNotNull(AnalysisCaches.featuresTail[track.identifier]).unknownReason)
+            assertEquals(120f, assertNotNull(AnalysisCaches.bpmTail[track.identifier]).bpm)
+            assertNull(mixer.maybeRetryAnalysis(), "complete trimmed scans must not exhaust retries")
+        } finally {
+            mixer.destroy()
             manager.shutdown()
             file.delete()
         }

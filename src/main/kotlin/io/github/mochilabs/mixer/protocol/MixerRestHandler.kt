@@ -2,6 +2,7 @@ package io.github.mochilabs.mixer
 
 import com.sedmelluq.discord.lavaplayer.track.AudioTrack
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerialName
 import org.slf4j.LoggerFactory
 import org.springframework.http.HttpStatus
 import org.springframework.http.ResponseEntity
@@ -24,6 +25,7 @@ data class PluginInfoResponse(
     val version: String,
     val incomingStartPositionSupported: Boolean,
     val outgoingEndPositionSupported: Boolean,
+    val keyDetectionSupported: Boolean,
 )
 
 @Serializable
@@ -131,6 +133,50 @@ data class BpmRequest(
 )
 
 @Serializable
+data class KeyRequest(val guildId: String, val enabled: Boolean, val scanMs: Long? = null)
+
+@Serializable
+sealed class TrackKeyResponse {
+    abstract val identifier: String
+    abstract val windowStartMs: Long
+    abstract val windowEndMs: Long
+
+    @Serializable
+    @SerialName("estimated")
+    data class Estimated(
+        override val identifier: String,
+        override val windowStartMs: Long,
+        override val windowEndMs: Long,
+        val key: String,
+        val scale: String,
+        val confidence: Float,
+    ) : TrackKeyResponse()
+
+    @Serializable
+    @SerialName("unknown")
+    data class Unknown(
+        override val identifier: String,
+        override val windowStartMs: Long,
+        override val windowEndMs: Long,
+        val reason: String,
+    ) : TrackKeyResponse()
+}
+
+private fun GuildMixer.TrackKey.toResponse(): TrackKeyResponse {
+    val start = analysis.windowStartMs
+    val end = analysis.windowEndMs
+    return when (val estimate = analysis.estimate) {
+        is KeyEstimate.Unknown -> TrackKeyResponse.Unknown(identifier, start, end, estimate.reason)
+        is KeyEstimate.Candidate -> TrackKeyResponse.Estimated(
+            identifier, start, end,
+            listOf("C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B")[estimate.pitchClass],
+            when (estimate.mode) { KeyMode.MAJOR -> "major"; KeyMode.MINOR -> "minor" },
+            estimate.confidence,
+        )
+    }
+}
+
+@Serializable
 data class BeatmatchRequest(
     val guildId: String,
     val enabled: Boolean,
@@ -195,6 +241,10 @@ data class MixerState(
     /** [nextTrackGain] in dB. */
     val nextTrackGainDb: Float?,
     val bpmDetectionEnabled: Boolean,
+    val keyDetectionEnabled: Boolean,
+    val keyScanMs: Long,
+    val currentTrackKey: TrackKeyResponse?,
+    val nextTrackKey: TrackKeyResponse?,
     val adaptiveTransitionsSupported: Boolean,
     val currentTrackBpm: Float?,
     val currentTrackBpmIdentifier: String?,
@@ -229,6 +279,7 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
                 version = MixerVersion.version,
                 incomingStartPositionSupported = true,
                 outgoingEndPositionSupported = true,
+                keyDetectionSupported = true,
             )
         )
 
@@ -380,6 +431,10 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
                 nextTrackGain = mixer.nextTrackGain(),
                 nextTrackGainDb = mixer.nextTrackGain()?.let { gainToDb(it) },
                 bpmDetectionEnabled = mixer.bpmDetectionEnabled,
+                keyDetectionEnabled = mixer.keyDetectionEnabled,
+                keyScanMs = mixer.keyScanMs,
+                currentTrackKey = mixer.currentKey()?.toResponse(),
+                nextTrackKey = mixer.peekNextKey()?.toResponse(),
                 adaptiveTransitionsSupported = true,
                 currentTrackBpm = tempo?.bpm,
                 currentTrackBpmIdentifier = tempo?.identifier,
@@ -484,6 +539,13 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
             maxTempoChange = body.maxTempoChange,
             minConfidence = body.minConfidence,
         )
+        return stateById(body.guildId, guildId)
+    }
+
+    @PostMapping("/mixer/key")
+    fun key(@RequestBody body: KeyRequest): ResponseEntity<MixerState> {
+        val guildId = gid(body.guildId)
+        plugin.getOrCreate(guildId).updateKey(body.enabled, body.scanMs)
         return stateById(body.guildId, guildId)
     }
 

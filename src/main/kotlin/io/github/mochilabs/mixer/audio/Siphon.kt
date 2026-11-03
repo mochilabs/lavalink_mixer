@@ -238,7 +238,9 @@ class SiphonFactory(
     fun resetSpeed() {
         tempoEnvelope = null
         targetSpeed = 1.0
-        currentStretcher?.reset()
+        // Keep producer-owned native buffers and rate spans intact until the
+        // decoder finishes; the control thread only requests unity speed.
+        currentStretcher?.updateSpeed(1.0)
     }
 
     val effectiveSpeed: Double

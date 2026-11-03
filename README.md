@@ -103,6 +103,8 @@ mixer:
   # BPM detection and beat matching
   bpmDetectionEnabled: false
   bpmScanMs: 30000
+  keyDetectionEnabled: false
+  keyScanMs: 30000
   beatmatchEnabled: false
   maxTempoChange: 0.06
   beatmatchMinConfidence: 0.30
@@ -201,7 +203,7 @@ The four queue-control operations below require `Idempotency-Key`.
 | Method | Path | Request | Result |
 | --- | --- | --- | --- |
 | `GET` | `/mixer/info` | None | Running version, protocol version, and incoming/outgoing position capabilities |
-| `GET` | `/mixer/state?guildId=...` | Query guild ID | State, settings, analysis, gains, BPM, and transition diagnostics |
+| `GET` | `/mixer/state?guildId=...` | Query guild ID | State, settings, analysis, gains, BPM, key estimates, and transition diagnostics |
 | `POST` | `/mixer/analyze` | `{ guildId, encodedTrack }` | HTTP 202 with `accepted`; cache warmup does not arm or start playback |
 | `POST` | `/mixer/queue/arm` | `{ guildId, epoch, encodedTrack?, isEmpty?, preserveTransition?, startPositionMs?, outgoingEndPositionMs? }` | Accept next track or empty queue |
 | `POST` | `/mixer/queue/invalidate` | `{ guildId, epoch }` | Clear armed track and optionally re-request next track |
@@ -217,6 +219,7 @@ These endpoints do not require `Idempotency-Key`.
 | `POST` | `/mixer/crossfade` | `{ guildId, enabled, durationMs? }`, duration 500–30000 ms |
 | `POST` | `/mixer/fade-in` | `{ guildId, durationMs }`, duration 0–10000 ms |
 | `POST` | `/mixer/bpm` | `{ guildId, enabled, scanMs?, beatmatchEnabled?, maxTempoChange?, minConfidence? }` |
+| `POST` | `/mixer/key` | `{ guildId, enabled, scanMs? }` |
 | `POST` | `/mixer/beatmatch` | `{ guildId, enabled, maxTempoChange?, minConfidence? }` |
 | `POST` | `/mixer/silence` | `{ guildId, enabled, thresholdDb?, minSoundMs?, headScanMs?, tailScanMs?, tailConfirmMs? }` |
 | `POST` | `/mixer/normalization` | `{ guildId, enabled, targetLufs? }` |
@@ -258,6 +261,47 @@ Use `GET /mixer/state?guildId=...` while testing:
 - Check `currentTrackBpmIdentifier` against the confirmed current track before displaying `currentTrackBpm`. BPM and gain values can be unknown while analysis is pending or disabled.
 
 `POST /mixer/analyze` optionally warms enabled silence and BPM/feature caches for a seekable candidate. HTTP 202 does not mean analysis is complete. Normalization analysis still occurs through normal arming. Analysis remains separate from live secondary playback.
+
+## Musical key estimation
+
+Enable key analysis independently of BPM and beat matching:
+
+```http
+POST /mixer/key
+Content-Type: application/json
+
+{"guildId":"123456789012345678","enabled":true,"scanMs":30000}
+```
+
+`GET /mixer/info` advertises `keyDetectionSupported: true`. Read
+`currentTrackKey` and `nextTrackKey` from `/mixer/state`:
+
+```json
+{"type":"estimated","identifier":"track-id","windowStartMs":0,"windowEndMs":30000,"key":"G","scale":"minor","confidence":0.7}
+```
+
+Compare each result's `identifier` with the bot's confirmed track before
+showing it. A null result means disabled, pending, absent, or unsupported.
+An inconclusive scan returns `type: "unknown"` with a `reason`, such as
+`silence` or `ambiguous_key`. Unknown results are cached and do not keep retrying.
+
+Analysis uses a separate decoder for a bounded head window of a seekable,
+known-length track. `scanMs` defaults to 30000 and is clamped to 5000–60000 ms.
+Compatible BPM head scans share decoded PCM. `/mixer/analyze` also supports
+key-only warmup without arming playback. The cache is keyed by track identifier;
+changing `scanMs` does not invalidate an existing result.
+
+The result describes the sampled window. Modulation, relative major/minor keys,
+and non-tonal audio can make the estimate ambiguous. Confidence is a heuristic
+score, not a calibrated probability. Real-music accuracy remains uncalibrated.
+
+Transitions prepare the secondary decoder up to two seconds before the fade.
+They wait off the shared scheduler for captured PCM before reducing main gain.
+If preparation runs late, the fade uses the remaining time until handoff without
+discarding the incoming opening to catch up. Without usable PCM, the original
+queued track remains available for gapless advancement.
+
+---
 
 ## Architecture
 

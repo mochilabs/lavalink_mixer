@@ -45,6 +45,8 @@ Use these existing tests as starting points:
 | Stale transitions and handoff | `StaleXfadeAbortTest`, `CrossfadeMixIntegrationTest`, `XfadeVoicePathTest` |
 | Filter chain binding and reconnects | `MixerFilterExtensionTest`, `ChainDiagnosticTest`, `FeederArbitrationTest`, `FirstTrackIntegrationTest` |
 | PCM and gain behavior | `MixerFilterTest`, `GainRampTest`, `SiphonQueueTest` |
+| Transition callback locks and decoder readiness | `PlayerCallbackLockTest`, `OverlapPreparationTest`, `XfadeVoicePathTest` |
+| Musical key estimation and REST metadata | `KeyDetectorTest`, `KeyIntegrationTest`, `TransitionFeaturesTest` |
 | Announcements | `AnnounceQueueTest` |
 | Analysis ownership and retries | `AnalysisIsolatedFromLiveSubTest`, `DeferredAnalysisTest` |
 | Silence and trim | `SilenceAnalyzerTest`, `TailCutDeciderTest`, `TrimTransitionTest` |

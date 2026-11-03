@@ -91,7 +91,7 @@ reject work superseded while that lock was released.
 | Context | Work performed | Coordination |
 | --- | --- | --- |
 | REST request thread | Parse requests, check epochs, accept arms and settings | Guild state lock around compound changes |
-| `mixer-v2-action` | Ordered overrides and delayed JIT dispatch | Player-mutation lock and state rechecks for main-player changes |
+| `mixer-v2-action` | Ordered overrides, callback recovery, overlap preparation, and delayed JIT dispatch | Player-mutation lock and state rechecks for main-player changes |
 | `mixer-loop` | Drain secondary frames every 20 ms, poll every fifth tick, retry analysis, start announcements | Plans state changes before callback-producing operations |
 | `mixer-analysis` pool | Decode clones, measure silence and loudness, extract BPM and features | One active analysis per guild, shared worker limit across guilds |
 | Lavaplayer callbacks | Track start, end, stuck, and failure handling | Identity and generation checks reject obsolete work |
@@ -185,10 +185,28 @@ At crossfade handoff, the incoming track is cloned into the main player.
 Its seek position comes from consumed source samples plus its starting position.
 Tempo-adjusted source progress differs from output sample count. Both differ
 from decoder progress, which includes buffered audio not yet heard.
-When polling starts an overlap late, secondary reads discard the missed portion
-to align with the main sample timeline. Skipped source progress contributes
-to the handoff seek, but not to the audible secondary sample counter.
-An underrun preserves the remaining catch-up work for the next read.
+Secondary reads use output coordinates to account for bounded queue overflow.
+Discarded source progress contributes to the handoff seek, but not to the audible
+secondary sample counter. Underflow zero-fills without inventing source progress.
+
+Player end, stuck, and exception callbacks run while Lavaplayer holds its
+`trackSwitchLock`. They enqueue recovery on the guild's protocol action executor.
+Recovery acquires `playerMutationLock` there and rechecks player identity, epoch,
+sequence, queue identity, and slot revision before acting. Listener registration
+also runs outside the guild state lock. The PCM filter reads a published parallel
+overlay snapshot and volatile sequential-overlay state without acquiring that lock.
+
+Overlap preparation also uses the action executor. Poll schedules it up to two
+seconds before the planned fade, and the worker waits up to two seconds for one
+second of secondary PCM or a fully decoded shorter track. A separate clone feeds
+the secondary player; the original queue slot remains available until commit.
+Epoch, sequence, track, and slot checks cancel stale preparations. A late ready
+source rebases the fade start to the current main sample coordinate, keeping the
+planned handoff and shortening the remaining fade. This prevents `takeAt` from
+discarding newly arrived PCM to chase a window that started before decoding.
+The crossfade secondary pump pauses while at least one second of PCM is banked, so
+early preparation does not drain into queue overflow before the fade. Chunks
+crossing the fade start zero-fill their prefix without consuming incoming PCM.
 
 ### The three playback positions
 
@@ -340,7 +358,7 @@ guide requires `autoSkip: false`. Crossfade advances include a `handoffId`.
 
 ## Analysis and overlays
 
-Silence detection, normalization, and BPM detection default to disabled.
+Silence detection, normalization, BPM detection, and key detection default to disabled.
 Analysis decodes through `TrackAnalysisService`, separate from live secondary
 playback. `AnalysisState` serializes scans per guild and limits repeated failures.
 Pending tracks can advance without completed analysis when content ends.
@@ -351,7 +369,7 @@ results as incomplete and prevent cache publication and next-track promotion.
 A successful scan with no beat grid completes that scan rather than triggering
 repeated decodes. The per-guild analysis state remembers the last such completion.
 
-`AnalysisCaches` stores trim points, loudness, BPM, and head/tail beat grids.
+`AnalysisCaches` stores trim points, loudness, BPM, head/tail beat grids, and key estimates.
 Each cache has a coarse size bound of 1000 and uses the track identifier as its
 key. The key does not include guild settings. Concurrent callers can repeat
 analysis; the cache does not guarantee one decode per identifier.
@@ -363,6 +381,11 @@ tail detector on raw main PCM before gain application.
 
 `TransitionFeatureAnalyzer` extracts bounded energy, rhythm stability, local chroma
 key candidates and boundary candidates from the existing BPM PCM scans.
+`KeyDetector` owns the shared chroma/profile estimator. Independent key analysis
+uses a bounded head scan, reusing BPM PCM when its coverage is sufficient. Its
+cache includes inconclusive results, so silence and ambiguous keys complete a
+scan. REST snapshots include track identity and window coverage. These are local
+major/minor estimates with heuristic confidence, not calibrated whole-song labels.
 `AdaptiveTransitionPlanner` compares candidate pairs within a 2-second nonsilent
 skip budget, and selects preserve, silence trim, short crossfade or beat matching.
 The thresholds are conservative heuristics awaiting representative music calibration.
@@ -378,8 +401,8 @@ Exact native per-output input positions are unavailable: FIFO source integration
 is tested to a tolerance, not claimed sample-exact WSOLA correspondence.
 
 `requestPreanalysis` retains the latest warmup while another scan is queued or
-active, and writes enabled silence, BPM, and feature caches. It never arms, promotes or changes
-live gain. Current-track BPM analysis can run without a queued next track. Results are track-keyed; normal JIT
+active, and writes enabled silence, BPM, feature, and key caches. It never arms, promotes or changes
+live gain. Current-track BPM and key analysis can run without a queued next track. Results are track-keyed; normal JIT
 arming and epoch checks remain the authority for playback. Explicit preservation
 is an optional arm field included in the idempotency fingerprint, never a global
 sticky album mode.

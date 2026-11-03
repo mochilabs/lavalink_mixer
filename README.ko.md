@@ -205,10 +205,10 @@ $$
 
 | 메서드 | 경로 | 헤더 | 바디 | 설명 |
 |---|---|---|---|---|
-| `GET` | `/mixer/info` | — | — | 플러그인 정보 반환 `{ protocolVersion: 2, version: "0.3.9" }` |
+| `GET` | `/mixer/info` | — | — | 플러그인 정보 반환 `{ protocolVersion: 2, version: "...", incomingStartPositionSupported: true }` |
 | `GET` | `/mixer/state?guildId=` | — | — | 믹서 상태, 현재 설정, 전환 판정 이유, BPM 조회 |
 | `POST` | `/mixer/analyze` | — | `{ guildId, encodedTrack }` | 다음 후보곡 사전 분석 캐싱 요청 (202 반환) |
-| `POST` | `/mixer/queue/arm` | `Idempotency-Key` | `{ guildId, epoch, encodedTrack?, isEmpty, preserveTransition? }` | 다음 곡 장전 (JIT 전환 준비) |
+| `POST` | `/mixer/queue/arm` | `Idempotency-Key` | `{ guildId, epoch, encodedTrack?, isEmpty, preserveTransition?, startPositionMs?, outgoingEndPositionMs? }` | 다음 곡 장전. 다음 곡 시작점과 현재 곡 유효 종료점은 ms 단위 |
 | `POST` | `/mixer/queue/invalidate` | `Idempotency-Key` | `{ guildId, epoch }` | 장전된 곡 취소 (`MixerNeedNextTrackEvent` 재발생) |
 | `POST` | `/mixer/queue/override` | `Idempotency-Key` | `{ guildId, epoch, action, encodedTrack? }` | 강제 전환 (`action: "STOP"` 또는 `"PLAY_NOW"`) |
 | `POST` | `/mixer/reset` | `Idempotency-Key` | `{ guildId, epoch, windowOpenGraceMs? }` | 믹서 상태 머신 리셋 및 에포크 동기화 |
@@ -243,7 +243,7 @@ Lavalink 웹소켓 클라이언트로 전달되는 이벤트 예시입니다:
 { "op": "mixer", "type": "MixerNeedNextTrackEvent", "guildId": "123", "remainingMs": 12000, "currentTrackEncoded": "..." }
 
 // 2. 크로스페이드 믹싱 시작
-{ "op": "mixer", "type": "overlapStart", "guildId": "123", "crossfadeMs": 4000, "handoffInMs": 4000, "beatMatched": true, "fadeBeats": 8, "targetBpm": 124.0, "rateRatio": 1.016 }
+{ "op": "mixer", "type": "overlapStart", "guildId": "123", "crossfadeMs": 4000, "handoffInMs": 4000, "incomingStartMs": 13520, "beatMatched": true, "fadeBeats": 8, "targetBpm": 124.0, "rateRatio": 1.016 }
 
 // 3. 서버 측 재생 진행 완료 (클라이언트 큐 동기화 필요)
 { "op": "mixer", "type": "MixerAdvancedEvent", "guildId": "123", "epoch": 2, "encodedTrack": "...", "handoffType": "CROSSFADE", "handoffId": "uuid" }

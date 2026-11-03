@@ -182,6 +182,32 @@ class GuildMixerProtocolTest {
     }
 
     @Test
+    fun `incoming start is validated before idempotency and participates in the arm fingerprint`() {
+        mixer.reset(10L, UUID.randomUUID().toString(), windowOpenGraceMs = 0L)
+        val track = loadTrack(testFile)
+        val key = UUID.randomUUID().toString()
+
+        assertIs<ArmResult.BadRequest>(mixer.arm(10L, key, track, false, startPositionMs = -1L))
+        assertIs<ArmResult.BadRequest>(mixer.arm(10L, key, track, false, startPositionMs = track.duration - 500L))
+        assertIs<ArmResult.BadRequest>(mixer.arm(10L, key, null, true, startPositionMs = 0L))
+
+        assertIs<ArmResult.Success>(mixer.arm(10L, key, track, false, startPositionMs = 1_500L))
+        assertIs<ArmResult.Duplicate>(mixer.arm(10L, key, track, false, startPositionMs = 1_500L))
+        assertIs<ArmResult.PayloadMismatch>(mixer.arm(10L, key, track, false, startPositionMs = 2_000L))
+    }
+
+    @Test
+    fun `outgoing end requires a current track and a non-empty unpreserved transition`() {
+        mixer.reset(10L, UUID.randomUUID().toString(), windowOpenGraceMs = 0L)
+        val track = loadTrack(testFile)
+        val key = UUID.randomUUID().toString()
+        assertIs<ArmResult.BadRequest>(mixer.arm(10L, key, track, false, outgoingEndPositionMs = 2_000L))
+        assertIs<ArmResult.BadRequest>(mixer.arm(10L, key, null, true, outgoingEndPositionMs = 2_000L))
+        assertIs<ArmResult.BadRequest>(mixer.arm(10L, key, track, false, preserveTransition = true, outgoingEndPositionMs = 2_000L))
+        assertIs<ArmResult.Success>(mixer.arm(10L, key, track, false))
+    }
+
+    @Test
     fun `invalidate and reset enforce idempotency payload mismatch`() {
         val resetKey = UUID.randomUUID().toString()
         val r1 = mixer.reset(10L, resetKey, windowOpenGraceMs = 0L)

@@ -109,6 +109,21 @@ The bot answers with `/mixer/queue/arm`, invalidates a changed queue with
 `PLAY_NOW`. These operations and `/mixer/reset` require an `Idempotency-Key`.
 Configuration endpoints do not require that header.
 
+An arm can include `startPositionMs` for the incoming track. The protocol
+controller validates it before recording the idempotency key and retains it
+with the armed slot. Crossfade seeks the secondary decoder before prefill;
+gapless seeks the next main track before play, including for a preserved
+transition. Beat alignment cannot choose an earlier position. The handoff
+position still comes from consumed secondary source samples plus that actual
+start position. `/mixer/info` advertises support so clients can check each node.
+
+An arm can also include `outgoingEndPositionMs` to mark the start of an
+outgoing SponsorBlock outro as the effective content end. The overlap plan
+starts the fade before that position and hands off there. Without an overlap,
+the mixer advances the armed track at that position. The cutoff is tied to the
+current track instance and cleared with the armed slot; an already passed
+cutoff is ignored. `/mixer/info` advertises this capability separately.
+
 `EpochGate` retains up to 64 recent request fingerprints per guild. It checks
 existing keys before checking the reset window and epoch. A matching fingerprint
 is a duplicate; a different fingerprint is a payload mismatch. A new request

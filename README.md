@@ -205,10 +205,10 @@ All endpoints accept standard Lavalink `Authorization` headers.
 
 | Method | Path | Header | Body | Description |
 |---|---|---|---|---|
-| `GET` | `/mixer/info` | — | — | Returns `{ protocolVersion: 2, version: "0.3.9" }` |
+| `GET` | `/mixer/info` | — | — | Returns `{ protocolVersion: 2, version: "...", incomingStartPositionSupported: true }` |
 | `GET` | `/mixer/state?guildId=` | — | — | Returns current state, config, transition status, and BPM |
 | `POST` | `/mixer/analyze` | — | `{ guildId, encodedTrack }` | Pre-warms analysis cache before arming (returns 202) |
-| `POST` | `/mixer/queue/arm` | `Idempotency-Key` | `{ guildId, epoch, encodedTrack?, isEmpty, preserveTransition? }` | Arms the next track for JIT transition |
+| `POST` | `/mixer/queue/arm` | `Idempotency-Key` | `{ guildId, epoch, encodedTrack?, isEmpty, preserveTransition?, startPositionMs?, outgoingEndPositionMs? }` | Arms the next track; optional incoming start and outgoing effective end are in milliseconds |
 | `POST` | `/mixer/queue/invalidate` | `Idempotency-Key` | `{ guildId, epoch }` | Clears armed next track; triggers `MixerNeedNextTrackEvent` |
 | `POST` | `/mixer/queue/override` | `Idempotency-Key` | `{ guildId, epoch, action, encodedTrack? }` | Atomic override (`action: "STOP"` or `"PLAY_NOW"`) |
 | `POST` | `/mixer/reset` | `Idempotency-Key` | `{ guildId, epoch, windowOpenGraceMs? }` | Resets mixer state machine and synchronizes epochs |
@@ -243,7 +243,7 @@ Events dispatched to connected Lavalink WebSocket clients:
 { "op": "mixer", "type": "MixerNeedNextTrackEvent", "guildId": "123", "remainingMs": 12000, "currentTrackEncoded": "..." }
 
 // 2. Overlap crossfade started
-{ "op": "mixer", "type": "overlapStart", "guildId": "123", "crossfadeMs": 4000, "handoffInMs": 4000, "beatMatched": true, "fadeBeats": 8, "targetBpm": 124.0, "rateRatio": 1.016 }
+{ "op": "mixer", "type": "overlapStart", "guildId": "123", "crossfadeMs": 4000, "handoffInMs": 4000, "incomingStartMs": 13520, "beatMatched": true, "fadeBeats": 8, "targetBpm": 124.0, "rateRatio": 1.016 }
 
 // 3. Playback advanced server-side: client must sync local queue
 { "op": "mixer", "type": "MixerAdvancedEvent", "guildId": "123", "epoch": 2, "encodedTrack": "...", "handoffType": "CROSSFADE", "handoffId": "uuid" }

@@ -65,6 +65,10 @@ internal class ProtocolController(
         internal set
     var armedStartPositionMs: Long = 0L
         internal set
+    var armedOutgoingEndPositionMs: Long = 0L
+        internal set
+    var armedOutgoingTrack: AudioTrack? = null
+        internal set
     var armedEpoch: Long = 0L
         internal set
     var armedHandoffId: String? = null
@@ -89,6 +93,8 @@ internal class ProtocolController(
         armedTrack = null
         preserveTransition = false
         armedStartPositionMs = 0L
+        armedOutgoingEndPositionMs = 0L
+        armedOutgoingTrack = null
         armedEncodedTrack = null
         armedHandoffId = null
     }
@@ -125,12 +131,16 @@ internal class ProtocolController(
         rawEncodedTrack: String? = null,
         preserveTransition: Boolean = false,
         startPositionMs: Long? = null,
+        outgoingEndPositionMs: Long? = null,
     ): ArmResult {
         if (!isEmpty && track == null) {
             return ArmResult.BadRequest("arm with isEmpty=false requires a non-null encodedTrack")
         }
         if (isEmpty && startPositionMs != null) {
             return ArmResult.BadRequest("startPositionMs requires a non-empty track")
+        }
+        if (outgoingEndPositionMs != null && (isEmpty || preserveTransition)) {
+            return ArmResult.BadRequest("outgoingEndPositionMs requires a transition to a non-empty track")
         }
         val startMs = startPositionMs ?: 0L
         if (startMs < 0L) return ArmResult.BadRequest("startPositionMs must be non-negative")
@@ -141,8 +151,15 @@ internal class ProtocolController(
                 return ArmResult.BadRequest("startPositionMs must precede the track end by at least 500ms")
             }
         }
+        val outgoing = if (outgoingEndPositionMs != null) core.playingTrack else null
+        if (outgoingEndPositionMs != null) {
+            if (outgoing == null || !outgoing.isSeekable ||
+                outgoingEndPositionMs <= 500L || outgoingEndPositionMs >= outgoing.duration - 500L) {
+                return ArmResult.BadRequest("outgoingEndPositionMs must be inside the current seekable track")
+            }
+        }
         val canonicalEncoded = if (isEmpty) null else (rawEncodedTrack ?: track?.let { encodeTrackBase64(it) })
-        val fp = "arm|${canonicalEncoded ?: "empty"}|preserve=$preserveTransition|start=$startMs"
+        val fp = "arm|${canonicalEncoded ?: "empty"}|preserve=$preserveTransition|start=$startMs|end=${outgoingEndPositionMs ?: 0L}"
 
         val abortNeeded: Boolean
         synchronized(core.lock) {
@@ -178,6 +195,9 @@ internal class ProtocolController(
             core.clearNextLocked()
             this.preserveTransition = preserveTransition
             armedStartPositionMs = startMs
+            armedOutgoingTrack = outgoing?.takeIf { core.playingTrack === it }
+            armedOutgoingEndPositionMs = if (armedOutgoingTrack != null && outgoingEndPositionMs != null &&
+                core.safePosition(armedOutgoingTrack!!) + 500L < outgoingEndPositionMs) outgoingEndPositionMs else 0L
             armedTrack = track
             armedEncodedTrack = canonicalEncoded
             armedEpoch = epoch

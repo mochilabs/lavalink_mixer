@@ -109,7 +109,7 @@ Authorization: <Lavalink password>
 Content-Type: application/json
 Idempotency-Key: <unique key for this operation>
 
-{"guildId":"123456789012345678","epoch":12,"encodedTrack":"<encoded track>","startPositionMs":13520}
+{"guildId":"123456789012345678","epoch":12,"encodedTrack":"<encoded track>","startPositionMs":13520,"outgoingEndPositionMs":190000}
 ```
 
 Maintain one monotonically increasing epoch per guild. Use a new idempotency
@@ -119,6 +119,10 @@ key for each logical operation; reuse it only when retrying that same request.
 position to a node. The server seeks before overlap prefill or gapless playback;
 `overlapStart.incomingStartMs` reports the actual overlap start. The position
 must leave at least 500ms of a seekable track. Do not send it with `isEmpty`.
+`outgoingEndPositionMs` is optional and refers to the current track. Check
+`/mixer/info` for `outgoingEndPositionSupported`. It lets a client mark the
+start of an outro as the effective end so the fade finishes there. Omit it
+when preserving a continuous transition or when the cutoff is already near.
 If the queue head changes after arming, call `/mixer/queue/invalidate` with a
 higher epoch and a new key. The server can re-emit the JIT request when the
 track is still in its transition window, including the earlier BPM window.

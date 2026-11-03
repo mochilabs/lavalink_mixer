@@ -36,7 +36,15 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       - name: Build plugin
-        run: chmod +x gradlew && ./gradlew build ${{ inputs.version != '' && format('-Pversion={0}', inputs.version) || '' }}
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          chmod +x gradlew
+          if [ -n "$RELEASE_VERSION" ]; then
+            ./gradlew build "-Pversion=${RELEASE_VERSION#v}"
+          else
+            ./gradlew build
+          fi
 
       - name: Upload mixer jar
         uses: actions/upload-artifact@v4

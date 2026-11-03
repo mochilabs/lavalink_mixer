@@ -208,7 +208,7 @@ All endpoints accept standard Lavalink `Authorization` headers.
 | `GET` | `/mixer/info` | — | — | Returns `{ protocolVersion: 2, version: "...", incomingStartPositionSupported: true }` |
 | `GET` | `/mixer/state?guildId=` | — | — | Returns current state, config, transition status, and BPM |
 | `POST` | `/mixer/analyze` | — | `{ guildId, encodedTrack }` | Pre-warms analysis cache before arming (returns 202) |
-| `POST` | `/mixer/queue/arm` | `Idempotency-Key` | `{ guildId, epoch, encodedTrack?, isEmpty, preserveTransition?, startPositionMs? }` | Arms the next track for JIT transition; optional incoming start position is in milliseconds |
+| `POST` | `/mixer/queue/arm` | `Idempotency-Key` | `{ guildId, epoch, encodedTrack?, isEmpty, preserveTransition?, startPositionMs?, outgoingEndPositionMs? }` | Arms the next track; optional incoming start and outgoing effective end are in milliseconds |
 | `POST` | `/mixer/queue/invalidate` | `Idempotency-Key` | `{ guildId, epoch }` | Clears armed next track; triggers `MixerNeedNextTrackEvent` |
 | `POST` | `/mixer/queue/override` | `Idempotency-Key` | `{ guildId, epoch, action, encodedTrack? }` | Atomic override (`action: "STOP"` or `"PLAY_NOW"`) |
 | `POST` | `/mixer/reset` | `Idempotency-Key` | `{ guildId, epoch, windowOpenGraceMs? }` | Resets mixer state machine and synchronizes epochs |

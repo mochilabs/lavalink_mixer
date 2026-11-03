@@ -1019,7 +1019,10 @@ class GuildMixer(
             val duration = track.duration
             if (duration > 0 && duration < Long.MAX_VALUE / 2) {
                 val trail = if (silenceSkipEnabled && !protocol.preserveTransition) trailForLocked(track) else 0L
-                val contentEnd = TrimTransition.contentEnd(duration, trail)
+                val requestedEnd = protocol.armedOutgoingEndPositionMs.takeIf {
+                    it > 0L && protocol.armedOutgoingTrack === track
+                }
+                val contentEnd = minOf(TrimTransition.contentEnd(duration, trail), requestedEnd ?: duration)
                 val plan = planCrossfadeLocked(track, readyNextTrack ?: pendingNextTrack, contentEnd)
                 val silenceBeforeOverlap = !protocol.preserveTransition && silenceSkipEnabled && plan != null &&
                     tailCutter.isConfirmedBefore(plan.startMs, duration, tailConfirmMs, silenceTailScanMs)
@@ -1036,6 +1039,9 @@ class GuildMixer(
                     // are decoded, which runs a frame buffer ahead of playback.
                     return PollAction.StartOverlap(plan, transitionFenceLocked())
                 } else if (adaptiveTrim != null && pos >= adaptiveTrim!!.decision.outgoingContentEndMs) {
+                    if (readyNextTrack == null) promoteForcedLocked()
+                    return PollAction.AdvanceNext(transitionFenceLocked())
+                } else if (requestedEnd != null && pos >= contentEnd) {
                     if (readyNextTrack == null) promoteForcedLocked()
                     return PollAction.AdvanceNext(transitionFenceLocked())
                 } else if (!protocol.preserveTransition && silenceSkipEnabled && trail > 0 && pos >= contentEnd) {
@@ -1183,6 +1189,8 @@ class GuildMixer(
                     adaptiveTrim = null
                     protocol.preserveTransition = false
                     protocol.armedStartPositionMs = 0L
+                    protocol.armedOutgoingEndPositionMs = 0L
+                    protocol.armedOutgoingTrack = null
                     // Overwrite any previous slot; promote immediately when
                     // trim is already cached, otherwise wait for analysis.
                     readyNextTrack = null
@@ -1772,6 +1780,8 @@ class GuildMixer(
             protocol.armedTrack = null
             protocol.armedEncodedTrack = null
             protocol.armedStartPositionMs = 0L
+            protocol.armedOutgoingEndPositionMs = 0L
+            protocol.armedOutgoingTrack = null
             xfadeActive = false
             // The handoff is a transition into the incoming track, not an end
             // of playback: the state must reflect audio that keeps flowing.
@@ -2042,6 +2052,8 @@ class GuildMixer(
             protocol.armedTrack = null
             protocol.armedEncodedTrack = null
             protocol.armedStartPositionMs = 0L
+            protocol.armedOutgoingEndPositionMs = 0L
+            protocol.armedOutgoingTrack = null
             // Consuming the slot is a transition, not an end: PLAYING even if
             // play() below fails (the failure path logs and falls back to IDLE).
             protocol.playbackState = PlaybackState.PLAYING
@@ -2469,7 +2481,8 @@ class GuildMixer(
         rawEncodedTrack: String? = null,
         preserveTransition: Boolean = false,
         startPositionMs: Long? = null,
-    ): ArmResult = protocol.arm(epoch, idemKey, track, isEmpty, rawEncodedTrack, preserveTransition, startPositionMs)
+        outgoingEndPositionMs: Long? = null,
+    ): ArmResult = protocol.arm(epoch, idemKey, track, isEmpty, rawEncodedTrack, preserveTransition, startPositionMs, outgoingEndPositionMs)
 
     fun invalidate(epoch: Long, idemKey: String): InvalidateResult = protocol.invalidate(epoch, idemKey)
 

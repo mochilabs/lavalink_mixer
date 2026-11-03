@@ -208,7 +208,7 @@ $$
 | `GET` | `/mixer/info` | — | — | 플러그인 정보 반환 `{ protocolVersion: 2, version: "...", incomingStartPositionSupported: true }` |
 | `GET` | `/mixer/state?guildId=` | — | — | 믹서 상태, 현재 설정, 전환 판정 이유, BPM 조회 |
 | `POST` | `/mixer/analyze` | — | `{ guildId, encodedTrack }` | 다음 후보곡 사전 분석 캐싱 요청 (202 반환) |
-| `POST` | `/mixer/queue/arm` | `Idempotency-Key` | `{ guildId, epoch, encodedTrack?, isEmpty, preserveTransition?, startPositionMs? }` | 다음 곡 장전. 선택 위치는 다음 곡 시작점(ms) |
+| `POST` | `/mixer/queue/arm` | `Idempotency-Key` | `{ guildId, epoch, encodedTrack?, isEmpty, preserveTransition?, startPositionMs?, outgoingEndPositionMs? }` | 다음 곡 장전. 다음 곡 시작점과 현재 곡 유효 종료점은 ms 단위 |
 | `POST` | `/mixer/queue/invalidate` | `Idempotency-Key` | `{ guildId, epoch }` | 장전된 곡 취소 (`MixerNeedNextTrackEvent` 재발생) |
 | `POST` | `/mixer/queue/override` | `Idempotency-Key` | `{ guildId, epoch, action, encodedTrack? }` | 강제 전환 (`action: "STOP"` 또는 `"PLAY_NOW"`) |
 | `POST` | `/mixer/reset` | `Idempotency-Key` | `{ guildId, epoch, windowOpenGraceMs? }` | 믹서 상태 머신 리셋 및 에포크 동기화 |

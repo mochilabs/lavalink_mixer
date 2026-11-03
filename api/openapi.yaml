@@ -158,6 +158,11 @@ components:
           format: int64
           minimum: 0
           description: Optional minimum start position of the incoming track in milliseconds. Omit for 0. Requires a non-empty seekable track with at least 500ms remaining. Applied before overlap or gapless playback, including when preserveTransition is true. Included in the idempotency fingerprint.
+        outgoingEndPositionMs:
+          type: integer
+          format: int64
+          minimum: 501
+          description: Optional effective end of the currently playing track in milliseconds, for example the start of a SponsorBlock outro. The mixer ends its fade and hands off by this point. Requires a non-empty next track, a seekable current track, and preserveTransition=false. A cutoff already passed when armed is ignored safely. Included in the idempotency fingerprint.
     AnalyzeRequest:
       type: object
       required: [guildId, encodedTrack]
@@ -568,6 +573,7 @@ paths:
                 properties:
                   protocolVersion: { type: integer, const: 2 }
                   incomingStartPositionSupported: { type: boolean, const: true }
+                  outgoingEndPositionSupported: { type: boolean, const: true }
                   version:
                     type: string
                     description: Resolved from the packaged plugin descriptor (Gradle build version), matching the running JAR.
@@ -584,7 +590,9 @@ paths:
         `Idempotency-Key` replayed with a different payload is rejected. An optional
         `startPositionMs` starts the incoming track after its skipped intro in
         both overlap and gapless paths; invalid positions are rejected before
-        recording the idempotency key.
+        recording the idempotency key. `outgoingEndPositionMs` treats the start
+        of an outgoing outro as the effective track end, including the fade
+        handoff. It is ignored if the cutoff has already passed when armed.
       parameters:
         - name: Idempotency-Key
           in: header

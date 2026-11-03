@@ -190,6 +190,50 @@ class CrossfadeMixIntegrationTest {
     }
 
     @Test
+    fun `outgoing end position finishes the fade before the SponsorBlock outro`() {
+        val manager = manager()
+        val outgoing = toneFile("mixer-outro-out", 440.0, 10)
+        val incoming = toneFile("mixer-outro-in", 880.0, 10)
+        val mixer = GuildMixer(13L, manager, MixerConfig().apply {
+            crossfadeEnabled = true
+            crossfadeMs = 3_000
+            fadeInMs = 0
+            maskMs = 0
+            silenceSkipEnabled = false
+        }, java.util.concurrent.Executor { it.run() })
+        val player = manager.createPlayer()
+        try {
+            val sink = RecordingSink()
+            player.setFilterFactory(PcmFilterFactory { _, _, output ->
+                mutableListOf(mixer.newFilter(RecordingFilter(sink, output)))
+            })
+            mixer.attachMain(iPlayer(13L, player))
+            val trackA = loadTrack(manager, outgoing)
+            val trackB = loadTrack(manager, incoming)
+            player.playTrack(trackA)
+            mixer.reset(1L, java.util.UUID.randomUUID().toString(), windowOpenGraceMs = 0L)
+            kotlin.test.assertIs<ArmResult.Success>(
+                mixer.arm(1L, java.util.UUID.randomUUID().toString(), trackB, false, outgoingEndPositionMs = 7_000L),
+            )
+            var sawOverlap = false
+            var handoffMs = -1L
+            pumpUntil(player, mixer) {
+                if (mixer.isXfadeActive()) sawOverlap = true
+                if (sawOverlap && player.playingTrack !== trackA && handoffMs < 0) handoffMs = trackA.position
+                handoffMs >= 0 && sink.size * 1_000L / sampleRate > handoffMs + 500L
+            }
+            assertTrue(sawOverlap, "the outro end did not start a crossfade")
+            assertTrue(handoffMs in 6_500L..7_600L, "outro handoff was at ${handoffMs}ms, expected near 7000ms")
+            assertTrue(player.playingTrack?.info?.identifier == trackB.info.identifier)
+        } finally {
+            player.destroy()
+            mixer.destroy()
+            outgoing.delete()
+            incoming.delete()
+        }
+    }
+
+    @Test
     fun `preserved gapless transition still starts at the armed incoming position`() {
         val manager = manager()
         val outgoing = toneFile("mixer-gap-out", 440.0, 4)

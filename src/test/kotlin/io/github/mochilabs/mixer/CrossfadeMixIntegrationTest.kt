@@ -141,6 +141,97 @@ class CrossfadeMixIntegrationTest {
         }
     }
 
+    @Test
+    fun `armed incoming position skips intro audio before overlap and handoff`() {
+        val manager = manager()
+        val outgoing = toneFile("mixer-start-out", 440.0, 10)
+        val incoming = toneFile("mixer-start-in", 880.0, 10, introFrequency = 220.0, introSeconds = 3)
+        val mixer = GuildMixer(11L, manager, MixerConfig().apply {
+            crossfadeEnabled = true
+            crossfadeMs = 3000
+            fadeInMs = 0
+            maskMs = 0
+            silenceSkipEnabled = false
+        }, java.util.concurrent.Executor { it.run() })
+        val player = manager.createPlayer()
+        try {
+            val sink = RecordingSink()
+            player.setFilterFactory(PcmFilterFactory { _, _, output ->
+                mutableListOf(mixer.newFilter(RecordingFilter(sink, output)))
+            })
+            mixer.attachMain(iPlayer(11L, player))
+            val trackA = loadTrack(manager, outgoing)
+            val trackB = loadTrack(manager, incoming)
+            player.playTrack(trackA)
+            mixer.reset(1L, java.util.UUID.randomUUID().toString(), windowOpenGraceMs = 0L)
+            kotlin.test.assertIs<ArmResult.Success>(
+                mixer.arm(1L, java.util.UUID.randomUUID().toString(), trackB, false, startPositionMs = 3_000L),
+            )
+
+            var sawOverlap = false
+            pumpUntil(player, mixer) {
+                if (mixer.isXfadeActive()) sawOverlap = true
+                sawOverlap && player.playingTrack != null && player.playingTrack !== trackA
+            }
+
+            val recorded = sink.snapshot()
+            assertTrue(sawOverlap, "the requested-start transition never overlapped")
+            assertTrue(player.playingTrack?.info?.identifier == trackB.info.identifier, "the incoming track was not handed off")
+            val sponsorPower = goertzelPower(recorded, 7 * sampleRate, 9 * sampleRate, 220.0)
+            val musicPower = goertzelPower(recorded, 7 * sampleRate, 9 * sampleRate, 880.0)
+            assertTrue(musicPower > 1e-6, "incoming music was absent during the fade")
+            assertTrue(sponsorPower < musicPower * 0.01, "the skipped intro leaked into the fade")
+        } finally {
+            player.destroy()
+            mixer.destroy()
+            outgoing.delete()
+            incoming.delete()
+        }
+    }
+
+    @Test
+    fun `preserved gapless transition still starts at the armed incoming position`() {
+        val manager = manager()
+        val outgoing = toneFile("mixer-gap-out", 440.0, 4)
+        val incoming = toneFile("mixer-gap-in", 880.0, 6, introFrequency = 220.0, introSeconds = 2)
+        val mixer = GuildMixer(12L, manager, MixerConfig().apply {
+            crossfadeEnabled = true
+            crossfadeMs = 3000
+            fadeInMs = 0
+            maskMs = 0
+            silenceSkipEnabled = false
+        }, java.util.concurrent.Executor { it.run() })
+        val player = manager.createPlayer()
+        try {
+            val sink = RecordingSink()
+            player.setFilterFactory(PcmFilterFactory { _, _, output ->
+                mutableListOf(mixer.newFilter(RecordingFilter(sink, output)))
+            })
+            mixer.attachMain(iPlayer(12L, player))
+            val trackA = loadTrack(manager, outgoing)
+            val trackB = loadTrack(manager, incoming)
+            player.playTrack(trackA)
+            mixer.reset(1L, java.util.UUID.randomUUID().toString(), windowOpenGraceMs = 0L)
+            kotlin.test.assertIs<ArmResult.Success>(
+                mixer.arm(1L, java.util.UUID.randomUUID().toString(), trackB, false, preserveTransition = true, startPositionMs = 2_000L),
+            )
+
+            pumpUntil(player, mixer) { player.playingTrack !== trackA && sink.size > 5 * sampleRate }
+
+            val recorded = sink.snapshot()
+            assertTrue(player.playingTrack !== trackA, "gapless advance never happened")
+            val sponsorPower = goertzelPower(recorded, 4 * sampleRate, 5 * sampleRate, 220.0)
+            val musicPower = goertzelPower(recorded, 4 * sampleRate, 5 * sampleRate, 880.0)
+            assertTrue(musicPower > 1e-6, "incoming music was absent after gapless advance")
+            assertTrue(sponsorPower < musicPower * 0.01, "the preserved transition ignored the requested position")
+        } finally {
+            player.destroy()
+            mixer.destroy()
+            outgoing.delete()
+            incoming.delete()
+        }
+    }
+
     /**
      * Production shape of the handoff abort users reported: the outgoing
      * track ends exactly when the overlap reaches its handoff position, and
@@ -437,7 +528,7 @@ class CrossfadeMixIntegrationTest {
         return future.get(10, TimeUnit.SECONDS)
     }
 
-    private fun toneFile(prefix: String, frequency: Double, seconds: Int): File {
+    private fun toneFile(prefix: String, frequency: Double, seconds: Int, introFrequency: Double? = null, introSeconds: Int = 0): File {
         val file = File.createTempFile(prefix, ".wav")
         val samples = sampleRate * seconds
         val dataLen = samples * 2 * 2
@@ -456,7 +547,8 @@ class CrossfadeMixIntegrationTest {
             out.writeBytes("data")
             out.writeIntLE(dataLen)
             for (i in 0 until samples) {
-                val v = (sin(2.0 * PI * frequency * i / sampleRate) * 16000).toInt()
+                val selectedFrequency = if (introFrequency != null && i < introSeconds * sampleRate) introFrequency else frequency
+                val v = (sin(2.0 * PI * selectedFrequency * i / sampleRate) * 16000).toInt()
                 out.writeShortLE(v)
                 out.writeShortLE(v)
             }

@@ -75,7 +75,7 @@ info:
        "requestId":"<idemKey>","action":"STOP"|"PLAY_NOW"}`
       - A user or admin stop/skip command has executed on the engine.
     - `{"op":"mixer","type":"overlapStart","guildId":"<id>","crossfadeMs":<ms>,
-       "handoffInMs":<ms>,"beatMatched":<bool>,"fadeBeats":<n>,"targetBpm":<bpm>,"rateRatio":<ratio>,
+       "handoffInMs":<ms>,"incomingStartMs":<ms>,"beatMatched":<bool>,"fadeBeats":<n>,"targetBpm":<bpm>,"rateRatio":<ratio>,
        "fallbackReason":"...","track":{"identifier":"...","title":"..."}}`
       - an overlap (crossfade) armed; `track` is the incoming track.
     - `{"op":"mixer","type":"overlapEnd","guildId":"<id>","reason":"handoff"|"aborted",
@@ -153,6 +153,11 @@ components:
           type: boolean
           default: false
           description: Explicit intent to preserve this track boundary (for example continuous album playback). Disables overlap, boundary trimming and incoming fade-in for this arm. Included in the idempotency fingerprint; cleared by replacement arm/invalidate/reset.
+        startPositionMs:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Optional minimum start position of the incoming track in milliseconds. Omit for 0. Requires a non-empty seekable track with at least 500ms remaining. Applied before overlap or gapless playback, including when preserveTransition is true. Included in the idempotency fingerprint.
     AnalyzeRequest:
       type: object
       required: [guildId, encodedTrack]
@@ -449,6 +454,7 @@ components:
         - tempo_diff_exceeded
         - fade_window_too_short
         - incoming_track_too_short
+        - incoming_start_outside_analysis
         - policy_error
         - timescale_native_failed
     MixerNeedNextTrackEvent:
@@ -492,11 +498,12 @@ components:
       allOf:
         - { $ref: '#/components/schemas/MixerEventBase' }
         - type: object
-          required: [crossfadeMs, handoffInMs, beatMatched, track]
+          required: [crossfadeMs, handoffInMs, incomingStartMs, beatMatched, track]
           properties:
             type: { const: overlapStart }
             crossfadeMs: { type: integer, format: int64 }
             handoffInMs: { type: integer, format: int64, minimum: 0 }
+            incomingStartMs: { type: integer, format: int64, minimum: 0, description: Actual secondary track position before overlap prefill. }
             overlapMs: { type: integer, format: int64, description: Duration of the two-track gain fade. }
             recoveryMs: { type: integer, format: int64, description: Incoming-only tempo recovery after the outgoing gain reaches zero. }
             beatMatched: { type: boolean }
@@ -560,6 +567,7 @@ paths:
                 type: object
                 properties:
                   protocolVersion: { type: integer, const: 2 }
+                  incomingStartPositionSupported: { type: boolean, const: true }
                   version:
                     type: string
                     description: Resolved from the packaged plugin descriptor (Gradle build version), matching the running JAR.
@@ -573,7 +581,10 @@ paths:
         `MixerNeedNextTrackEvent`, or after a queue mutation, with the exact
         expected `epoch` and an `Idempotency-Key`. Transitions the mixer state
         to `ARMED` (with track; analysis may still be pending) or `NO_NEXT` (if empty). The same
-        `Idempotency-Key` replayed with a different payload is rejected.
+        `Idempotency-Key` replayed with a different payload is rejected. An optional
+        `startPositionMs` starts the incoming track after its skipped intro in
+        both overlap and gapless paths; invalid positions are rejected before
+        recording the idempotency key.
       parameters:
         - name: Idempotency-Key
           in: header

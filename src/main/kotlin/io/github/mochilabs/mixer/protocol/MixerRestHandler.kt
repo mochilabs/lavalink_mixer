@@ -19,7 +19,7 @@ import java.util.concurrent.TimeoutException
 import kotlin.math.log10
 
 @Serializable
-data class PluginInfoResponse(val protocolVersion: Int, val version: String)
+data class PluginInfoResponse(val protocolVersion: Int, val version: String, val incomingStartPositionSupported: Boolean)
 
 @Serializable
 data class ArmRequest(
@@ -28,6 +28,7 @@ data class ArmRequest(
     val encodedTrack: String? = null,
     val isEmpty: Boolean = false,
     val preserveTransition: Boolean = false,
+    val startPositionMs: Long? = null,
 )
 
 @Serializable
@@ -220,6 +221,7 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
             PluginInfoResponse(
                 protocolVersion = MixerVersion.PROTOCOL_VERSION,
                 version = MixerVersion.version,
+                incomingStartPositionSupported = true,
             )
         )
 
@@ -238,7 +240,7 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
                 throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid encodedTrack: ${e.message}", e)
             }
         }
-        return when (val res = mixer.arm(body.epoch, key, track, body.isEmpty, body.encodedTrack, body.preserveTransition)) {
+        return when (val res = mixer.arm(body.epoch, key, track, body.isEmpty, body.encodedTrack, body.preserveTransition, body.startPositionMs)) {
             is ArmResult.Success -> ResponseEntity.ok(mapOf("state" to res.state.name, "epoch" to res.epoch))
             is ArmResult.Duplicate -> ResponseEntity.ok(mapOf("duplicate" to true))
             is ArmResult.BadRequest -> ResponseEntity.badRequest().body(mapOf("error" to res.message))

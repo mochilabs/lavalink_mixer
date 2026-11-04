@@ -56,6 +56,26 @@ class AdaptiveRuntimeTest {
     }
 
     @Test
+    fun `current key is tied to the playing track and disappears on disable stop or replacement`() {
+        Fixture().use { f ->
+            f.mixer.updateKey(true)
+            val first = track()
+            f.playing = first
+            AnalysisCaches.key[first.identifier] = KeyAnalysis(0, 5000, KeyEstimate.Candidate(7, KeyMode.MINOR, 0.7f))
+            assertEquals(first.info.identifier, f.mixer.currentKey()?.identifier)
+            assertEquals(7, assertIs<KeyEstimate.Candidate>(f.mixer.currentKey()?.analysis?.estimate).pitchClass)
+            f.playing = track()
+            assertNull(f.mixer.currentKey(), "a replacement must not inherit the previous key")
+            f.playing = first
+            f.mixer.updateKey(false)
+            assertNull(f.mixer.currentKey())
+            f.mixer.updateKey(true)
+            f.playing = null
+            assertNull(f.mixer.currentKey())
+        }
+    }
+
+    @Test
     fun `cached current tempo carries identity and disappears on disable stop or uncached replacement`() {
         Fixture().use { f ->
             val first = track()

@@ -31,7 +31,12 @@ class TempoEnvelopeTest {
     }
 
     @Test
-    fun `delayed native output retains submitted rate after requested speed changes`() {
+    fun `delayed native output retains submitted rate after requested speed changes`() = verifyRateChange(false)
+
+    @Test
+    fun `factory reset preserves delayed native output source progress`() = verifyRateChange(true)
+
+    private fun verifyRateChange(reset: Boolean) {
         val queue = SiphonQueue()
         var calls = 0
         val factory = SiphonFactory(queue, true) { downstream, _, _ ->
@@ -52,7 +57,7 @@ class TempoEnvelopeTest {
         val filter = chain.first() as FloatPcmAudioFilter
         filter.process(Array(2) { FloatArray(100) }, 0, 100)
         assertEquals(0, queue.pendingSamples)
-        factory.setSpeed(1.0)
+        if (reset) factory.resetSpeed() else factory.setSpeed(1.0)
         filter.process(Array(2) { FloatArray(100) { 0.5f } }, 0, 100)
         assertEquals(100000L, queue.discard(200).sourceMilliSamples)
         assertEquals(100000L, queue.discard(100).sourceMilliSamples)

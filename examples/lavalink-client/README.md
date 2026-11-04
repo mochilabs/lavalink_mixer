@@ -32,6 +32,8 @@ mixer:
   targetLufs: -14.0
   bpmDetectionEnabled: false
   bpmScanMs: 30000
+  keyDetectionEnabled: false
+  keyScanMs: 30000
   beatmatchEnabled: false
   maxTempoChange: 0.06
   beatmatchMinConfidence: 0.30
@@ -84,6 +86,9 @@ POST /mixer/silence
 POST /mixer/normalization
 {"guildId":"123456789012345678","enabled":true,"targetLufs":-14}
 
+POST /mixer/key
+{"guildId":"123456789012345678","enabled":true,"scanMs":30000}
+
 POST /mixer/bpm
 {"guildId":"123456789012345678","enabled":true,"beatmatchEnabled":true,"scanMs":30000,"maxTempoChange":0.06,"minConfidence":0.30}
 ```
@@ -94,6 +99,15 @@ uses available trim data and otherwise falls back to ordinary crossfade. Missing
 or unknown analysis features keep the configured crossfade duration, bounded by
 available outgoing content. The compatibility state label `short_crossfade` does
 not imply a 1.5-second fade.
+
+Key estimation is independent of BPM. Check `keyDetectionSupported` on
+`/mixer/info`, then read `currentTrackKey` or `nextTrackKey` on `/mixer/state`.
+Compare the result's `identifier` with the confirmed track before displaying it.
+For `type: "estimated"`, display `key` and `scale`, such as `G minor`.
+`type: "unknown"` is a completed inconclusive scan with a `reason`; null means
+no completed result is available. Confidence is a heuristic score. The result
+covers `windowStartMs` through `windowEndMs`, not necessarily the whole song.
+`/mixer/analyze` accepts key-only warmups when key detection is enabled.
 
 ## 4. Start the first track normally
 

@@ -94,7 +94,7 @@ class StaleXfadeAbortTest {
             player.playTrack(trackA)
             mixer.queueNext(CompletableFuture.completedFuture(trackB))
 
-            pumpUntil(player, mixer) { mixer.isXfadeActive() }
+            pumpUntil(player, mixer) { mixer.isXfadeActive() && socket.messagesOfType("overlapStart").isNotEmpty() }
             assertTrue(mixer.isXfadeActive(), "the overlap never armed")
 
             // The client is told what is fading in, so UIs can show a transition.

@@ -103,6 +103,8 @@ mixer:
   # BPM 검출 및 비트 매칭
   bpmDetectionEnabled: false
   bpmScanMs: 30000
+  keyDetectionEnabled: false
+  keyScanMs: 30000
   beatmatchEnabled: false
   maxTempoChange: 0.06
   beatmatchMinConfidence: 0.30
@@ -201,7 +203,7 @@ Content-Type: application/json
 | 메서드 | 경로 | 요청 | 결과 |
 | --- | --- | --- | --- |
 | `GET` | `/mixer/info` | 없음 | 실행 버전, 프로토콜 버전, 시작·종료 위치 지원 여부 |
-| `GET` | `/mixer/state?guildId=...` | 길드 ID 쿼리 | 상태, 설정, 분석, 게인, BPM, 전환 진단 |
+| `GET` | `/mixer/state?guildId=...` | 길드 ID 쿼리 | 상태, 설정, 분석, 게인, BPM, 조성 추정, 전환 진단 |
 | `POST` | `/mixer/analyze` | `{ guildId, encodedTrack }` | HTTP 202와 `accepted`. 캐시 예열이며 장전·재생하지 않음 |
 | `POST` | `/mixer/queue/arm` | `{ guildId, epoch, encodedTrack?, isEmpty?, preserveTransition?, startPositionMs?, outgoingEndPositionMs? }` | 다음 곡 또는 빈 큐 수락 |
 | `POST` | `/mixer/queue/invalidate` | `{ guildId, epoch }` | 장전 취소 및 조건에 따른 다음 곡 재요청 |
@@ -217,6 +219,7 @@ Content-Type: application/json
 | `POST` | `/mixer/crossfade` | `{ guildId, enabled, durationMs? }`, 500–30000 ms |
 | `POST` | `/mixer/fade-in` | `{ guildId, durationMs }`, 0–10000 ms |
 | `POST` | `/mixer/bpm` | `{ guildId, enabled, scanMs?, beatmatchEnabled?, maxTempoChange?, minConfidence? }` |
+| `POST` | `/mixer/key` | `{ guildId, enabled, scanMs? }` |
 | `POST` | `/mixer/beatmatch` | `{ guildId, enabled, maxTempoChange?, minConfidence? }` |
 | `POST` | `/mixer/silence` | `{ guildId, enabled, thresholdDb?, minSoundMs?, headScanMs?, tailScanMs?, tailConfirmMs? }` |
 | `POST` | `/mixer/normalization` | `{ guildId, enabled, targetLufs? }` |
@@ -258,6 +261,46 @@ Content-Type: application/json
 - `currentTrackBpm`을 표시하기 전에 `currentTrackBpmIdentifier`가 현재 곡과 일치하는지 확인합니다. 분석이 진행 중이거나 비활성화된 경우 BPM·게인 값이 아직 없을 수 있습니다.
 
 `POST /mixer/analyze`는 탐색 가능한 후보곡의 활성화된 무음·BPM·전환 특성 캐시를 미리 채웁니다. HTTP 202는 분석 완료를 뜻하지 않습니다. 정규화 분석은 일반 장전 경로에서 수행합니다. 분석은 실제 서브 재생과 별도 디코더에서 진행합니다.
+
+## 조성 추정
+
+BPM·비트 매칭과 독립적으로 조성 분석을 활성화할 수 있습니다.
+
+```http
+POST /mixer/key
+Content-Type: application/json
+
+{"guildId":"123456789012345678","enabled":true,"scanMs":30000}
+```
+
+`GET /mixer/info`의 `keyDetectionSupported: true`로 지원 여부를 확인하고,
+`/mixer/state`의 `currentTrackKey`·`nextTrackKey`에서 결과를 조회합니다.
+
+```json
+{"type":"estimated","identifier":"track-id","windowStartMs":0,"windowEndMs":30000,"key":"G","scale":"minor","confidence":0.7}
+```
+
+표시 전에 결과의 `identifier`가 봇이 확인한 곡과 같은지 비교하세요.
+결과가 null이면 비활성화·분석 대기·곡 없음·지원하지 않는 곡 중 하나입니다.
+판단하기 어려우면 `type: "unknown"`과 `silence`, `ambiguous_key` 같은
+`reason`을 반환합니다. Unknown도 완료된 결과로 캐싱하며 반복 분석하지 않습니다.
+
+길이를 알고 탐색할 수 있는 곡의 시작 구간을 별도 디코더로 분석합니다.
+`scanMs` 기본값은 30000이며 5000–60000 ms로 제한합니다. BPM 시작 구간과
+범위가 맞으면 이미 디코딩한 PCM을 재사용합니다. `/mixer/analyze`로 조성만
+미리 분석할 수도 있으며 재생 큐를 바꾸지 않습니다. 캐시는 곡 식별자 기준이므로
+`scanMs`를 바꿔도 기존 결과를 무효화하지 않습니다.
+
+결과는 분석한 구간의 추정치입니다. 전조·관계장단조·비음악 신호는 판단이
+어려울 수 있고, confidence는 정답 확률이 아닌 휴리스틱 점수입니다.
+실제 음악에 대한 정확도 보정은 아직 완료하지 않았습니다.
+
+전환은 페이드 시작 최대 2초 전부터 보조 디코더를 준비하고, 공유 스케줄러
+밖에서 PCM 확보를 기다린 뒤 메인 음량을 줄입니다. 준비가 늦으면 핸드오프까지
+남은 시간으로 페이드를 진행하며 새 곡 앞부분을 따라잡기 용도로 버리지 않습니다.
+PCM을 확보하지 못하면 원래 다음 곡을 유지해 갭리스 전환할 수 있습니다.
+
+---
 
 ## 아키텍처
 

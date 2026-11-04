@@ -291,6 +291,18 @@ components:
         nextTrackGain: { type: [number, 'null'], format: float }
         nextTrackGainDb: { type: [number, 'null'], format: float }
         bpmDetectionEnabled: { type: boolean }
+        keyDetectionEnabled: { type: boolean }
+        keyScanMs: { type: integer, format: int64, minimum: 5000, maximum: 60000 }
+        currentTrackKey:
+          description: Completed head-window estimate with its track identity. Null when disabled, pending, absent, or unsupported. Compare identifier with the confirmed current track before display.
+          oneOf:
+            - { $ref: '#/components/schemas/TrackKey' }
+            - { type: 'null' }
+        nextTrackKey:
+          description: Completed head-window estimate with its queued track identity. Null when disabled, pending, absent, or unsupported.
+          oneOf:
+            - { $ref: '#/components/schemas/TrackKey' }
+            - { type: 'null' }
         adaptiveTransitionsSupported: { type: boolean, const: true }
         currentTrackBpm:
           type: [number, 'null']
@@ -387,6 +399,39 @@ components:
           type: [number, 'null']
           format: float
           description: Target loudness in LUFS (default -14.0). Clamped to [-30.0, -6.0].
+    KeyRequest:
+      type: object
+      required: [guildId, enabled]
+      properties:
+        guildId: { type: string }
+        enabled: { type: boolean, description: "Opt-in major/minor key estimation, independent of BPM and beat matching. Default false." }
+        scanMs:
+          type: [integer, 'null']
+          format: int64
+          description: Head window length, default 30000 ms. Clamped to [5000, 60000]. Omission preserves the setting.
+    TrackKey:
+      description: Local chroma/profile estimate for the reported head window, not a verified whole-song key. Confidence is a heuristic score, not a calibrated probability. Enharmonic spellings use flats.
+      oneOf:
+        - type: object
+          required: [type, identifier, windowStartMs, windowEndMs, key, scale, confidence]
+          properties:
+            type: { type: string, const: estimated }
+            identifier: { type: string }
+            windowStartMs: { type: integer, format: int64 }
+            windowEndMs: { type: integer, format: int64 }
+            key: { type: string, enum: [C, Db, D, Eb, E, F, Gb, G, Ab, A, Bb, B] }
+            scale: { type: string, enum: [major, minor] }
+            confidence: { type: number, minimum: 0, maximum: 1 }
+        - type: object
+          required: [type, identifier, windowStartMs, windowEndMs, reason]
+          properties:
+            type: { type: string, const: unknown }
+            identifier: { type: string }
+            windowStartMs: { type: integer, format: int64 }
+            windowEndMs: { type: integer, format: int64 }
+            reason:
+              type: string
+              enum: [empty_audio, short_window, silence, no_tonal_energy, ambiguous_chroma, ambiguous_key]
     BpmRequest:
       type: object
       required: [guildId, enabled]
@@ -577,6 +622,7 @@ paths:
                   protocolVersion: { type: integer, const: 2 }
                   incomingStartPositionSupported: { type: boolean, const: true }
                   outgoingEndPositionSupported: { type: boolean, const: true }
+                  keyDetectionSupported: { type: boolean, const: true }
                   version:
                     type: string
                     description: Resolved from the packaged plugin descriptor (Gradle build version), matching the running JAR.
@@ -741,11 +787,12 @@ paths:
   /mixer/analyze:
     post:
       operationId: preanalyze
-      summary: Warm enabled silence, BPM, and adaptive feature caches without arming playback
+      summary: Warm enabled analysis caches without arming playback
       description: |
-        Optional best-effort warmup before the normal JIT arm. Requires silence
-        skipping or BPM detection and a seekable, known-length track. Normalization
-        analysis remains on the normal arming path. One active or queued scan and the latest
+        Optional best-effort warmup before the normal JIT arm. Requires at least one
+        of BPM detection, key detection, or silence skipping and a seekable,
+        known-length track. Normalization analysis remains on the normal arming
+        path. One active or queued scan and the latest
         deferred warmup are retained per guild. Busy scans accept the latest
         warmup request; disabled, already cached or unsupported tracks return accepted=false.
         A 202 receipt does not mean analysis succeeded. Normal JIT analysis remains
@@ -942,6 +989,33 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/MixerState' }
         '400': { description: "Invalid guild ID or request parameters; error body is provided by the host framework." }
+
+  /mixer/key:
+    post:
+      operationId: setKeyDetection
+      summary: Configure musical key estimation independently of BPM
+      description: |
+        Enables bounded head-window analysis for seekable, known-length tracks.
+        Current and queued tracks are analyzed in the background. Matching BPM
+        head scans reuse decoded PCM; different window sizes can require another
+        decode. No Idempotency-Key is required. Read currentTrackKey and
+        nextTrackKey from /mixer/state. Null means no completed result is available;
+        type=unknown is a completed ambiguous or non-tonal result and is cached.
+        Successful configuration does not mean analysis has finished. Cache keys
+        are track identifiers, so changing scanMs does not invalidate cached keys.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/KeyRequest' }
+            example: { guildId: '123456789012345678', enabled: true, scanMs: 30000 }
+      responses:
+        '200':
+          description: Updated state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MixerState' }
+        '400': { description: Invalid guild ID or request parameters }
 
   /mixer/beatmatch:
     post:

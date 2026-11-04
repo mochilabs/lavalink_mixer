@@ -30,6 +30,7 @@ internal object AnalysisCaches {
     val bpm = BoundedCache<BpmDetector.BpmResult>()
     val bpmHead = BoundedCache<BeatGrid>()
     val bpmTail = BoundedCache<BeatGrid>()
+    val key = BoundedCache<KeyAnalysis>()
     val featuresHead = BoundedCache<TransitionFeatures>()
     val featuresTail = BoundedCache<TransitionFeatures>()
 

@@ -17,6 +17,8 @@ internal data class TrackAnalysisSettings(
     val silenceHeadScanMs: Long,
     val silenceTailScanMs: Long,
     val bpmScanMs: Long,
+    val key: Boolean = false,
+    val keyScanMs: Long = 30000,
 )
 
 internal data class TrackAnalysisResult(
@@ -28,6 +30,7 @@ internal data class TrackAnalysisResult(
     val bpmTail: BeatGrid? = null,
     val featuresHead: TransitionFeatures? = null,
     val featuresTail: TransitionFeatures? = null,
+    val key: KeyAnalysis? = null,
 )
 
 /**
@@ -83,6 +86,7 @@ internal class TrackAnalysisService(
         val bpmTail: BeatGrid? = null,
         val featuresHead: TransitionFeatures? = null,
         val featuresTail: TransitionFeatures? = null,
+        val key: KeyAnalysis? = null,
     )
 
     @Volatile
@@ -121,13 +125,15 @@ internal class TrackAnalysisService(
             var featuresHead: TransitionFeatures? = null
             var featuresTail: TransitionFeatures? = null
             var bpmAttempted = false
+            var key: KeyAnalysis? = null
             val shortTrack = duration in 1..minOf(scanCap, 30000)
 
-            if (shortTrack && (settings.silence || settings.normalization || settings.bpm)) {
+            if (shortTrack && (settings.silence || settings.normalization || settings.bpm || (settings.key && duration <= settings.keyScanMs))) {
                 val result = analyzeSinglePass(track, factory, duration, settings)
                 lead = result.leadMs
                 tail = result.trailMs
                 loudness = result.loudnessRms
+                key = result.key
                 if (settings.bpm) {
                     bpm = result.bpm
                     bpmHead = result.bpmHead
@@ -151,6 +157,9 @@ internal class TrackAnalysisService(
             if (settings.bpm && !bpmAttempted) {
                 val headFrames = collectFrom(track, factory, 0, msToSamples(settings.bpmScanMs))
                 if (headFrames.isNotEmpty()) {
+                    if (settings.key && settings.keyScanMs <= settings.bpmScanMs) {
+                        key = KeyDetector.analyze(headFrames, msToSamples(settings.keyScanMs))
+                    }
                     bpm = BpmDetector.analyze(headFrames, sampleRate = SAMPLE_RATE)
                     bpmHead = BpmDetector.analyzeGrid(headFrames, sampleRate = SAMPLE_RATE, windowStartMs = 0L)
                     featuresHead = TransitionFeatureAnalyzer.analyze(headFrames, grid = bpmHead)
@@ -203,6 +212,10 @@ internal class TrackAnalysisService(
                     bpmTail = BeatGrid(bpm = bpmHead.bpm, phaseMs = bpmHead.phaseMs, confidence = bpmHead.confidence * 0.85f)
                 }
             }
+            if (settings.key && key == null) {
+                key = KeyDetector.analyze(collectFrom(track, factory, 0, msToSamples(settings.keyScanMs)), msToSamples(settings.keyScanMs))
+            }
+            val keyIncomplete = key != null && duration > 0 && key.windowEndMs < minOf(duration, settings.keyScanMs) - 250
             val guardedLead = if (duration > 0 && lead >= duration - 500) 0 else lead.coerceAtLeast(0)
             val trim = if (settings.silence) {
                 TrimPoints(guardedLead, tail.coerceAtLeast(0))
@@ -215,7 +228,7 @@ internal class TrackAnalysisService(
                 val tailEndMs = (duration - tail).coerceAtLeast(0L)
                 featuresTail = featuresTail?.let { guardFeatureWindow(it, tailEndMs) }
             }
-            return TrackAnalysisResult(trim, loudness, bpm, analysisBroken, bpmHead, bpmTail, featuresHead, featuresTail)
+            return TrackAnalysisResult(trim, loudness, bpm, analysisBroken || keyIncomplete, bpmHead, bpmTail, featuresHead, featuresTail, key)
         } finally {
             stopTrack()
         }
@@ -389,6 +402,8 @@ internal class TrackAnalysisService(
             msToSamples(settings.silenceMinSoundMs),
             settings.normalization,
             settings.bpm,
+            settings.key,
+            settings.keyScanMs,
         )
     }
 
@@ -398,6 +413,8 @@ internal class TrackAnalysisService(
         silenceMinSoundSamples: Int,
         measureLoudness: Boolean,
         measureBpm: Boolean,
+        measureKey: Boolean,
+        keyScanMs: Long,
     ): SinglePassResult {
         if (frames.isEmpty()) return SinglePassResult(0L, 0L, null, null)
         var total = 0L
@@ -416,7 +433,8 @@ internal class TrackAnalysisService(
         val bpm = if (measureBpm) BpmDetector.analyze(frames, sampleRate = SAMPLE_RATE) else null
         val grid = if (measureBpm) BpmDetector.analyzeGrid(frames, sampleRate = SAMPLE_RATE, windowStartMs = 0L) else null
         val features = if (measureBpm) TransitionFeatureAnalyzer.analyze(frames, grid = grid) else null
-        return SinglePassResult(lead, trail, loudness, bpm, bpmHead = grid, bpmTail = grid, featuresHead = features, featuresTail = features)
+        val key = if (measureKey) KeyDetector.analyze(frames, msToSamples(keyScanMs)) else null
+        return SinglePassResult(lead, trail, loudness, bpm, bpmHead = grid, bpmTail = grid, featuresHead = features, featuresTail = features, key = key)
     }
 
     private fun trailingSilenceMs(

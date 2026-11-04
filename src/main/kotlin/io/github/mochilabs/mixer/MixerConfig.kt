@@ -36,6 +36,10 @@ class MixerConfig {
     /** Head window (ms) decoded for tempo analysis; 30s spans ~15-60 beats across 60-200 BPM. */
     var bpmScanMs: Long = 30000
 
+    /** Independent, opt-in major/minor key estimation from a bounded head window. */
+    var keyDetectionEnabled: Boolean = false
+    var keyScanMs: Long = 30000
+
     // Beat-matched crossfading (aligns beat grids of outgoing and incoming tracks)
     var beatmatchEnabled: Boolean = false
     var maxTempoChange: Float = 0.06f

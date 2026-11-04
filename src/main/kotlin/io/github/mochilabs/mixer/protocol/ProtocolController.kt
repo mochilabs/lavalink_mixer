@@ -89,6 +89,15 @@ internal class ProtocolController(
         Thread(r, "mixer-v2-action").apply { isDaemon = true }
     }
 
+    /** Player callbacks hold Lavaplayer's trackSwitchLock; mutations must run after they return. */
+    fun executeAction(action: () -> Unit) {
+        try {
+            actionQueue.execute(action)
+        } catch (e: java.util.concurrent.RejectedExecutionException) {
+            if (!actionQueue.isShutdown) throw e
+        }
+    }
+
     fun clearArmedLocked() {
         armedTrack = null
         preserveTransition = false

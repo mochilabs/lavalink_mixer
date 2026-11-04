@@ -1,6 +1,7 @@
 package io.github.mochilabs.mixer
 
 import com.sedmelluq.discord.lavaplayer.player.AudioPlayerManager
+import com.sedmelluq.discord.lavaplayer.filter.FloatPcmAudioFilter
 import java.lang.reflect.Proxy
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -19,6 +20,33 @@ import kotlin.test.assertTrue
  * voice thread surfaces as a false TrackStuck on a healthy main track.
  */
 class XfadeVoicePathTest {
+    @Test
+    fun `complete PCM filter forwards overlap audio while control lock is held`() {
+        val m = mixer()
+        m.beginXfadeForTest(48000)
+        m.siphon.push(Array(2) { FloatArray(960) { 0.2f } }, 0, 960)
+        val delivered = CountDownLatch(1)
+        val downstream = object : FloatPcmAudioFilter {
+            override fun process(input: Array<FloatArray>, offset: Int, length: Int) { delivered.countDown() }
+            override fun seekPerformed(requestedTime: Long, providedTime: Long) = Unit
+            override fun flush() = Unit
+            override fun close() = Unit
+        }
+        val filter = m.newFilter(downstream)
+        val controlLock = GuildMixer::class.java.getDeclaredField("lock").apply { isAccessible = true }.get(m)
+        val pool = Executors.newSingleThreadExecutor()
+        try {
+            synchronized(controlLock) {
+                pool.submit { filter.process(Array(2) { FloatArray(960) { 0.1f } }, 0, 960) }
+                assertTrue(delivered.await(1, TimeUnit.SECONDS), "PCM output waited for the control lock")
+            }
+        } finally {
+            pool.shutdown()
+            assertTrue(pool.awaitTermination(5, TimeUnit.SECONDS))
+            m.destroy()
+        }
+    }
+
     private fun mixer(): GuildMixer {
         val manager = Proxy.newProxyInstance(
             javaClass.classLoader,

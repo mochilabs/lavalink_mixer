@@ -113,6 +113,17 @@ class GuildMixer(
         }
     }
 
+    fun updateKey(enabled: Boolean, scanMs: Long? = null) {
+        val playing = synchronized(lock) {
+            keyDetectionEnabled = enabled
+            scanMs?.let { keyScanMs = it.coerceIn(5000, 60000) }
+            if (enabled) main?.audioPlayer?.playingTrack else null
+        }
+        playing?.let { track ->
+            runCatching { track.makeClone() }.getOrNull()?.let { requestPreanalysis(it) }
+        }
+    }
+
     fun updateSilence(
         enabled: Boolean,
         thresholdDb: Float? = null,
@@ -149,6 +160,8 @@ class GuildMixer(
     /** Tempo (BPM) detection is opt-in; each preloaded track decodes one head window for onset analysis. */
     @Volatile var bpmDetectionEnabled: Boolean = config.bpmDetectionEnabled
     @Volatile var bpmScanMs: Long = config.bpmScanMs.coerceIn(5000, 60000)
+    @Volatile var keyDetectionEnabled: Boolean = config.keyDetectionEnabled
+    @Volatile var keyScanMs: Long = config.keyScanMs.coerceIn(5000, 60000)
     @Volatile var beatmatchEnabled: Boolean = config.beatmatchEnabled
     @Volatile var maxTempoChange: Float = config.maxTempoChange.coerceIn(0f, 0.12f)
     @Volatile var beatmatchMinConfidence: Float = config.beatmatchMinConfidence.coerceIn(0f, 1f)
@@ -268,6 +281,11 @@ class GuildMixer(
     private var subStartMs: Long = 0L
     /** Active parallel (`mode=parallel`) overlays: each owns its decoder + siphon + fade ramp. */
     private val parallelOverlays = LinkedHashMap<Long, OverlaySlot>()
+    @Volatile private var parallelOverlaySnapshot: List<OverlaySlot> = emptyList()
+
+    private fun publishParallelOverlaysLocked() {
+        parallelOverlaySnapshot = parallelOverlays.values.toList()
+    }
     /** Sequential (single-sub) overlay is still active; mutually exclusive with parallel overlays. */
     private var sequentialOverlayId: Long? = null
     @Volatile private var sequentialOverlayChannel: AnnounceChannel = AnnounceChannel.BOTH
@@ -288,6 +306,7 @@ class GuildMixer(
     private var maskingTrack: AudioTrack? = null
     /** Bumped on every sub arming/teardown; in-flight startOverlap/startOverlay re-check it. */
     private var subGen: Long = 0L
+    private var overlapPreparation: TransitionFence? = null
 
     private var lastMainTrack: AudioTrack? = null
     private var lastPosition: Long = 0L
@@ -417,7 +436,7 @@ class GuildMixer(
             if (needsBaselineAnalysis) {
                 scheduleBaselineAnalysis(track)
             }
-            if (bpmDetectionEnabled || silenceSkipEnabled) {
+            if (bpmDetectionEnabled || keyDetectionEnabled || silenceSkipEnabled) {
                 runCatching { track.makeClone() }.getOrNull()?.let { requestPreanalysis(it) }
             }
             if (snap.xfade) {
@@ -465,31 +484,14 @@ class GuildMixer(
                 }
                 return
             }
-            val handoff = synchronized(lock) {
+            synchronized(lock) {
                 // The player has already null'ed playingTrack by now (lavaplayer
                 // clears it before dispatching this event); remember the ended
                 // instance so doHandoff can tell a natural finish from a replace.
                 lastEndedMain = track
                 lastEndedMainAt = System.currentTimeMillis()
-                xfadeActive
             }
-            if (handoff) {
-                doHandoff()
-            } else {
-                val hasNext = synchronized(lock) { readyNextTrack != null || pendingNextTrack != null }
-                if (hasNext) {
-                    advanceNext()
-                } else {
-                    // Nothing queued to advance: only go IDLE when the player
-                    // really has no track left (client may already have
-                    // started the replacement, which TrackStart will report).
-                    synchronized(lock) {
-                        if (main?.audioPlayer?.playingTrack == null) {
-                            protocol.playbackState = PlaybackState.IDLE
-                        }
-                    }
-                }
-            }
+            scheduleMainRecovery(player, track)
         }
 
         override fun onTrackStuck(player: AudioPlayer, track: AudioTrack, thresholdMs: Long) {
@@ -497,7 +499,7 @@ class GuildMixer(
             if (currentMain != null && player !== currentMain) return
             val title = runCatching { track.info.title }.getOrDefault("unknown")
             log.warn("main track '{}' stuck on guild {} (threshold {}ms); mixer failover", title, guildId, thresholdMs)
-            recoverFromMainStall()
+            scheduleMainRecovery(player, track)
         }
 
         override fun onTrackException(player: AudioPlayer, track: AudioTrack, exception: com.sedmelluq.discord.lavaplayer.tools.FriendlyException) {
@@ -505,7 +507,22 @@ class GuildMixer(
             if (currentMain != null && player !== currentMain) return
             val title = runCatching { track.info.title }.getOrDefault("unknown")
             log.warn("main track '{}' failed on guild {}; mixer failover", title, guildId, exception)
-            recoverFromMainStall()
+            scheduleMainRecovery(player, track)
+        }
+    }
+
+    private fun scheduleMainRecovery(player: AudioPlayer, track: AudioTrack) {
+        val fence = synchronized(lock) {
+            if (main?.audioPlayer !== player) return
+            val playing = player.playingTrack
+            if (playing != null && playing !== track) return
+            transitionFenceLocked()
+        }
+        protocol.executeAction {
+            synchronized(playerMutationLock) {
+                val current = synchronized(lock) { main?.audioPlayer === player && matchesFenceLocked(fence) }
+                if (current) recoverFromMainStall()
+            }
         }
     }
 
@@ -583,29 +600,25 @@ class GuildMixer(
     }
 
     fun attachMain(player: IPlayer) {
-        val previousPlayers: List<AudioPlayer>
-        synchronized(lock) {
+        synchronized(playerMutationLock) {
             val newAudioPlayer = player.audioPlayer
-            previousPlayers = attachedPlayers.filter { it !== newAudioPlayer }
+            val (previousPlayers, addListener) = synchronized(lock) {
+                val previous = attachedPlayers.filter { it !== newAudioPlayer }
+                attachedPlayers.removeAll(previous.toSet())
+                main = player
+                val added = attachedPlayers.add(newAudioPlayer)
+                if (previous.isNotEmpty()) electedFeeder.set(0L)
+                previous to added
+            }
+            // Listener registration also takes Lavaplayer's trackSwitchLock.
+            for (old in previousPlayers) old.removeListener(mainListener)
+            if (addListener) newAudioPlayer.addListener(mainListener)
             for (old in previousPlayers) {
-                old.removeListener(mainListener)
-                attachedPlayers.remove(old)
-            }
-            main = player
-            if (attachedPlayers.add(newAudioPlayer)) {
-                newAudioPlayer.addListener(mainListener)
-            }
-            if (previousPlayers.isNotEmpty()) {
-                // Release the stale session's filter feeder so the new session's
-                // filter takes over immediately and syncs chainPos to the new track.
-                electedFeeder.set(0L)
-            }
-        }
-        for (old in previousPlayers) {
-            try {
-                old.stopTrack()
-            } catch (e: Exception) {
-                log.debug("stopping replaced session player failed on guild {}: {}", guildId, e.toString())
+                try {
+                    old.stopTrack()
+                } catch (e: Exception) {
+                    log.debug("stopping replaced session player failed on guild {}: {}", guildId, e.toString())
+                }
             }
         }
     }
@@ -664,7 +677,14 @@ class GuildMixer(
         }
         val chunkStart = chainPos.get() - samples
         val desired = (chunkStart - start).coerceAtLeast(0L)
-        val read = siphon.takeAt(desired, samples, channels, out)
+        val prefix = (start - chunkStart).coerceIn(0L, samples.toLong()).toInt()
+        val read = siphon.takeAt(desired, samples - prefix, channels, out)
+        if (prefix > 0) {
+            for (c in 0 until minOf(channels, out.size)) {
+                out[c].copyInto(out[c], prefix, 0, samples - prefix)
+                out[c].fill(0f, 0, prefix)
+            }
+        }
         val end = xfadeEndSample
         if (end < 0 || chunkStart < end) {
             subSourceMilliSamples.set(read.sourcePositionMilliSamples)
@@ -725,7 +745,7 @@ class GuildMixer(
      */
     fun advanceParallelOverlays(samples: Int, feederId: Long): List<OverlaySlot> {
         if (!isFeeder(feederId)) return emptyList()
-        val active = synchronized(lock) { parallelOverlays.values.filter { it.active } }
+        val active = parallelOverlaySnapshot.filter { it.active }
         for (slot in active) slot.ramp.advance(samples)
         return active
     }
@@ -754,6 +774,11 @@ class GuildMixer(
      * to silence on the sub side for this frame.
      */
     fun noteUnderrun(missing: Int, requested: Int) {
+        val prefix = if (xfadeStartSample >= 0L) {
+            (xfadeStartSample - (chainPos.get() - requested)).coerceIn(0L, requested.toLong()).toInt()
+        } else 0
+        val starved = (missing - prefix).coerceAtLeast(0)
+        if (starved == 0) return
         if (!xfadeActive || missing <= 0) return
         val now = System.currentTimeMillis()
         val last = underrunWarnAt.get()
@@ -761,7 +786,7 @@ class GuildMixer(
         log.warn(
             "crossfade sub starvation on guild {}: {} of {} samples silent " +
                 "(pending={}f/{}ms dropped={}f/{}ms subOut={}ms)",
-            guildId, missing, requested,
+            guildId, starved, requested - prefix,
             siphon.pendingFrames, siphon.pendingSamples * 1000L / SAMPLE_RATE,
             siphon.droppedFrames, siphon.droppedSamples,
             subOutputSamples.get() * 1000L / SAMPLE_RATE,
@@ -861,7 +886,10 @@ class GuildMixer(
     /** Test seam: count currently active parallel overlay slots. */
     internal fun parallelOverlayCountForTest(): Int = synchronized(lock) { parallelOverlays.size }
     internal fun installParallelOverlayForTest(slot: OverlaySlot) {
-        synchronized(lock) { parallelOverlays[slot.id] = slot }
+        synchronized(lock) {
+            parallelOverlays[slot.id] = slot
+            publishParallelOverlaysLocked()
+        }
     }
     internal fun overlayForTest(active: Boolean, channel: AnnounceChannel = AnnounceChannel.BOTH) {
         synchronized(lock) {
@@ -877,6 +905,7 @@ class GuildMixer(
             repeat(count) { i ->
                 parallelOverlays[i.toLong()] = OverlaySlot(i.toLong(), playerManager.createPlayer(), SiphonQueue.forFrameBuffer(safeFrameBufferDurationMs())).apply { active = true }
             }
+            publishParallelOverlaysLocked()
         }
     }
 
@@ -885,7 +914,9 @@ class GuildMixer(
     /** Keeps the secondary decoder flowing; its PCM is captured by the siphon filter. */
     fun drain() {
         val sub = synchronized(lock) { subPlayer?.takeIf { it.playingTrack != null } }
-        if (sub != null) {
+        // Providing frees the decoder's frame buffer and lets it produce more PCM.
+        // Keep prewarmed audio bounded while the main decoder has not reached the fade.
+        if (sub != null && (overlayActive || siphon.pendingSamples < SAMPLE_RATE)) {
             try {
                 sub.provide(drainFrame)
             } catch (e: Exception) {
@@ -942,7 +973,7 @@ class GuildMixer(
         if (xfadeActive) logXfadeProgress(action)
         when (action) {
             is PollAction.None -> Unit
-            is PollAction.StartOverlap -> startOverlap(action.plan, action.fence)
+            is PollAction.StartOverlap -> prepareOverlap(action.plan, action.fence)
             is PollAction.Handoff -> doHandoff()
             is PollAction.AdvanceNext -> advanceNext(action.fence)
             is PollAction.AbortXfade -> abortXfade(action.reason)
@@ -1032,8 +1063,8 @@ class GuildMixer(
                     // Realtime fallback: sustained silence inside the tail window.
                     if (readyNextTrack == null) promoteForcedLocked()
                     return PollAction.AdvanceNext(transitionFenceLocked())
-                } else if (readyNextTrack != null && plan != null && !silenceBeforeOverlap &&
-                    chainPos.get() >= plan.startMs * SAMPLE_RATE / 1000
+                } else if (overlapPreparation == null && readyNextTrack != null && plan != null && !silenceBeforeOverlap &&
+                    chainPos.get() >= (plan.startMs - 2000L).coerceAtLeast(0L) * SAMPLE_RATE / 1000
                 ) {
                     // Chain, not track.position: the mix lands on frames as they
                     // are decoded, which runs a frame buffer ahead of playback.
@@ -1218,10 +1249,10 @@ class GuildMixer(
 
     fun hasNext(): Boolean = synchronized(lock) { pendingNextTrack != null || readyNextTrack != null }
 
-    fun isOverlayActive(): Boolean = synchronized(lock) { overlayActive }
+    fun isOverlayActive(): Boolean = overlayActive
     fun currentOverlayChannel(): AnnounceChannel = sequentialOverlayChannel
     fun isXfadeActive(): Boolean = synchronized(lock) { xfadeActive }
-    fun isSubBusy(): Boolean = synchronized(lock) { overlayActive || xfadeActive || analysisState.active || parallelOverlays.isNotEmpty() }
+    fun isSubBusy(): Boolean = synchronized(lock) { overlayActive || xfadeActive || overlapPreparation != null || analysisState.active || parallelOverlays.isNotEmpty() }
 
     // ---- announcement queue ----
     //
@@ -1235,7 +1266,7 @@ class GuildMixer(
         guildId = guildId,
         activeParallelCount = { parallelOverlays.size },
         maxParallelOverlays = { maxParallelOverlays },
-        isSequentialBusy = { overlayActive || xfadeActive },
+        isSequentialBusy = { overlayActive || xfadeActive || overlapPreparation != null },
     )
 
     /** Queues an announcement; returns its id and 1-based position among queued announcements. */
@@ -1327,7 +1358,7 @@ class GuildMixer(
             return track
         }
         val (sub, gen) = synchronized(lock) {
-            if (overlayActive || xfadeActive) throw MixerBusyException("secondary player busy on guild $guildId")
+            if (overlayActive || xfadeActive || overlapPreparation != null) throw MixerBusyException("secondary player busy on guild $guildId")
             val s = ensureSubLocked()
             siphonFactory?.resetSpeed()
             announceToken++
@@ -1401,6 +1432,7 @@ class GuildMixer(
             s.active = true
             s.ramp.setNow(0f)
             s.ramp.rampTo(1f, msToSamples(150))
+            publishParallelOverlaysLocked()
             // First parallel overlay (or a parallel overlay while music is
             // not otherwise ducked) ducks the music.
             mainGain.rampTo(duck.coerceIn(0f, 1f), msToSamples(duckFadeMs))
@@ -1440,6 +1472,7 @@ class GuildMixer(
             pendingNextTrack = null
             readyNextTrack = null
             deferredWarmup = null
+            overlapPreparation = null
             protocol.clearArmedLocked()
             subTrack = null
             xfadeActive = false
@@ -1448,6 +1481,7 @@ class GuildMixer(
             siphonFactory?.resetSpeed()
             val p = parallelOverlays.values.toList()
             parallelOverlays.clear()
+            publishParallelOverlaysLocked()
             subPlayer.also { subPlayer = null } to p
         }
         try {
@@ -1524,17 +1558,32 @@ class GuildMixer(
     }
 
 
-    private fun startOverlap(plan: CrossfadePlan, expected: TransitionFence? = null) {
+    private fun prepareOverlap(plan: CrossfadePlan, fence: TransitionFence) {
+        synchronized(lock) {
+            if (overlapPreparation != null || overlayActive || xfadeActive || !matchesFenceLocked(fence)) return
+            overlapPreparation = fence
+        }
+        protocol.executeAction {
+            try {
+                startOverlap(plan, fence)
+            } catch (e: Exception) {
+                log.warn("overlap preparation failed on guild {}", guildId, e)
+            } finally {
+                synchronized(lock) { if (overlapPreparation === fence) overlapPreparation = null }
+            }
+        }
+    }
+
+    private fun startOverlap(plan: CrossfadePlan, expected: TransitionFence) {
         data class OverlapSetup(val next: AudioTrack, val epoch: Long, val seq: Long, val revision: Long, val requestedStartMs: Long)
-        // Pop the slot first; seeks and playTrack run outside the lock.
-        val (next, epochAtStart, seqAtStart, revisionAtStart, requestedStartMs) = synchronized(lock) {
+        // Keep the original queued until PCM is ready, so natural track end can still advance it.
+        val (queued, epochAtStart, seqAtStart, revisionAtStart, requestedStartMs) = synchronized(lock) {
             if (!crossfadeEnabled || protocol.preserveTransition) return
-            if (expected != null && !matchesFenceLocked(expected)) return
+            if (!matchesFenceLocked(expected)) return
             val n = readyNextTrack ?: pendingNextTrack ?: return
-            readyNextTrack = null
-            pendingNextTrack = null
             OverlapSetup(n, protocol.gate.lastKnownEpoch, protocol.advanceSeq.get(), slotRevision, protocol.armedStartPositionMs)
         }
+        val next = queued.makeClone()
         if ((plan.beatMatched || plan.incomingStartMs > 0 || requestedStartMs > 0) && next.isSeekable) {
             val lead = if (silenceSkipEnabled) synchronized(lock) { leadForLocked(next) } else 0L
             val target = maxOf(lead, plan.incomingStartMs, requestedStartMs)
@@ -1551,12 +1600,8 @@ class GuildMixer(
             seekPastLead(next)
         }
         val incomingStartPosition = safePosition(next)
-        // Pre-warm the secondary decoder BEFORE arming the fade. playTrack()
-        // returns after Lavaplayer fills the whole frame buffer; draining a
-        // burst here lets the siphon bank up to a frame-buffer's worth of PCM
-        // so the overlap's opening seconds are actually audible — previously
-        // the sub side started with a near-empty siphon (pending=1s,
-        // dropped=22k+ frames, subOut lagging subPos by a full second).
+        // playTrack starts decoding asynchronously. Wait for captured PCM on the
+        // action worker, keeping the shared scheduler and main PCM path running.
         val sub = synchronized(lock) {
             val s = ensureSubLocked()
             siphon.clear()
@@ -1572,21 +1617,20 @@ class GuildMixer(
         } catch (e: Exception) {
             log.warn("overlap pre-start play failed on guild {}", guildId, e)
         }
-        prefillSubSiphon(sub)
+        val ready = prefillSubSiphon(sub) {
+            synchronized(lock) { crossfadeEnabled && !protocol.preserveTransition && matchesFenceLocked(expected) && !overlayActive && !xfadeActive }
+        }
         val gen = synchronized(lock) {
-            if (protocol.gate.lastKnownEpoch != epochAtStart || protocol.advanceSeq.get() != seqAtStart ||
+            val startSample = maxOf(plan.startMs * SAMPLE_RATE / 1000, chainPos.get())
+            if (!ready || !crossfadeEnabled || protocol.preserveTransition || overlayActive || xfadeActive ||
+                startSample >= plan.handoffMs * SAMPLE_RATE / 1000 || !matchesFenceLocked(expected) ||
+                protocol.gate.lastKnownEpoch != epochAtStart || protocol.advanceSeq.get() != seqAtStart ||
                 slotRevision != revisionAtStart || protocol.playbackState != PlaybackState.ARMED) {
                 if (!xfadeActive) siphonFactory?.resetSpeed()
                 null
-            } else if (overlayActive || xfadeActive) {
-                // Lost a race with an overlay/overlap started on another thread:
-                // re-queue rather than dropping the track.
-                if (!xfadeActive) siphonFactory?.resetSpeed()
-                if (readyNextTrack == null) readyNextTrack = next
-                else if (pendingNextTrack == null) pendingNextTrack = next
-                else log.warn("dropping overlapped queue on guild {}: slot busy", guildId)
-                null
             } else {
+                if (readyNextTrack === queued) readyNextTrack = null
+                if (pendingNextTrack === queued) pendingNextTrack = null
                 val nativeFailed = siphonFactory?.nativeFailed == true
                 if (plan.beatMatched && nativeFailed) {
                     siphonFactory?.resetSpeed()
@@ -1596,7 +1640,6 @@ class GuildMixer(
 
                 subTrack = next
                 overlayActive = false
-                xfadeActive = true
                 xfadeTransitionKind = if (nativeFailed) "crossfade" else plan.transitionKind
                 xfadeDecisionReason = if (nativeFailed) "timescale_native_failed" else plan.reason
                 xfadeHandoffMs = plan.handoffMs
@@ -1607,21 +1650,21 @@ class GuildMixer(
                 subStartMs = System.currentTimeMillis()
                 xfadeTotal = msToSamples(plan.durationMs).coerceAtLeast(1)
                 xfadeLeft = xfadeTotal
-                xfadeStartSample = plan.startMs * SAMPLE_RATE / 1000
+                xfadeStartSample = startSample
                 xfadeEndSample = plan.handoffMs * SAMPLE_RATE / 1000
-                xfadeFadeEndSample = (plan.startMs + plan.overlapMs) * SAMPLE_RATE / 1000
+                xfadeFadeEndSample = maxOf(startSample + 1, (plan.startMs + plan.overlapMs) * SAMPLE_RATE / 1000)
                 // Sub-track normalization gain: applied on top of the sin curve.
                 subNormGain = if (normalizationEnabled) normGainForLocked(next) else 1f
-                val startSample = xfadeStartSample
-                if (chainPos.get() > startSample) {
+                if (startSample > plan.startMs * SAMPLE_RATE / 1000) {
                     log.warn(
                         "crossfade on guild {} armed {}ms after its window opened " +
                             "(chain at {}ms, window {}ms..{}ms); the fade starts late",
-                        guildId, (chainPos.get() - startSample) * 1000L / SAMPLE_RATE,
+                        guildId, (startSample - plan.startMs * SAMPLE_RATE / 1000) * 1000L / SAMPLE_RATE,
                         chainPos.get() * 1000L / SAMPLE_RATE, plan.startMs, plan.handoffMs,
                     )
                 }
                 xfadeLogMs = 0L
+                xfadeActive = true
                 ++subGen
             }
         }
@@ -1691,23 +1734,18 @@ class GuildMixer(
         }
     }
 
-    /**
-     * Pumps the just-started secondary decoder so the siphon banks a
-     * frame-buffer's worth of PCM before the fade begins mixing it.
-     * playTrack() returns once Lavaplayer has decoded the frame buffer full;
-     * without this drain that audio stays inside the sub player's own frame
-     * buffer and the siphon only fills at live-decode speed, leaving the
-     * overlap's opening chunk starved (subOut lagging subPos by ~1s).
-     */
-    private fun prefillSubSiphon(sub: AudioPlayer) {
+    /** Waits for one second of PCM, or a fully decoded short track, before fading. */
+    private fun prefillSubSiphon(sub: AudioPlayer, current: () -> Boolean): Boolean {
         val frame = newSubProvideFrame()
         try {
             var burst = 0
-            val deadline = System.currentTimeMillis() + 2000
-            while (burst < 600 && System.currentTimeMillis() < deadline) {
-                if (!pumpSubFrame(sub, frame)) break
-                burst++
+            val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(2)
+            while (burst < 600 && System.nanoTime() < deadline && current()) {
+                if (siphon.pendingSamples >= SAMPLE_RATE) return true
+                if (sub.playingTrack == null) return siphon.pendingSamples > 0
+                if (pumpSubFrame(sub, frame)) burst++ else Thread.sleep(5)
             }
+            return siphon.pendingSamples >= SAMPLE_RATE && current()
         } finally {
             frame.setBuffer(java.nio.ByteBuffer.allocate(0))
         }
@@ -2013,8 +2051,12 @@ class GuildMixer(
 
     /** Tears down a `mode=parallel` overlay slot and releases the duck if it was the last. */
     private fun finishParallelOverlay(id: Long) {
-        val slot = synchronized(lock) { parallelOverlays.remove(id) } ?: return
-        slot.active = false
+        val slot = synchronized(lock) {
+            val removed = parallelOverlays.remove(id) ?: return
+            removed.active = false
+            publishParallelOverlaysLocked()
+            removed
+        }
         log.info("parallel overlay (id {}) finished on guild {}", id, guildId)
         notifyMixerEvent("announceEnd") { put("announcementId", id) }
         try {
@@ -2134,6 +2176,23 @@ class GuildMixer(
 
     data class CurrentTempo(val identifier: String, val bpm: Float)
 
+    data class TrackKey(val identifier: String, val analysis: KeyAnalysis)
+
+    /** Identity and estimate are captured together; an unknown estimate still represents a completed scan. */
+    fun currentKey(): TrackKey? = synchronized(lock) {
+        if (!keyDetectionEnabled) return null
+        val track = main?.audioPlayer?.playingTrack ?: return null
+        val result = idOf(track)?.let { AnalysisCaches.key[it] } ?: return null
+        TrackKey(track.info.identifier, result)
+    }
+
+    fun peekNextKey(): TrackKey? = synchronized(lock) {
+        if (!keyDetectionEnabled) return null
+        val track = readyNextTrack ?: pendingNextTrack ?: return null
+        val result = idOf(track)?.let { AnalysisCaches.key[it] } ?: return null
+        TrackKey(track.info.identifier, result)
+    }
+
     fun currentTempo(): CurrentTempo? = synchronized(lock) {
         if (!bpmDetectionEnabled) return null
         val track = main?.audioPlayer?.playingTrack ?: return null
@@ -2237,7 +2296,7 @@ class GuildMixer(
             val candidates = listOfNotNull(
                 pendingNextTrack,
                 readyNextTrack,
-                if (bpmDetectionEnabled || silenceSkipEnabled) mainPlaying else null,
+                if (bpmDetectionEnabled || keyDetectionEnabled || silenceSkipEnabled) mainPlaying else null,
             )
             val pending = candidates.firstOrNull { candidate ->
                 if (!candidate.isSeekable || candidate.duration <= 0) return@firstOrNull false
@@ -2245,7 +2304,8 @@ class GuildMixer(
                 val needSilence = silenceSkipEnabled && !AnalysisCaches.trim.contains(id)
                 val needNorm = candidate !== mainPlaying && normalizationEnabled && !AnalysisCaches.norm.contains(id)
                 val needBpm = bpmDetectionEnabled && needsBpmAnalysisLocked(id)
-                (needSilence || needNorm || needBpm) && analysisState.canRetryLocked(id, now)
+                val needKey = keyDetectionEnabled && !AnalysisCaches.key.contains(id)
+                (needSilence || needNorm || needBpm || needKey) && analysisState.canRetryLocked(id, now)
             } ?: return null
             log.debug("retrying deferred analysis for '{}' on guild {}", titleOf(pending), guildId)
             try {
@@ -2264,7 +2324,8 @@ class GuildMixer(
         synchronized(lock) {
             val needSilence = includeSilence && !AnalysisCaches.trim.contains(id)
             val needBpm = bpmDetectionEnabled && needsBpmAnalysisLocked(id)
-            if ((!needSilence && !needBpm) || !track.isSeekable || track.duration <= 0) return false
+            val needKey = keyDetectionEnabled && !AnalysisCaches.key.contains(id)
+            if ((!needSilence && !needBpm && !needKey) || !track.isSeekable || track.duration <= 0) return false
             if (analysisQueued || analysisState.active) {
                 deferredWarmup = track
                 return true
@@ -2312,7 +2373,8 @@ class GuildMixer(
         val doSilence = silenceSkipEnabled && includeSilence
         val doNorm = normalizationEnabled && !cacheOnly
         val doBpm = bpmDetectionEnabled
-        if (!doSilence && !doNorm && !doBpm) {
+        val doKey = keyDetectionEnabled && track.isSeekable && track.duration in 1 until Long.MAX_VALUE / 2
+        if (!doSilence && !doNorm && !doBpm && !doKey) {
             if (!cacheOnly) synchronized(lock) { promoteIfPendingLocked() }
             return
         }
@@ -2324,7 +2386,8 @@ class GuildMixer(
             val hasSilence = !doSilence || AnalysisCaches.trim.contains(identifier)
             val hasNorm = !doNorm || AnalysisCaches.norm.contains(identifier)
             val hasBpm = !doBpm || !needsBpmAnalysisLocked(identifier)
-            if (hasSilence && hasNorm && hasBpm) {
+            val hasKey = !doKey || AnalysisCaches.key.contains(identifier)
+            if (hasSilence && hasNorm && hasBpm && hasKey) {
                 if (!cacheOnly) promoteIfPendingLocked(identifier)
                 return
             }
@@ -2345,6 +2408,7 @@ class GuildMixer(
             val hasSilence = doSilence && !AnalysisCaches.trim.contains(identifier)
             val hasNorm = doNorm && !AnalysisCaches.norm.contains(identifier)
             val needBpm = doBpm && synchronized(lock) { needsBpmAnalysisLocked(identifier) }
+            val needKey = doKey && !AnalysisCaches.key.contains(identifier)
             val result = analysisService.analyze(
                 track,
                 TrackAnalysisSettings(
@@ -2356,6 +2420,8 @@ class GuildMixer(
                     silenceHeadScanMs = silenceHeadScanMs,
                     silenceTailScanMs = silenceTailScanMs,
                     bpmScanMs = bpmScanMs,
+                    key = needKey,
+                    keyScanMs = keyScanMs,
                 ),
             )
             if (result.aborted || result.featuresHead?.unknownReason == "incomplete_window" ||
@@ -2368,6 +2434,7 @@ class GuildMixer(
                 applyAnalyzedNormGain(identifier)
                 log.info("normalization guild {}: lufs={}", guildId, result.loudnessRms)
             }
+            if (needKey && result.key != null) AnalysisCaches.key[identifier] = result.key
             if (needBpm && result.bpm != null) {
                 AnalysisCaches.bpm[identifier] = result.bpm
                 log.info(

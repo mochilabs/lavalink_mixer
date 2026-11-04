@@ -253,6 +253,16 @@ Content-Type: application/json
 
 ## 재생 상태 확인
 
+시작한 크로스페이드마다 INFO 한 줄을 남깁니다. `beatMatched`, 적용·폴백 이유,
+두 곡의 BPM·조성과 신뢰도, 분석 구간, RMS 에너지, 리듬 안정성, 실제 적용한
+템포 비율·페이드 박 수를 확인할 수 있습니다. BPM·조성 분석 방법과 판정에
+사용한 신뢰도·템포 변경 한계도 표시합니다. 측정값이 없거나 판단이 모호하면
+이를 명시하며, 신뢰도는 휴리스틱 점수이고 조성은 분석 구간의 추정치입니다.
+
+진행 상황·보조 버퍼 부족·지연 시작·핸드오프 상세는 DEBUG로 출력합니다.
+전환 중단과 재생 실패 경고는 유지합니다.
+필드 설명과 DEBUG 설정은 [콘솔 진단](docs/development.md#read-transition-logs)을 참고하세요.
+
 테스트 중 `GET /mixer/state?guildId=...`를 확인합니다.
 
 - 겹침 오디오가 들리지 않으면 `mixerFilterActive`, `nextTrackIdentifier`, `subTrackIdentifier`를 확인합니다.

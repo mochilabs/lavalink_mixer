@@ -253,6 +253,18 @@ Consume these custom messages on the existing Lavalink WebSocket connection:
 
 ## Inspect playback
 
+Each started crossfade writes one INFO line with `beatMatched`, the decision or
+fallback reason, both tracks' BPM/key estimates and confidence, analysis windows,
+RMS energy, rhythm stability, and the selected tempo ratio and fade beats.
+The line names the BPM/key analysis methods and the confidence/tempo limits used
+by the planner. Missing and ambiguous measurements remain explicit. Confidence
+scores are heuristic, and keys describe the sampled windows.
+
+Progress, secondary-buffer starvation, late-start details, and handoff diagnostics
+use DEBUG. Transition aborts and playback failures retain their warning logs.
+See [console diagnostics](docs/development.md#read-transition-logs) for fields and
+the DEBUG setting.
+
 Use `GET /mixer/state?guildId=...` while testing:
 
 - Check `mixerFilterActive`, `nextTrackIdentifier`, and `subTrackIdentifier` when overlap audio is missing.

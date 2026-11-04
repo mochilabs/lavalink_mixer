@@ -338,7 +338,7 @@ class GuildMixer(
     private var filterBaselinePos = 0L
     @Volatile private var filterMissing: Boolean = false
     private var filterMissingWarned: Boolean = false
-    private val underrunWarnAt = AtomicLong(0L)
+    private val underrunLogAt = AtomicLong(0L)
     private var xfadeLogMs: Long = 0L
 
     private val mainGain = GainRamp(1f)
@@ -769,11 +769,12 @@ class GuildMixer(
     internal fun chainPosSamples(): Long = chainPos.get()
 
     /**
-     * Throttled voice-thread warning: an overlap is fading in but the
+     * Throttled DEBUG diagnostic: an overlap is fading in but the
      * secondary decoder did not supply the whole chunk, so the mix dropped
      * to silence on the sub side for this frame.
      */
     fun noteUnderrun(missing: Int, requested: Int) {
+        if (!log.isDebugEnabled) return
         val prefix = if (xfadeStartSample >= 0L) {
             (xfadeStartSample - (chainPos.get() - requested)).coerceIn(0L, requested.toLong()).toInt()
         } else 0
@@ -781,9 +782,9 @@ class GuildMixer(
         if (starved == 0) return
         if (!xfadeActive || missing <= 0) return
         val now = System.currentTimeMillis()
-        val last = underrunWarnAt.get()
-        if (now - last < 1000 || !underrunWarnAt.compareAndSet(last, now)) return
-        log.warn(
+        val last = underrunLogAt.get()
+        if (now - last < 1000 || !underrunLogAt.compareAndSet(last, now)) return
+        log.debug(
             "crossfade sub starvation on guild {}: {} of {} samples silent " +
                 "(pending={}f/{}ms dropped={}f/{}ms subOut={}ms)",
             guildId, starved, requested - prefix,
@@ -948,7 +949,7 @@ class GuildMixer(
 
     private sealed interface PollAction {
         data object None : PollAction
-        data class StartOverlap(val plan: CrossfadePlan, val fence: TransitionFence) : PollAction
+        data class StartOverlap(val plan: CrossfadePlan, val fence: TransitionFence, val analysisLog: String) : PollAction
         data object Handoff : PollAction
         data class AdvanceNext(val fence: TransitionFence) : PollAction
         data class AbortXfade(val reason: String) : PollAction
@@ -970,10 +971,10 @@ class GuildMixer(
 
     private fun executePoll(action: PollAction) {
         // Read the transition state before acting on it: doHandoff clears it.
-        if (xfadeActive) logXfadeProgress(action)
+        if (xfadeActive && log.isDebugEnabled) logXfadeProgress(action)
         when (action) {
             is PollAction.None -> Unit
-            is PollAction.StartOverlap -> prepareOverlap(action.plan, action.fence)
+            is PollAction.StartOverlap -> prepareOverlap(action.plan, action.fence, action.analysisLog)
             is PollAction.Handoff -> doHandoff()
             is PollAction.AdvanceNext -> advanceNext(action.fence)
             is PollAction.AbortXfade -> abortXfade(action.reason)
@@ -981,7 +982,7 @@ class GuildMixer(
         checkJitWindow()
     }
 
-    /** 1Hz breadcrumb while an overlap runs: is the sub actually feeding us? */
+    /** Detailed overlap progress, logged at most once per second at DEBUG. */
     private fun logXfadeProgress(action: PollAction) {
         val now = System.currentTimeMillis()
         if (now - xfadeLogMs < 1000) return
@@ -997,7 +998,7 @@ class GuildMixer(
             subPos = subTrack?.let { safePosition(it) } ?: -1L
             subOutMs = subOutputSamples.get()
         }
-        log.info(
+        log.debug(
             "crossfade progress guild {} at {}ms (decoded {}ms) /handoff {}ms ({}ms left, action={}): " +
                 "pending={}f/{}ms dropped={}f subOut={}ms subPos={}ms mixerFilterCalls={}",
             guildId, pos, chain, handoff, (handoff - pos).coerceAtLeast(0), action,
@@ -1068,7 +1069,10 @@ class GuildMixer(
                 ) {
                     // Chain, not track.position: the mix lands on frames as they
                     // are decoded, which runs a frame buffer ahead of playback.
-                    return PollAction.StartOverlap(plan, transitionFenceLocked())
+                    val fence = transitionFenceLocked()
+                    val analysisLog = transitionAnalysisLog(fence.outgoing?.let { idOf(it) }, fence.incoming?.let { idOf(it) }) +
+                        " limits={minConfidence=$beatmatchMinConfidence maxTempoChange=$maxTempoChange}"
+                    return PollAction.StartOverlap(plan, fence, analysisLog)
                 } else if (adaptiveTrim != null && pos >= adaptiveTrim!!.decision.outgoingContentEndMs) {
                     if (readyNextTrack == null) promoteForcedLocked()
                     return PollAction.AdvanceNext(transitionFenceLocked())
@@ -1558,14 +1562,14 @@ class GuildMixer(
     }
 
 
-    private fun prepareOverlap(plan: CrossfadePlan, fence: TransitionFence) {
+    private fun prepareOverlap(plan: CrossfadePlan, fence: TransitionFence, analysisLog: String) {
         synchronized(lock) {
             if (overlapPreparation != null || overlayActive || xfadeActive || !matchesFenceLocked(fence)) return
             overlapPreparation = fence
         }
         protocol.executeAction {
             try {
-                startOverlap(plan, fence)
+                startOverlap(plan, fence, analysisLog)
             } catch (e: Exception) {
                 log.warn("overlap preparation failed on guild {}", guildId, e)
             } finally {
@@ -1574,8 +1578,9 @@ class GuildMixer(
         }
     }
 
-    private fun startOverlap(plan: CrossfadePlan, expected: TransitionFence) {
+    private fun startOverlap(plan: CrossfadePlan, expected: TransitionFence, analysisLog: String) {
         data class OverlapSetup(val next: AudioTrack, val epoch: Long, val seq: Long, val revision: Long, val requestedStartMs: Long)
+        data class StartedOverlap(val generation: Long, val startSample: Long, val beatMatched: Boolean, val fallbackReason: String?)
         // Keep the original queued until PCM is ready, so natural track end can still advance it.
         val (queued, epochAtStart, seqAtStart, revisionAtStart, requestedStartMs) = synchronized(lock) {
             if (!crossfadeEnabled || protocol.preserveTransition) return
@@ -1620,7 +1625,7 @@ class GuildMixer(
         val ready = prefillSubSiphon(sub) {
             synchronized(lock) { crossfadeEnabled && !protocol.preserveTransition && matchesFenceLocked(expected) && !overlayActive && !xfadeActive }
         }
-        val gen = synchronized(lock) {
+        val started = synchronized(lock) {
             val startSample = maxOf(plan.startMs * SAMPLE_RATE / 1000, chainPos.get())
             if (!ready || !crossfadeEnabled || protocol.preserveTransition || overlayActive || xfadeActive ||
                 startSample >= plan.handoffMs * SAMPLE_RATE / 1000 || !matchesFenceLocked(expected) ||
@@ -1656,7 +1661,7 @@ class GuildMixer(
                 // Sub-track normalization gain: applied on top of the sin curve.
                 subNormGain = if (normalizationEnabled) normGainForLocked(next) else 1f
                 if (startSample > plan.startMs * SAMPLE_RATE / 1000) {
-                    log.warn(
+                    log.debug(
                         "crossfade on guild {} armed {}ms after its window opened " +
                             "(chain at {}ms, window {}ms..{}ms); the fade starts late",
                         guildId, (startSample - plan.startMs * SAMPLE_RATE / 1000) * 1000L / SAMPLE_RATE,
@@ -1665,10 +1670,10 @@ class GuildMixer(
                 }
                 xfadeLogMs = 0L
                 xfadeActive = true
-                ++subGen
+                StartedOverlap(++subGen, startSample, xfadeBeatMatched, xfadeFallbackReason)
             }
         }
-        if (gen == null) {
+        if (started == null) {
             if (sub.playingTrack === next) {
                 runCatching { sub.stopTrack() }.onFailure { log.warn("superseded overlap stop failed on guild {}", guildId, it) }
             }
@@ -1679,7 +1684,7 @@ class GuildMixer(
         // while playTrack was in flight bumps subGen and stops an empty sub —
         // the playTrack above then decodes a zombie into a torn-down slot.
         // Detect and unwind it: stop the decoder and only restore if not superseded by control plane.
-        val stillCurrent = synchronized(lock) { subGen == gen && xfadeActive && subTrack === next }
+        val stillCurrent = synchronized(lock) { subGen == started.generation && xfadeActive && subTrack === next }
         if (!stillCurrent) {
             log.warn("overlap superseded during start on guild {}; unwinding '{}'", guildId, titleOf(next))
             if (sub.playingTrack === next) {
@@ -1707,11 +1712,17 @@ class GuildMixer(
             if (synchronized(lock) { !xfadeActive && !overlayActive }) siphon.clear()
             return
         }
+        val beatmatchLog = if (started.beatMatched) {
+            "targetBpm=${plan.targetBpm} rateRatio=${plan.rateRatio} fadeBeats=${plan.fadeBeats}"
+        } else "rateRatio=1.0"
         log.info(
-            "crossfade started on guild {} at {}ms; handoff at {}ms ({}ms audible overlap); " +
-                "sub track '{}' @{}ms, mixerFilterCalls={}",
-            guildId, plan.startMs, plan.handoffMs, plan.durationMs,
-            titleOf(next), subStartPositionMs, filterRunCount.get(),
+            "crossfade guild={} from='{}' to='{}' beatMatched={} reason={} durationMs={} lateMs={} {} {}",
+            guildId, expected.outgoing?.let { titleOf(it) }?.replace('\n', ' ')?.replace('\r', ' '),
+            titleOf(next).replace('\n', ' ').replace('\r', ' '), started.beatMatched,
+            started.fallbackReason ?: plan.reason ?: "none",
+            (plan.handoffMs * SAMPLE_RATE / 1000 - started.startSample) * 1000 / SAMPLE_RATE,
+            (started.startSample - plan.startMs * SAMPLE_RATE / 1000) * 1000 / SAMPLE_RATE,
+            beatmatchLog, analysisLog,
         )
         val mainPosMs = main?.audioPlayer?.playingTrack?.let { safePosition(it) } ?: 0L
         notifyMixerEvent("overlapStart") {
@@ -1929,7 +1940,7 @@ class GuildMixer(
             }
             try {
                 mainPlayer.play(handoff.clone)
-                log.info(
+                log.debug(
                     "crossfade handoff on guild {} at {}ms (sub decoder was at {}ms, " +
                         "{}ms of sub audio heard, {} frames dropped)",
                     guildId, handoff.outputPosition, handoff.subReportedMs, handoff.subOutMs, handoff.droppedFrames,

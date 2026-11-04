@@ -208,6 +208,13 @@ The crossfade secondary pump pauses while at least one second of PCM is banked, 
 early preparation does not drain into queue overflow before the fade. Chunks
 crossing the fade start zero-fill their prefix without consuming incoming PCM.
 
+At overlap planning, console diagnostics snapshot the cached outgoing tail and
+incoming head measurements and configured matching limits. Once preparation
+commits, one INFO line reports those inputs and the applied beat-match decision.
+Progress, buffer starvation, late-start details, and handoff logs use DEBUG.
+Failure and abort warnings remain enabled. Diagnostic formatting does not decode
+audio or run another analysis pass.
+
 ### The three playback positions
 
 | Position | Meaning | Used for |

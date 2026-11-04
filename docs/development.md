@@ -47,6 +47,7 @@ Use these existing tests as starting points:
 | PCM and gain behavior | `MixerFilterTest`, `GainRampTest`, `SiphonQueueTest` |
 | Transition callback locks and decoder readiness | `PlayerCallbackLockTest`, `OverlapPreparationTest`, `XfadeVoicePathTest` |
 | Musical key estimation and REST metadata | `KeyDetectorTest`, `KeyIntegrationTest`, `TransitionFeaturesTest` |
+| Transition console diagnostics | `TransitionDiagnosticsTest`, `BeatMatchOutputTest`, `BeatMatchIntegrationTest` |
 | Announcements | `AnnounceQueueTest` |
 | Analysis ownership and retries | `AnalysisIsolatedFromLiveSubTest`, `DeferredAnalysisTest` |
 | Silence and trim | `SilenceAnalyzerTest`, `TailCutDeciderTest`, `TrimTransitionTest` |
@@ -95,6 +96,44 @@ auto-skip behavior, epochs, and `MixerAdvancedEvent` handling.
 The TypeScript client example has no repository-level package manifest or
 dedicated type-check task. Validate example changes in a consuming bot project
 and state when that validation is unavailable.
+
+## Read transition logs
+
+A started crossfade produces one INFO line. `beatMatched=true` means preparation
+committed with beat matching active. `targetBpm`, `rateRatio`, and `fadeBeats`
+report its target tempo, source speed ratio, and number of fade beats. A fallback
+reports `beatMatched=false`, `rateRatio=1.0`, and its reason. `durationMs` is the
+remaining overlap window; `lateMs` records preparation delay beyond the planned start.
+
+The `outgoing={...}` and `incoming={...}` groups snapshot cached planning inputs:
+
+| Field | Meaning |
+| --- | --- |
+| `bpm`, `bpmConfidence` | Beat-grid tempo and periodicity confidence. Outgoing prefers the tail grid; incoming uses the head grid. |
+| `beatPhaseMs` | Track-relative fitted grid phase, not a musical downbeat. |
+| `key`, `keyConfidence` | Local pitch name and major/minor mode, such as `G:minor`, with heuristic confidence. Unknown keys retain their reason. |
+| `keyWindowMs` | Source interval covered by the key estimate. Independent head-key analysis is used only if transition features are absent. |
+| `featureWindowMs`, `featureStatus` | Source interval and validity of the transition features. |
+| `rms`, `rhythmStability` | RMS amplitude and energy-envelope correlation at the beat period. |
+
+`bpmMethod=onset_acf_wls` names onset analysis, autocorrelation tempo candidates,
+and weighted least-squares grid fitting. `keyMethod=chroma_profile` names chroma
+correlation against major/minor profiles. `limits` contains the planner's minimum
+beat confidence and maximum allowed tempo-ratio change. `unknown` values mean
+no usable measurement exists. These scores are not calibrated probabilities.
+
+Progress, buffer starvation, late-start details, and handoff positions use DEBUG.
+Enable them in Lavalink's `application.yml` when investigating a transition:
+
+```yaml
+logging:
+  level:
+    io.github.mochilabs.mixer.GuildMixer: DEBUG
+```
+
+An abort or playback error still produces a warning. A native failure after the
+start summary can change the final beat-match result; inspect the warning and
+`overlapEnd` fallback fields in that case.
 
 ## Maintain build and API metadata
 

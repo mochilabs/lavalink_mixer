@@ -161,6 +161,7 @@ class BeatMatchIntegrationTest {
     @Test
     fun `tempo difference exceeding maxTempoChange falls back to EqualPower crossfade`() {
         val manager = manager()
+        val logs = TransitionLogCapture(102L)
         val fileA = stereoClickFile("mixer-eq-out", 120.0, 10, offsetMs = 0L)
         val fileB = stereoClickFile("mixer-eq-in", 145.0, 10, offsetMs = 0L)
         try {
@@ -221,8 +222,15 @@ class BeatMatchIntegrationTest {
             assertTrue(handoffCompleted, "handoff never completed")
             assertTrue(player.playingTrack !== trackA, "outgoing track was never handed off")
 
+            val summaries = logs.infoLines()
+            assertEquals(1, summaries.size, "fallback transition should produce one INFO line")
+            assertTrue(summaries.single().contains("beatMatched=false"), summaries.toString())
+            assertTrue(summaries.single().contains("rateRatio=1.0"), summaries.toString())
+            assertTrue(summaries.single().contains("reason=tempo_diff_exceeded"), summaries.toString())
+
             mixer.destroy()
         } finally {
+            logs.close()
             fileA.delete()
             fileB.delete()
         }

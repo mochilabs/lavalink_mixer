@@ -59,6 +59,7 @@ class BeatMatchOutputTest {
         // Known source grids keep this test independent of the BPM estimator.
         val mixer = GuildMixer(900L + fadeBeats, manager, config, Executor { })
         val player = manager.createPlayer()
+        val logs = TransitionLogCapture(mixer.guildId)
         try {
             player.setFilterFactory(PcmFilterFactory { _, _, downstream -> mutableListOf(mixer.newFilter(downstream)) })
             mixer.attachMain(iPlayer(mixer.guildId, player))
@@ -155,7 +156,18 @@ class BeatMatchOutputTest {
             assertTrue(boundaryMs >= minOf(500.0, nativePeriodMs) - 20.0 &&
                 boundaryMs <= maxOf(500.0, nativePeriodMs) + 20.0,
                 "handoff repeated or skipped a click interval: ${boundaryMs}ms")
+            val summaries = logs.infoLines()
+            assertTrue(summaries.size == 1, "expected one INFO line for the entire transition: $summaries")
+            val summary = summaries.single()
+            assertTrue(summary.contains("beatMatched=true"), summary)
+            assertTrue(summary.contains("targetBpm=120.0") && summary.contains("fadeBeats=$fadeBeats"), summary)
+            assertTrue(summary.contains("outgoing={bpm=120.0") && summary.contains("incoming={bpm=$incomingBpm"), summary)
+            assertTrue(summary.contains("key=unknown(synthetic_fixture)") && summary.contains("rhythmStability=1.0"), summary)
+            assertTrue(!summary.contains('\n') && !summary.contains('\r'), summary)
+            mixer.noteUnderrun(960, 960)
+            assertTrue(logs.messages.none { it.second.contains("crossfade progress") || it.second.contains("crossfade sub starvation") || it.second.contains("crossfade handoff") }, logs.messages.toString())
         } finally {
+            logs.close()
             mixer.destroy()
             player.destroy()
             manager.shutdown()

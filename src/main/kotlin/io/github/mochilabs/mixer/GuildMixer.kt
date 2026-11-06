@@ -292,6 +292,20 @@ class GuildMixer(
     /** Voice thread reads these without taking [lock]; races only shift a fade by a chunk. */
     @Volatile private var overlayActive: Boolean = false
     @Volatile private var xfadeActive: Boolean = false
+    @Volatile var activeRecipe: io.github.mochilabs.mixer.analysis.TransitionRecipe? = null
+        private set
+
+    fun setActiveRecipeForTest(
+        recipe: io.github.mochilabs.mixer.analysis.TransitionRecipe?,
+        startSample: Long = 0L,
+        endSample: Long = 0L,
+    ) {
+        activeRecipe = recipe
+        xfadeActive = (recipe != null)
+        xfadeStartSample = startSample
+        xfadeEndSample = endSample
+        xfadeFadeEndSample = endSample
+    }
     private var xfadeHandoffMs: Long = -1L
     /** Main-track instance the armed overlap belongs to; a handoff must never fire after that track was replaced. */
     private var xfadeMainTrack: AudioTrack? = null
@@ -644,22 +658,32 @@ class GuildMixer(
         // reports the (healthy) track as stuck. GainRamp fields are volatile;
         // a race with the control plane only shifts a fade by one chunk.
         if (xfadeActive) {
-            val start = xfadeStartSample
-            val end = xfadeFadeEndSample.takeIf { it >= 0 } ?: xfadeEndSample
-            val t = if (start >= 0 && end > start) {
-                val elapsed = (endOfChunk - start).coerceIn(0L, end - start)
-                xfadeLeft = (end - endOfChunk).coerceAtLeast(0L).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
-                elapsed.toFloat() / (end - start)
+            val recipe = activeRecipe
+            if (recipe != null) {
+                val start = xfadeStartSample
+                val currentSample = (endOfChunk - start).coerceAtLeast(0L)
+                val m = recipe.gainAt(io.github.mochilabs.mixer.analysis.TrackTarget.OUTGOING, currentSample, 1.0f)
+                val s = recipe.gainAt(io.github.mochilabs.mixer.analysis.TrackTarget.INCOMING, currentSample, 0.0f)
+                mainGain.setNow(m)
+                subGain.setNow(s)
             } else {
-                val total = xfadeTotal.coerceAtLeast(1)
-                val left = (xfadeLeft - samples).coerceAtLeast(0)
-                xfadeLeft = left
-                1f - left.toFloat() / total
+                val start = xfadeStartSample
+                val end = xfadeFadeEndSample.takeIf { it >= 0 } ?: xfadeEndSample
+                val t = if (start >= 0 && end > start) {
+                    val elapsed = (endOfChunk - start).coerceIn(0L, end - start)
+                    xfadeLeft = (end - endOfChunk).coerceAtLeast(0L).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+                    elapsed.toFloat() / (end - start)
+                } else {
+                    val total = xfadeTotal.coerceAtLeast(1)
+                    val left = (xfadeLeft - samples).coerceAtLeast(0)
+                    xfadeLeft = left
+                    1f - left.toFloat() / total
+                }
+                val u = t.coerceIn(0f, 1f)
+                // Equal-power curve keeps perceived loudness flat through the overlap.
+                mainGain.setNow(cos(u * PI.toFloat() / 2f))
+                subGain.setNow(sin(u * PI.toFloat() / 2f))
             }
-            val u = t.coerceIn(0f, 1f)
-            // Equal-power curve keeps perceived loudness flat through the overlap.
-            mainGain.setNow(cos(u * PI.toFloat() / 2f))
-            subGain.setNow(sin(u * PI.toFloat() / 2f))
         } else {
             mainGain.advance(samples)
             subGain.advance(samples)
@@ -844,12 +868,14 @@ class GuildMixer(
 
     internal fun endXfadeForTest() {
         xfadeActive = false
+        activeRecipe = null
     }
 
     /** Test seam: fully reset overlap state without touching sub listeners. */
     internal fun clearXfadeForTest() {
         synchronized(lock) {
             xfadeActive = false
+            activeRecipe = null
             xfadeHandoffMs = -1L
             xfadeStartSample = -1L
             xfadeEndSample = -1L
@@ -1069,6 +1095,15 @@ class GuildMixer(
                 ) {
                     // Chain, not track.position: the mix lands on frames as they
                     // are decoded, which runs a frame buffer ahead of playback.
+                    val incoming = readyNextTrack!!
+                    if (!incomingFeaturesReadyLocked(incoming)) {
+                        // A late arm left the incoming track's beatmatching scan
+                        // still running when the fade window opened. Wait for the
+                        // scan to land instead of firing a plain fade with
+                        // missing_features; at file end advance anyway (degraded).
+                        if (pos < duration - 500) return PollAction.None
+                        return PollAction.AdvanceNext(transitionFenceLocked())
+                    }
                     val fence = transitionFenceLocked()
                     val analysisLog = transitionAnalysisLog(fence.outgoing?.let { idOf(it) }, fence.incoming?.let { idOf(it) }) +
                         " limits={minConfidence=$beatmatchMinConfidence maxTempoChange=$maxTempoChange}"
@@ -2378,6 +2413,19 @@ class GuildMixer(
     private fun needsBpmAnalysisLocked(identifier: String): Boolean =
         analysisState.completedBpmIdentifier != identifier &&
             !(AnalysisCaches.bpm.contains(identifier) && AnalysisCaches.bpmHead.contains(identifier) && AnalysisCaches.bpmTail.contains(identifier) && AnalysisCaches.featuresHead.contains(identifier) && AnalysisCaches.featuresTail.contains(identifier))
+
+    /**
+     * True once the incoming track's beatmatching inputs (BPM grid + transition
+     * features) are cached, or when beatmatching never needs them. A late arm
+     * can leave analysis running while the fade window opens; the poll loop
+     * uses this to wait for the scan instead of firing a plain fade with
+     * `missing_features`.
+     */
+    private fun incomingFeaturesReadyLocked(track: AudioTrack): Boolean {
+        if (!beatmatchEnabled || !bpmDetectionEnabled) return true
+        val id = idOf(track) ?: return true
+        return !needsBpmAnalysisLocked(id)
+    }
 
     /** Scans a clone on the isolated analysis player. A concurrent scan defers this work. */
     fun analyzeBlocking(track: AudioTrack, cacheOnly: Boolean = false, includeSilence: Boolean = !cacheOnly) {

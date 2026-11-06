@@ -267,6 +267,7 @@ class GuildMixer(
     private var preservedStartTrack: AudioTrack? = null
     private data class PlannedTrim(val outgoing: AudioTrack, val incoming: AudioTrack, val decision: AdaptiveTransitionDecision.SilenceTrim)
     private var adaptiveTrim: PlannedTrim? = null
+    private var plannedRecipe: TransitionRecipe? = null
     data class TransitionStatus(val kind: String, val reason: String?)
     @Volatile var transitionStatus = TransitionStatus("none", null)
         private set
@@ -1215,6 +1216,15 @@ class GuildMixer(
             is AdaptiveTransitionDecision.BeatMatched -> TransitionStatus("beat_matched", "compatible_candidates")
         }
         if (decision is AdaptiveTransitionDecision.SilenceTrim) adaptiveTrim = PlannedTrim(outgoingTrack, incomingTrack, decision)
+        val v2Recipe = AdaptiveTransitionPlannerV2.plan(
+            outgoingGridTail = outGrid?.toExtended(),
+            incomingGridHead = inGrid?.toExtended(),
+            outgoingFeaturesTail = outId?.let { AnalysisCaches.featuresTail[it] },
+            incomingFeaturesHead = inFeatures,
+            requestedCrossfadeMs = crossfadeMs,
+            preserveContext = protocol.preserveTransition,
+        )
+        plannedRecipe = v2Recipe
         return AdaptiveTransitionPlanner.toCrossfadePlan(decision, contentEndMs)?.copy(
             transitionKind = transitionStatus.kind, reason = transitionStatus.reason,
         )
@@ -1696,6 +1706,8 @@ class GuildMixer(
                 xfadeEndSample = plan.handoffMs * SAMPLE_RATE / 1000
                 xfadeFadeEndSample = maxOf(startSample + 1, (plan.startMs + plan.overlapMs) * SAMPLE_RATE / 1000)
                 // Sub-track normalization gain: applied on top of the sin curve.
+                activeRecipe = plannedRecipe
+                plannedRecipe?.let { TransitionMemory.global.record(guildId, it.strategy) }
                 subNormGain = if (normalizationEnabled) normGainForLocked(next) else 1f
                 if (startSample > plan.startMs * SAMPLE_RATE / 1000) {
                     log.debug(

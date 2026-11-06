@@ -58,13 +58,23 @@ object AdaptiveTransitionPlannerV2 {
                     val rateRatio = ((outGrid.bpm * bestM) / inGrid.bpm).toFloat()
                     val hasDownbeats = outGrid.downbeatConfidence >= 0.5f && inGrid.downbeatConfidence >= 0.5f &&
                         !outGrid.isNon44Meter && !inGrid.isNon44Meter
+                    val periodSamples = (SAMPLE_RATE * 60.0 / outGrid.bpm.toDouble())
+                    val periodMs = 60_000.0 / outGrid.bpm.toDouble()
+                    val recoveryMs = if (abs(rateRatio - 1f) < 0.0001f) 0L else {
+                        val desired = maxOf(500.0, abs(rateRatio - 1f) * 20_000.0)
+                        round(ceil(desired / periodMs) * periodMs).toLong()
+                    }
+                    val recoverySamples = recoveryMs * SAMPLE_RATE / 1000L
 
                     if (hasDownbeats) {
                         val hasPhrases = outGrid.phraseConfidence >= 0.5f && inGrid.phraseConfidence >= 0.5f
-                        val fadeBeats = if (hasPhrases) 16 else 8
-                        val cutBar = if (hasPhrases) 4 else 2
-                        val periodSamples = (SAMPLE_RATE * 60.0 / outGrid.bpm.toDouble())
-                        val totalSamples = Math.round(fadeBeats * periodSamples)
+                        val maxFadeMs = (requestedCrossfadeMs - recoveryMs).coerceAtLeast(0L)
+                        val fadeBeats = listOf(16, 8, 4, 2).firstOrNull { b ->
+                            round(b * periodMs).toLong() <= maxFadeMs
+                        } ?: 4
+                        val cutBar = (fadeBeats / 4).coerceAtLeast(1)
+                        val fadeSamples = Math.round(fadeBeats * periodSamples)
+                        val totalSamples = fadeSamples + recoverySamples
                         val swapSample = Math.round(cutBar * 4 * periodSamples)
 
                         return TransitionRecipe(
@@ -76,10 +86,11 @@ object AdaptiveTransitionPlannerV2 {
                                 rateRatio = rateRatio,
                                 startSample = 0L,
                                 handoffSample = totalSamples,
+                                recoverySamples = recoverySamples,
                             ),
                             automations = listOf(
-                                ParamAutomation.VolumeRamp(TrackTarget.OUTGOING, 0L, totalSamples, 1.0f, 0.0f, RampCurve.EQUAL_POWER),
-                                ParamAutomation.VolumeRamp(TrackTarget.INCOMING, 0L, totalSamples, 0.0f, 1.0f, RampCurve.EQUAL_POWER),
+                                ParamAutomation.VolumeRamp(TrackTarget.OUTGOING, 0L, fadeSamples, 1.0f, 0.0f, RampCurve.EQUAL_POWER),
+                                ParamAutomation.VolumeRamp(TrackTarget.INCOMING, 0L, fadeSamples, 0.0f, 1.0f, RampCurve.EQUAL_POWER),
                                 ParamAutomation.BassCut(TrackTarget.INCOMING, 0L, muteLow = true),
                                 ParamAutomation.BassCut(TrackTarget.INCOMING, swapSample, muteLow = false),
                                 ParamAutomation.BassCut(TrackTarget.OUTGOING, swapSample, muteLow = true),
@@ -87,9 +98,13 @@ object AdaptiveTransitionPlannerV2 {
                         )
                     }
 
-                    // Beatmatched Blend: volume only, 4 beats
-                    val periodSamples = (SAMPLE_RATE * 60.0 / outGrid.bpm.toDouble())
-                    val totalSamples = Math.round(4 * periodSamples)
+                    // Beatmatched Blend: volume only
+                    val maxFadeMs = (requestedCrossfadeMs - recoveryMs).coerceAtLeast(0L)
+                    val fadeBeats = listOf(8, 4, 2).firstOrNull { b ->
+                        round(b * periodMs).toLong() <= maxFadeMs
+                    } ?: 4
+                    val fadeSamples = Math.round(fadeBeats * periodSamples)
+                    val totalSamples = fadeSamples + recoverySamples
                     return TransitionRecipe(
                         strategy = TransitionStrategy.BEATMATCHED_BLEND,
                         totalSamples = totalSamples,
@@ -99,10 +114,11 @@ object AdaptiveTransitionPlannerV2 {
                             rateRatio = rateRatio,
                             startSample = 0L,
                             handoffSample = totalSamples,
+                            recoverySamples = recoverySamples,
                         ),
                         automations = listOf(
-                            ParamAutomation.VolumeRamp(TrackTarget.OUTGOING, 0L, totalSamples, 1.0f, 0.0f, RampCurve.EQUAL_POWER),
-                            ParamAutomation.VolumeRamp(TrackTarget.INCOMING, 0L, totalSamples, 0.0f, 1.0f, RampCurve.EQUAL_POWER),
+                            ParamAutomation.VolumeRamp(TrackTarget.OUTGOING, 0L, fadeSamples, 1.0f, 0.0f, RampCurve.EQUAL_POWER),
+                            ParamAutomation.VolumeRamp(TrackTarget.INCOMING, 0L, fadeSamples, 0.0f, 1.0f, RampCurve.EQUAL_POWER),
                         ),
                     )
                 }
@@ -181,5 +197,28 @@ object AdaptiveTransitionPlannerV2 {
         val relB = (b.pitchClass + if (b.mode == KeyMode.MINOR) 3 else 0) % 12
         val distance = abs(relA - relB)
         return distance !in setOf(0, 5, 7)
+    }
+
+    fun toCrossfadePlan(recipe: TransitionRecipe, contentEndMs: Long): CrossfadePlan? {
+        if (recipe.strategy == TransitionStrategy.ABSOLUTE_FALLBACK && recipe.totalSamples == 0L) {
+            return null
+        }
+        val durationMs = (recipe.totalSamples * 1000L / SAMPLE_RATE).coerceAtLeast(1L)
+        val overlapMs = durationMs
+        val startMs = (contentEndMs - overlapMs).coerceAtLeast(0L)
+        val handoffMs = startMs + overlapMs
+        return CrossfadePlan(
+            startMs = startMs,
+            durationMs = durationMs,
+            overlapMs = overlapMs,
+            handoffMs = handoffMs,
+            incomingStartMs = recipe.sync.incomingStartSample * 1000L / SAMPLE_RATE,
+            rateRatio = recipe.sync.rateRatio,
+            recoveryMs = recipe.sync.recoverySamples * 1000L / SAMPLE_RATE,
+            beatMatched = recipe.sync.enabled,
+            fallbackReason = recipe.reason,
+            transitionKind = recipe.strategy.name.lowercase(),
+            reason = recipe.reason,
+        )
     }
 }

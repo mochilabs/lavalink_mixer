@@ -68,19 +68,19 @@ class CrossoverLR4(
 
         // Process Left Channel
         // Stage 1 LP -> scratch, then Stage 2 LP -> lowL
-        lp1L.process(inputL, scratchL, offset, length)
-        lp2L.process(scratchL, lowL, 0, length)
+        lp1L.process(inputL, scratchL, inputOffset = offset, outputOffset = 0, length = length)
+        lp2L.process(scratchL, lowL, inputOffset = 0, outputOffset = 0, length = length)
 
         // Stage 1 HP -> scratch, then Stage 2 HP -> highL
-        hp1L.process(inputL, scratchL, offset, length)
-        hp2L.process(scratchL, highL, 0, length)
+        hp1L.process(inputL, scratchL, inputOffset = offset, outputOffset = 0, length = length)
+        hp2L.process(scratchL, highL, inputOffset = 0, outputOffset = 0, length = length)
 
         // Process Right Channel
-        lp1R.process(inputR, scratchR, offset, length)
-        lp2R.process(scratchR, lowR, 0, length)
+        lp1R.process(inputR, scratchR, inputOffset = offset, outputOffset = 0, length = length)
+        lp2R.process(scratchR, lowR, inputOffset = 0, outputOffset = 0, length = length)
 
-        hp1R.process(inputR, scratchR, offset, length)
-        hp2R.process(scratchR, highR, 0, length)
+        hp1R.process(inputR, scratchR, inputOffset = offset, outputOffset = 0, length = length)
+        hp2R.process(scratchR, highR, inputOffset = 0, outputOffset = 0, length = length)
     }
 
     private fun ensureScratch(needed: Int) {

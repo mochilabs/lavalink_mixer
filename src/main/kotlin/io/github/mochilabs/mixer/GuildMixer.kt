@@ -1527,6 +1527,8 @@ class GuildMixer(
             protocol.clearArmedLocked()
             subTrack = null
             xfadeActive = false
+            activeRecipe = null
+            plannedRecipe = null
             overlayActive = false
             analysisState.active = false
             siphonFactory?.resetSpeed()
@@ -1541,6 +1543,7 @@ class GuildMixer(
             log.warn("sub destroy failed on guild {}", guildId, e)
         }
         analysisService.destroy()
+        TransitionMemory.global.clear(guildId)
         for (slot in parallels) {
             try {
                 slot.player.destroy()
@@ -1881,7 +1884,8 @@ class GuildMixer(
             protocol.armedOutgoingEndPositionMs = 0L
             protocol.armedOutgoingTrack = null
             xfadeActive = false
-            // The handoff is a transition into the incoming track, not an end
+            activeRecipe = null
+            plannedRecipe = null
             // of playback: the state must reflect audio that keeps flowing.
             protocol.playbackState = PlaybackState.PLAYING
             xfadeHandoffMs = -1L
@@ -2053,7 +2057,8 @@ class GuildMixer(
                 siphon.pendingFrames, siphon.droppedFrames,
             )
             xfadeActive = false
-            xfadeHandoffMs = -1L
+            activeRecipe = null
+            plannedRecipe = null
             xfadeStartSample = -1L
             xfadeEndSample = -1L
             xfadeFadeEndSample = -1L

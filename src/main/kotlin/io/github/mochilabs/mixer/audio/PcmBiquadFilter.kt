@@ -51,7 +51,13 @@ class PcmBiquadFilter {
         a2 = ((1.0 - alpha) / a0).toFloat()
     }
 
-    fun process(input: FloatArray, output: FloatArray, offset: Int = 0, length: Int = input.size) {
+    fun process(
+        input: FloatArray,
+        output: FloatArray,
+        inputOffset: Int = 0,
+        outputOffset: Int = 0,
+        length: Int = input.size,
+    ) {
         var localZ1 = z1
         var localZ2 = z2
         val localB0 = b0
@@ -60,14 +66,17 @@ class PcmBiquadFilter {
         val localA1 = a1
         val localA2 = a2
 
-        val end = offset + length
-        for (i in offset until end) {
-            val x = input[i]
+        for (i in 0 until length) {
+            val x = input[inputOffset + i]
             val y = localB0 * x + localZ1
             localZ1 = localB1 * x - localA1 * y + localZ2
             localZ2 = localB2 * x - localA2 * y
-            output[i] = y
+            output[outputOffset + i] = y
         }
+
+        // Flush-to-zero: prevent JVM denormal floating point microcode stalls on decay
+        if (localZ1 != 0.0f && kotlin.math.abs(localZ1) < 1e-15f) localZ1 = 0.0f
+        if (localZ2 != 0.0f && kotlin.math.abs(localZ2) < 1e-15f) localZ2 = 0.0f
 
         z1 = localZ1
         z2 = localZ2

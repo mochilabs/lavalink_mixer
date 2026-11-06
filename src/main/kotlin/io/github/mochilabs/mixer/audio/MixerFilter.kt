@@ -111,16 +111,16 @@ class MixerFilter(
 
         val parallels = mixer.advanceParallelOverlays(length, feederId)
         val recipe = mixer.activeRecipe
-        val echoTrigger = recipe?.automations?.filterIsInstance<ParamAutomation.EchoTrigger>()?.firstOrNull()
+        val isRecipeActive = (recipe != null)
+        val echoTrigger = if (isRecipeActive) recipe?.echoTrigger else null
         val currentSample = mixer.currentXfadeSample
-        val hasEcho = (recipe != null && echoTrigger != null && currentSample >= echoTrigger.atSample)
+        val hasEcho = (isRecipeActive && echoTrigger != null && currentSample >= echoTrigger.atSample)
 
         if (!hasEcho) {
             val inR = if (input.size > 1) input[1] else input[0]
             echoBuffer.write(input[0], inR, offset, length)
         }
 
-        val isRecipeActive = (recipe != null)
         if (!isRecipeActive && gains.main >= 0.999f && gains.sub <= 0.001f && parallels.isEmpty()) return // idle passthrough
         if (!isRecipeActive && gains.sub <= 0.001f && parallels.isEmpty()) {
             // Main-only (fade-in/mask/duck release): scale in place, no sub buffer.
@@ -213,17 +213,16 @@ class MixerFilter(
             echoScratchR.fill(0f, 0, length)
             echoBuffer.readAndMix(echoTrigger.delaySamples, echoTrigger.feedback, echoScratchL, echoScratchR, 0, length, termGain)
         }
-        val doBassProcessing = recipe != null && (
+        val doBassProcessing = isRecipeActive && recipe != null && (
             recipe.strategy == TransitionStrategy.PHRASE_MATCHED_BASS_SWAP ||
             recipe.strategy == TransitionStrategy.SHORT_BASS_SWAP ||
-            recipe.automations.any { it is ParamAutomation.BassCut }
+            recipe.hasBassCuts
         )
 
         if (doBassProcessing && recipe != null) {
             val currentSample = mixer.currentXfadeSample
-            val mainBassMuted = recipe.isBassMutedAt(TrackTarget.OUTGOING, currentSample)
-            val subBassMuted = recipe.isBassMutedAt(TrackTarget.INCOMING, currentSample)
-
+            val mainBassGain = recipe.bassGainAt(TrackTarget.OUTGOING, currentSample)
+            val subBassGain = recipe.bassGainAt(TrackTarget.INCOMING, currentSample)
             scratchMainLow = ensureScratch(scratchMainLow, input.size, length)
             scratchMainHigh = ensureScratch(scratchMainHigh, input.size, length)
             scratchSubLow = ensureScratch(scratchSubLow, input.size, length)
@@ -257,8 +256,8 @@ class MixerFilter(
 
                 for (i in offset until end) {
                     val idx = i - offset
-                    val mainAudio = (if (mainBassMuted) 0f else mLow[idx]) + mHigh[idx]
-                    val subAudio = (if (subBassMuted) 0f else sLow[idx]) + sHigh[idx]
+                    val mainAudio = mLow[idx] * mainBassGain + mHigh[idx]
+                    val subAudio = sLow[idx] * subBassGain + sHigh[idx]
                     var sum = mainAudio * gains.main + subAudio * gains.sub
                     if (parallel != null) sum += parallel[c][idx]
                     channel[i] = softLimit(sum)

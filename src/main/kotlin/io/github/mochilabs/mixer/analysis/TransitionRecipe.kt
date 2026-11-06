@@ -82,43 +82,85 @@ data class TransitionRecipe(
     val automations: List<ParamAutomation> = emptyList(),
     val reason: String = strategy.name.lowercase(),
 ) {
+    val volumeRamps: List<ParamAutomation.VolumeRamp> = automations.filterIsInstance<ParamAutomation.VolumeRamp>()
+    val bassCuts: List<ParamAutomation.BassCut> = automations.filterIsInstance<ParamAutomation.BassCut>()
+    val filterSweeps: List<ParamAutomation.FilterCutoff> = automations.filterIsInstance<ParamAutomation.FilterCutoff>()
+    val echoTrigger: ParamAutomation.EchoTrigger? = automations.filterIsInstance<ParamAutomation.EchoTrigger>().firstOrNull()
+    val hasBassCuts: Boolean get() = bassCuts.isNotEmpty()
+
     fun gainAt(target: TrackTarget, currentSample: Long, defaultGain: Float): Float {
-        val ramp = automations.filterIsInstance<ParamAutomation.VolumeRamp>()
-            .lastOrNull { it.target == target && currentSample in it.startSample..it.endSample }
-        if (ramp != null) {
-            val progress = ((currentSample - ramp.startSample).toDouble() / (ramp.endSample - ramp.startSample).coerceAtLeast(1L)).coerceIn(0.0, 1.0).toFloat()
-            return when (ramp.curve) {
-                RampCurve.LINEAR -> ramp.fromGain + (ramp.toGain - ramp.fromGain) * progress
+        var activeRamp: ParamAutomation.VolumeRamp? = null
+        var pastRamp: ParamAutomation.VolumeRamp? = null
+        for (i in volumeRamps.indices) {
+            val r = volumeRamps[i]
+            if (r.target == target) {
+                if (currentSample in r.startSample..r.endSample) {
+                    activeRamp = r
+                } else if (currentSample > r.endSample) {
+                    pastRamp = r
+                }
+            }
+        }
+        if (activeRamp != null) {
+            val span = (activeRamp.endSample - activeRamp.startSample).coerceAtLeast(1L)
+            val progress = ((currentSample - activeRamp.startSample).toDouble() / span.toDouble()).coerceIn(0.0, 1.0).toFloat()
+            return when (activeRamp.curve) {
+                RampCurve.LINEAR -> activeRamp.fromGain + (activeRamp.toGain - activeRamp.fromGain) * progress
                 RampCurve.EQUAL_POWER -> {
-                    if (ramp.fromGain > ramp.toGain) {
-                        cos(progress * Math.PI.toFloat() * 0.5f) * ramp.fromGain
+                    if (activeRamp.fromGain > activeRamp.toGain) {
+                        cos(progress * Math.PI.toFloat() * 0.5f) * activeRamp.fromGain
                     } else {
-                        sin(progress * Math.PI.toFloat() * 0.5f) * ramp.toGain
+                        sin(progress * Math.PI.toFloat() * 0.5f) * activeRamp.toGain
                     }
                 }
                 RampCurve.EXPONENTIAL -> {
                     val p = progress * progress
-                    ramp.fromGain + (ramp.toGain - ramp.fromGain) * p
+                    activeRamp.fromGain + (activeRamp.toGain - activeRamp.fromGain) * p
                 }
             }
         }
-        val pastRamp = automations.filterIsInstance<ParamAutomation.VolumeRamp>()
-            .lastOrNull { it.target == target && currentSample > it.endSample }
         return pastRamp?.toGain ?: defaultGain
     }
 
+    fun bassGainAt(target: TrackTarget, currentSample: Long): Float {
+        var activeCut: ParamAutomation.BassCut? = null
+        for (i in bassCuts.indices) {
+            val c = bassCuts[i]
+            if (c.target == target && currentSample >= c.atSample) {
+                if (activeCut == null || c.atSample >= activeCut.atSample) {
+                    activeCut = c
+                }
+            }
+        }
+        val cut = activeCut ?: return 1.0f
+        val elapsed = currentSample - cut.atSample
+        val ramp = cut.rampSamples.coerceAtLeast(1)
+        if (elapsed >= ramp) {
+            return if (cut.muteLow) 0.0f else 1.0f
+        }
+        val progress = (elapsed.toDouble() / ramp.toDouble()).coerceIn(0.0, 1.0).toFloat()
+        return if (cut.muteLow) {
+            cos(progress * Math.PI.toFloat() * 0.5f)
+        } else {
+            sin(progress * Math.PI.toFloat() * 0.5f)
+        }
+    }
+
     fun isBassMutedAt(target: TrackTarget, currentSample: Long): Boolean {
-        val lastCut = automations.filterIsInstance<ParamAutomation.BassCut>()
-            .filter { it.target == target && currentSample >= it.atSample }
-            .maxByOrNull { it.atSample }
-        return lastCut?.muteLow ?: false
+        return bassGainAt(target, currentSample) < 0.5f
     }
 
     fun filterCutoffAt(target: TrackTarget, currentSample: Long): Float? {
-        val sweep = automations.filterIsInstance<ParamAutomation.FilterCutoff>()
-            .lastOrNull { it.target == target && currentSample in it.startSample..it.endSample }
-            ?: return null
-        val progress = ((currentSample - sweep.startSample).toDouble() / (sweep.endSample - sweep.startSample).coerceAtLeast(1L)).coerceIn(0.0, 1.0).toFloat()
+        var activeSweep: ParamAutomation.FilterCutoff? = null
+        for (i in filterSweeps.indices) {
+            val s = filterSweeps[i]
+            if (s.target == target && currentSample in s.startSample..s.endSample) {
+                activeSweep = s
+            }
+        }
+        val sweep = activeSweep ?: return null
+        val span = (sweep.endSample - sweep.startSample).coerceAtLeast(1L)
+        val progress = ((currentSample - sweep.startSample).toDouble() / span.toDouble()).coerceIn(0.0, 1.0).toFloat()
         return sweep.startHz + (sweep.endHz - sweep.startHz) * progress
     }
 }

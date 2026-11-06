@@ -241,6 +241,9 @@ class SiphonFactory(
         // Keep producer-owned native buffers and rate spans intact until the
         // decoder finishes; the control thread only requests unity speed.
         currentStretcher?.updateSpeed(1.0)
+        // A previous sub-track stop could have flagged nativeFailed from an
+        // InterruptedException; that flag must not poison the next decision.
+        currentStretcher?.clearNativeFailure()
     }
 
     val effectiveSpeed: Double

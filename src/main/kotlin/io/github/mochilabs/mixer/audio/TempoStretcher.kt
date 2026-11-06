@@ -69,7 +69,12 @@ class TempoStretcher(
                 }
                 source += needed * targetSpeed
                 outputSourceSpeed = source / count
-                downstream.process(input, cursor, count)
+                try {
+                    downstream.process(input, cursor, count)
+                } catch (t: Throwable) {
+                    downstreamFailure = t
+                    throw t
+                }
                 emittedOutput += count
                 cursor += count
                 remaining -= count
@@ -87,8 +92,18 @@ class TempoStretcher(
     @Volatile
     private var delegate: FloatPcmAudioFilter? = null
 
+    /** Exception raised by [downstream] (not the native converter); rethrow, don't poison nativeFailed. */
+    @Volatile
+    private var downstreamFailure: Throwable? = null
+
     val isActive: Boolean
         get() = !nativeFailed && abs(targetSpeed - 1.0) > 1e-4
+
+    /** Clears only the failure flag so a stale stop/seek interrupt can't disable the next beatmatch. */
+    fun clearNativeFailure() {
+        nativeFailed = false
+        downstreamFailure = null
+    }
 
     val effectiveSpeed: Double
         get() = if (isActive) targetSpeed else 1.0
@@ -104,6 +119,8 @@ class TempoStretcher(
         submittedOutput = 0.0
         emittedOutput = 0L
         pendingRates.clear()
+        downstreamFailure = null
+        nativeFailed = false
         runCatching { delegate?.seekPerformed(0L, 0L) }
     }
 
@@ -124,6 +141,7 @@ class TempoStretcher(
                 continue
             }
             val beforeOutput = emittedOutput
+            downstreamFailure = null
             try {
                 var current = delegate
                 if (current == null) {
@@ -139,6 +157,12 @@ class TempoStretcher(
                 submittedOutput += projectedOutput
                 current.process(input, cursor, count)
             } catch (t: Throwable) {
+                val failure = downstreamFailure
+                if (failure != null) {
+                    // The downstream filter failed (track stop/seek interrupts,
+                    // or a genuine sink error); not a native converter fault.
+                    throw failure
+                }
                 if (!nativeFailed) log.warn("Timescale audio filter failed; falling back to unshifted audio: {}", t.message, t)
                 nativeFailed = true
                 runCatching { delegate?.close() }
@@ -165,7 +189,13 @@ class TempoStretcher(
     }
 
     override fun flush() {
-        runCatching { delegate?.flush() }
+        downstreamFailure = null
+        try {
+            delegate?.flush()
+        } catch (t: Throwable) {
+            downstreamFailure = t
+            throw t
+        }
         downstream.flush()
     }
 

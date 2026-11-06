@@ -407,6 +407,21 @@ its schedule. Keeping the native delegate alive at unity avoids discarding its t
 Exact native per-output input positions are unavailable: FIFO source integration
 is tested to a tolerance, not claimed sample-exact WSOLA correspondence.
 
+### Adaptive Automix Engine (V2)
+
+`AdaptiveTransitionPlannerV2` selects and generates declarative `TransitionRecipe` specifications
+across an uncertainty-margin multi-level decision waterfall:
+- **Level 0 (Grid-Based):** When `ExtendedBeatGrid` confidence is sufficient (`bpmConfidence >= 0.3`).
+  - **Sync Domain ($\Delta_{\log} \le \text{margin}$):** Executes `PHRASE_MATCHED_BASS_SWAP` (16-beat fade, cut at bar 4) when both downbeats and phrases are confident (`downbeatConfidence >= 0.5`, `phraseConfidence >= 0.5`), degrading to `SHORT_BASS_SWAP` (8-beat) or `BEATMATCHED_BLEND` (4-beat, 1-beat phase aligned) when metric boundaries are uncertain or for non-4/4 meters.
+  - **Async Domain ($\Delta_{\log} > \text{margin}$):** Executes `DOWNBEAT_CUT` when both downbeats are confident and energetic, or `ECHO_OUT` (1/2-beat if BPM $\ge$ 125, 1-beat if BPM < 125) using a 96,000-sample circular delay buffer with an explicit linear termination ramp.
+- **Level 1 (Degraded):** When beat grids are absent but envelope features are valid, executes a time-based high-pass `DEGRADED_FILTER_SWEEP` ($20\text{Hz} \to 3000\text{Hz}$).
+- **Level 2 (Absolute Fallback):** When all metadata is missing or on buffer underrun, safely converges to a 5-second `ABSOLUTE_FALLBACK` Equal-Power crossfade.
+
+In `MixerFilter`, real-time DSP automation runs with zero heap allocations during playback:
+- **Dual LR4 Crossover (`CrossoverLR4`):** Both outgoing and incoming stereo audio streams pass through matched 4th-order Linkwitz-Riley filters (16 biquads total) at 200Hz. This guarantees identical group delay across both tracks, eliminating comb filtering while allowing low-frequency bass swap with 15ms smoothing ramps.
+- **Circular Delay Buffer (`CircularDelayBuffer`):** Pre-allocated 96,000-sample stereo buffer (2.0s @ 48kHz, accommodating BPM 40) continuously banks incoming main audio and provides feedback delay with decay and linear fade-out termination on Echo Out triggers.
+- **Transition Memory (`TransitionMemory`):** Tracks the recent history of applied transition strategies per guild and applies multiplicative penalties to prevent consecutive mechanical repetition.
+
 `requestPreanalysis` retains the latest warmup while another scan is queued or
 active, and writes enabled silence, BPM, feature, and key caches. It never arms, promotes or changes
 live gain. Current-track BPM and key analysis can run without a queued next track. Results are track-keyed; normal JIT

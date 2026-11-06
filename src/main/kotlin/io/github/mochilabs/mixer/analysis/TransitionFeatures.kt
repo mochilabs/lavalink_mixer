@@ -17,6 +17,8 @@ data class TransitionFeatures(
     val candidates: List<TransitionCandidate>,
     val leadingSilenceMs: Long = 0L,
     val trailingSilenceMs: Long = 0L,
+    val phraseConfidence: Float = 0f,
+    val phraseBoundaryMs: Long = -1L,
     val unknownReason: String? = null,
 )
 
@@ -82,14 +84,51 @@ object TransitionFeatureAnalyzer {
                 if (added == 4 || candidates.size == 8) break
             }
         }
+        val (phraseConf, phraseBoundary) = detectPhrase(envelope, grid)
         return TransitionFeatures(
             windowStartMs, end, envelope, rms, stability(envelope, grid),
             if (rms <= SILENCE) KeyEstimate.Unknown("silence") else KeyDetector.estimate(mono),
             candidates.sortedBy { it.positionMs },
             if (leading >= 100) leading.coerceAtMost(end - windowStartMs) else 0L,
             if (trailing >= 100) trailing.coerceAtMost(end - windowStartMs) else 0L,
-            if (sample < SOURCE_RATE) "short_window" else if (rms <= SILENCE) "silence" else null,
+            phraseConfidence = phraseConf,
+            phraseBoundaryMs = phraseBoundary,
+            unknownReason = if (sample < SOURCE_RATE) "short_window" else if (rms <= SILENCE) "silence" else null,
         )
+    }
+
+    private fun detectPhrase(envelope: List<EnergyPoint>, grid: BeatGrid?): Pair<Float, Long> {
+        if (grid == null || !grid.periodMs.isFinite() || grid.periodMs <= 0 || envelope.size < 40) {
+            return 0f to -1L
+        }
+        val barMs = 4.0 * grid.periodMs
+        val startMs = envelope.firstOrNull()?.positionMs ?: return 0f to -1L
+        val endMs = envelope.lastOrNull()?.positionMs ?: return 0f to -1L
+        if (endMs - startMs < barMs * 4) return 0f to -1L
+
+        var bestContrast = 0f
+        var bestBoundary = -1L
+        val checkWindow = (barMs * 2).toLong()
+
+        var t = startMs + (barMs * 2).toLong()
+        while (t <= endMs - (barMs * 2).toLong()) {
+            val pre = envelope.filter { it.positionMs in (t - checkWindow) until t }
+            val post = envelope.filter { it.positionMs in t .. (t + checkWindow) }
+            if (pre.isNotEmpty() && post.isNotEmpty()) {
+                val preRms = pre.map { it.rms.toDouble() }.average()
+                val postRms = post.map { it.rms.toDouble() }.average()
+                val maxRms = maxOf(preRms, postRms)
+                if (maxRms > 0.01) {
+                    val contrast = (abs(postRms - preRms) / maxRms).toFloat()
+                    if (contrast > bestContrast) {
+                        bestContrast = contrast
+                        bestBoundary = t
+                    }
+                }
+            }
+            t += barMs.toLong()
+        }
+        return bestContrast.coerceIn(0f, 1f) to bestBoundary
     }
 
     private fun stability(envelope: List<EnergyPoint>, grid: BeatGrid?): Float? {

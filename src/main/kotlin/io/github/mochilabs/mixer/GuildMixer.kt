@@ -292,11 +292,11 @@ class GuildMixer(
     /** Voice thread reads these without taking [lock]; races only shift a fade by a chunk. */
     @Volatile private var overlayActive: Boolean = false
     @Volatile private var xfadeActive: Boolean = false
-    @Volatile var activeRecipe: io.github.mochilabs.mixer.analysis.TransitionRecipe? = null
+    @Volatile var activeRecipe: TransitionRecipe? = null
         private set
 
     fun setActiveRecipeForTest(
-        recipe: io.github.mochilabs.mixer.analysis.TransitionRecipe?,
+        recipe: TransitionRecipe?,
         startSample: Long = 0L,
         endSample: Long = 0L,
     ) {
@@ -306,6 +306,8 @@ class GuildMixer(
         xfadeEndSample = endSample
         xfadeFadeEndSample = endSample
     }
+    val currentXfadeSample: Long get() = if (xfadeStartSample >= 0L) (chainPos.get() - xfadeStartSample).coerceAtLeast(0L) else 0L
+
     private var xfadeHandoffMs: Long = -1L
     /** Main-track instance the armed overlap belongs to; a handoff must never fire after that track was replaced. */
     private var xfadeMainTrack: AudioTrack? = null
@@ -662,8 +664,8 @@ class GuildMixer(
             if (recipe != null) {
                 val start = xfadeStartSample
                 val currentSample = (endOfChunk - start).coerceAtLeast(0L)
-                val m = recipe.gainAt(io.github.mochilabs.mixer.analysis.TrackTarget.OUTGOING, currentSample, 1.0f)
-                val s = recipe.gainAt(io.github.mochilabs.mixer.analysis.TrackTarget.INCOMING, currentSample, 0.0f)
+                val m = recipe.gainAt(TrackTarget.OUTGOING, currentSample, 1.0f)
+                val s = recipe.gainAt(TrackTarget.INCOMING, currentSample, 0.0f)
                 mainGain.setNow(m)
                 subGain.setNow(s)
             } else {

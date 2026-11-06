@@ -1,4 +1,4 @@
-package io.github.mochilabs.mixer.audio
+package io.github.mochilabs.mixer
 
 import kotlin.math.cos
 import kotlin.math.sin
@@ -8,7 +8,7 @@ import kotlin.math.sqrt
  * Direct Form II Transposed biquad filter.
  * Zero memory allocation in [process].
  */
-class BiquadFilter {
+class PcmBiquadFilter {
     var b0: Float = 1.0f
     var b1: Float = 0.0f
     var b2: Float = 0.0f

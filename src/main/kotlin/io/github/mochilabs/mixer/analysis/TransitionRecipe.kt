@@ -1,4 +1,4 @@
-package io.github.mochilabs.mixer.analysis
+package io.github.mochilabs.mixer
 
 import kotlin.math.cos
 import kotlin.math.sin

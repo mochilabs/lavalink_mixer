@@ -1,6 +1,6 @@
 package io.github.mochilabs.mixer
 
-import io.github.mochilabs.mixer.analysis.*
+
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse

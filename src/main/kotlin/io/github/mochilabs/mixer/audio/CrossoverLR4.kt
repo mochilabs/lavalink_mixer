@@ -1,4 +1,4 @@
-package io.github.mochilabs.mixer.audio
+package io.github.mochilabs.mixer
 
 /**
  * 4th-order Linkwitz-Riley (LR4) stereo crossover filter.
@@ -11,16 +11,16 @@ class CrossoverLR4(
     val crossoverHz: Float = 200f,
 ) {
     // Left channel: 2 LP biquads + 2 HP biquads
-    private val lp1L = BiquadFilter()
-    private val lp2L = BiquadFilter()
-    private val hp1L = BiquadFilter()
-    private val hp2L = BiquadFilter()
+    private val lp1L = PcmBiquadFilter()
+    private val lp2L = PcmBiquadFilter()
+    private val hp1L = PcmBiquadFilter()
+    private val hp2L = PcmBiquadFilter()
 
     // Right channel: 2 LP biquads + 2 HP biquads
-    private val lp1R = BiquadFilter()
-    private val lp2R = BiquadFilter()
-    private val hp1R = BiquadFilter()
-    private val hp2R = BiquadFilter()
+    private val lp1R = PcmBiquadFilter()
+    private val lp2R = PcmBiquadFilter()
+    private val hp1R = PcmBiquadFilter()
+    private val hp2R = PcmBiquadFilter()
 
     private var scratchL = FloatArray(1024)
     private var scratchR = FloatArray(1024)

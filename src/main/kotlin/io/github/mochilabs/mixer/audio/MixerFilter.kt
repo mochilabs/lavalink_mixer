@@ -52,6 +52,12 @@ class MixerFilter(
     private var subScratch = emptyArray<FloatArray>()
     private var parallelScratch = emptyArray<FloatArray>()
     private var overlayScratch = emptyArray<FloatArray>()
+    private val crossoverMain = CrossoverLR4()
+    private val crossoverSub = CrossoverLR4()
+    private var scratchMainLow = emptyArray<FloatArray>()
+    private var scratchMainHigh = emptyArray<FloatArray>()
+    private var scratchSubLow = emptyArray<FloatArray>()
+    private var scratchSubHigh = emptyArray<FloatArray>()
 
     override fun process(input: Array<FloatArray>, offset: Int, length: Int) {
         if (length <= 0) return
@@ -184,6 +190,61 @@ class MixerFilter(
                     }
                 }
             }
+        }
+
+        val recipe = mixer.activeRecipe
+        val doBassProcessing = recipe != null && (
+            recipe.strategy == TransitionStrategy.PHRASE_MATCHED_BASS_SWAP ||
+            recipe.strategy == TransitionStrategy.SHORT_BASS_SWAP ||
+            recipe.automations.any { it is ParamAutomation.BassCut }
+        )
+
+        if (doBassProcessing && recipe != null) {
+            val currentSample = mixer.currentXfadeSample
+            val mainBassMuted = recipe.isBassMutedAt(TrackTarget.OUTGOING, currentSample)
+            val subBassMuted = recipe.isBassMutedAt(TrackTarget.INCOMING, currentSample)
+
+            scratchMainLow = ensureScratch(scratchMainLow, input.size, length)
+            scratchMainHigh = ensureScratch(scratchMainHigh, input.size, length)
+            scratchSubLow = ensureScratch(scratchSubLow, input.size, length)
+            scratchSubHigh = ensureScratch(scratchSubHigh, input.size, length)
+
+            val inL = input[0]
+            val inR = if (input.size > 1) input[1] else input[0]
+            crossoverMain.processTrack(
+                inL, inR,
+                scratchMainLow[0], if (input.size > 1) scratchMainLow[1] else scratchMainLow[0],
+                scratchMainHigh[0], if (input.size > 1) scratchMainHigh[1] else scratchMainHigh[0],
+                length, offset
+            )
+
+            val subL = sub[0]
+            val subR = if (sub.size > 1) sub[1] else sub[0]
+            crossoverSub.processTrack(
+                subL, subR,
+                scratchSubLow[0], if (sub.size > 1) scratchSubLow[1] else scratchSubLow[0],
+                scratchSubHigh[0], if (sub.size > 1) scratchSubHigh[1] else scratchSubHigh[0],
+                length, 0
+            )
+
+            for (c in input.indices) {
+                val channel = input[c]
+                val end = offset + length
+                val mLow = scratchMainLow[c]
+                val mHigh = scratchMainHigh[c]
+                val sLow = scratchSubLow[c]
+                val sHigh = scratchSubHigh[c]
+
+                for (i in offset until end) {
+                    val idx = i - offset
+                    val mainAudio = (if (mainBassMuted) 0f else mLow[idx]) + mHigh[idx]
+                    val subAudio = (if (subBassMuted) 0f else sLow[idx]) + sHigh[idx]
+                    var sum = mainAudio * gains.main + subAudio * gains.sub
+                    if (parallel != null) sum += parallel[c][idx]
+                    channel[i] = softLimit(sum)
+                }
+            }
+            return
         }
 
         for (c in input.indices) {

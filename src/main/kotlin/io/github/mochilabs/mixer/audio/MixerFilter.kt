@@ -58,6 +58,9 @@ class MixerFilter(
     private var scratchMainHigh = emptyArray<FloatArray>()
     private var scratchSubLow = emptyArray<FloatArray>()
     private var scratchSubHigh = emptyArray<FloatArray>()
+    private val echoBuffer = CircularDelayBuffer()
+    private var echoScratchL = FloatArray(1024)
+    private var echoScratchR = FloatArray(1024)
 
     override fun process(input: Array<FloatArray>, offset: Int, length: Int) {
         if (length <= 0) return
@@ -75,7 +78,6 @@ class MixerFilter(
             mixInto(mixer, input, offset, length)
         } catch (e: Exception) {
             // Leave input (possibly) untouched and throttle the log:
-            // this runs ~50x/sec, so only the first occurrence per minute.
             if (now() - lastWarn >= 60_000) {
                 lastWarn = now()
                 log.warn("mixer filter failed on guild {}, degrading to passthrough", guildId, e)
@@ -108,9 +110,19 @@ class MixerFilter(
         }
 
         val parallels = mixer.advanceParallelOverlays(length, feederId)
-        if (gains.main >= 0.999f && gains.sub <= 0.001f && parallels.isEmpty()) return // idle passthrough
+        val recipe = mixer.activeRecipe
+        val echoTrigger = recipe?.automations?.filterIsInstance<ParamAutomation.EchoTrigger>()?.firstOrNull()
+        val currentSample = mixer.currentXfadeSample
+        val hasEcho = (recipe != null && echoTrigger != null && currentSample >= echoTrigger.atSample)
 
-        if (gains.sub <= 0.001f && parallels.isEmpty()) {
+        if (!hasEcho) {
+            val inR = if (input.size > 1) input[1] else input[0]
+            echoBuffer.write(input[0], inR, offset, length)
+        }
+
+        val isRecipeActive = (recipe != null)
+        if (!isRecipeActive && gains.main >= 0.999f && gains.sub <= 0.001f && parallels.isEmpty()) return // idle passthrough
+        if (!isRecipeActive && gains.sub <= 0.001f && parallels.isEmpty()) {
             // Main-only (fade-in/mask/duck release): scale in place, no sub buffer.
             if (gains.main < 0.999f) {
                 for (c in input.indices) {
@@ -192,7 +204,15 @@ class MixerFilter(
             }
         }
 
-        val recipe = mixer.activeRecipe
+        if (hasEcho && echoTrigger != null) {
+            ensureEchoScratch(length)
+            val elapsed = currentSample - echoTrigger.atSample
+            val termDuration = echoTrigger.terminationRampSamples.coerceAtLeast(1)
+            val termGain = (1.0f - (elapsed.toFloat() / termDuration)).coerceIn(0f, 1f)
+            echoScratchL.fill(0f, 0, length)
+            echoScratchR.fill(0f, 0, length)
+            echoBuffer.readAndMix(echoTrigger.delaySamples, echoTrigger.feedback, echoScratchL, echoScratchR, 0, length, termGain)
+        }
         val doBassProcessing = recipe != null && (
             recipe.strategy == TransitionStrategy.PHRASE_MATCHED_BASS_SWAP ||
             recipe.strategy == TransitionStrategy.SHORT_BASS_SWAP ||
@@ -251,8 +271,10 @@ class MixerFilter(
             val channel = input[c]
             val subChannel = sub[c]
             val end = offset + length
+            val echoArr = if (c == 0) echoScratchL else echoScratchR
             for (i in offset until end) {
                 var sum = channel[i] * gains.main + subChannel[i - offset] * gains.sub
+                if (hasEcho) sum += echoArr[i - offset]
                 if (parallel != null) sum += parallel[c][i - offset]
                 channel[i] = softLimit(sum)
             }
@@ -265,6 +287,13 @@ class MixerFilter(
             buffer.getOrNull(channel)?.takeIf { it.size >= samples } ?: FloatArray(samples)
         }
     }
+    private fun ensureEchoScratch(samples: Int) {
+        if (echoScratchL.size < samples) {
+            echoScratchL = FloatArray(samples)
+            echoScratchR = FloatArray(samples)
+        }
+    }
+
 
     private fun warnUnbound() {
         val t = now()

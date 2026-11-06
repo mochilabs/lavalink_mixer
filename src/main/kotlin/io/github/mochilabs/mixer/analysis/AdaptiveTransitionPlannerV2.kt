@@ -142,7 +142,7 @@ object AdaptiveTransitionPlannerV2 {
 
             // Async fallback or incoming grid missing: Echo Out on outgoing tempo
             val delayBeats = if (outGrid.bpm >= 125f) 0.5f else 1.0f
-            val delaySamples = Math.round(delayBeats * (SAMPLE_RATE * 60.0 / outGrid.bpm.toDouble())).toInt()
+            val delaySamples = Math.round(delayBeats * (SAMPLE_RATE * 60.0 / outGrid.bpm.toDouble())).toInt().coerceIn(1, 95999)
             val totalSamples = 96000L // 2.0s
             return TransitionRecipe(
                 strategy = TransitionStrategy.ECHO_OUT,

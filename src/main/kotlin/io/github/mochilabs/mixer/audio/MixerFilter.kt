@@ -204,7 +204,7 @@ class MixerFilter(
             }
         }
 
-        if (hasEcho && echoTrigger != null) {
+        if (hasEcho) {
             ensureEchoScratch(length)
             val elapsed = currentSample - echoTrigger.atSample
             val termDuration = echoTrigger.terminationRampSamples.coerceAtLeast(1)
@@ -213,13 +213,13 @@ class MixerFilter(
             echoScratchR.fill(0f, 0, length)
             echoBuffer.readAndMix(echoTrigger.delaySamples, echoTrigger.feedback, echoScratchL, echoScratchR, 0, length, termGain)
         }
-        val doBassProcessing = isRecipeActive && recipe != null && (
+        val doBassProcessing = isRecipeActive && (
             recipe.strategy == TransitionStrategy.PHRASE_MATCHED_BASS_SWAP ||
             recipe.strategy == TransitionStrategy.SHORT_BASS_SWAP ||
             recipe.hasBassCuts
         )
 
-        if (doBassProcessing && recipe != null) {
+        if (doBassProcessing) {
             val currentSample = mixer.currentXfadeSample
             val mainBassGain = recipe.bassGainAt(TrackTarget.OUTGOING, currentSample)
             val subBassGain = recipe.bassGainAt(TrackTarget.INCOMING, currentSample)

@@ -64,18 +64,16 @@ class GuildMixer(
             normalizationEnabled = enabled
             newTargetLufs?.let { targetLufs = it.coerceIn(-30.0f, -6.0f) }
             if (!enabled) {
-                mainNormGain = 1f
-                subNormGain = 1f
+                mainNorm.rampTo(1f, msToSamples(NORM_RAMP_MS))
+                subNorm.rampTo(1f, msToSamples(NORM_RAMP_MS))
                 return
             }
             val playing = main?.audioPlayer?.playingTrack
             if (playing != null) {
-                mainNormGain = normGainForLocked(playing)
+                knownNormGainLocked(playing)?.let { mainNorm.rampTo(it, msToSamples(NORM_RAMP_MS)) }
                 val id = idOf(playing)
                 if (normGainBaseline == 0f &&
                     !analysisState.active &&
-                    readyNextTrack == null &&
-                    pendingNextTrack == null &&
                     (id == null || !AnalysisCaches.norm.contains(id))
                 ) {
                     needsBaselineTrack = playing
@@ -83,7 +81,7 @@ class GuildMixer(
             }
             val activeSub = subTrack
             if (xfadeActive && activeSub != null) {
-                subNormGain = normGainForLocked(activeSub)
+                knownNormGainLocked(activeSub)?.let { subNorm.rampTo(it, msToSamples(NORM_RAMP_MS)) }
             }
         }
         needsBaselineTrack?.let { scheduleBaselineAnalysis(it) }
@@ -221,7 +219,7 @@ class GuildMixer(
             if (playing != null) {
                 syncChainPos(this@GuildMixer.safePosition(playing))
                 if (normalizationEnabled) {
-                    mainNormGain = normGainForLocked(playing)
+                    knownNormGainLocked(playing)?.let { mainNorm.rampTo(it, msToSamples(NORM_RAMP_MS)) }
                 }
             }
         }
@@ -244,10 +242,14 @@ class GuildMixer(
         get() = protocol.gate.windowOpenAt
     // ---- volume normalization ----
 
-    /** Normalization gain for the currently playing main track; read lock-free by the voice thread. */
-    @Volatile private var mainNormGain: Float = 1f
+    /**
+     * Normalization gain for the currently playing main track. Only the elected
+     * feeder advances it in [advance]; a loudness result that arrives mid-track
+     * ramps over [NORM_RAMP_MS] instead of stepping the level.
+     */
+    private val mainNorm = GainRamp()
     /** Normalization gain for the armed sub (crossfade) track; 1 while no overlap is armed. */
-    @Volatile private var subNormGain: Float = 1f
+    private val subNorm = GainRamp()
     /**
      * Test-only anchor: when non-zero, [normGainForLocked] normalizes every
      * track to this loudness instead of [targetLufs]. Production always
@@ -446,26 +448,26 @@ class GuildMixer(
                 }
             }
             if (snap == null) {
-                // Masked handoff start: doHandoff already armed mainNormGain
-                // for this track; do not reset it.
+                // Masked handoff start: doHandoff already carried the sub's
+                // normalization gain over for this track; do not reset it.
                 return
             }
-            // Track-level normalization gain: the first track anchors the
-            // session by playing at unity until its background loudness scan
-            // finishes; every subsequent track is pulled to that baseline.
-            mainNormGain = if (normalizationEnabled) {
-                synchronized(lock) { normGainForLocked(track) }
-            } else 1f
-            // First track played directly: schedule a background loudness scan
-            // outside the lock (sub plays block on source I/O) so the next
-            // track starts at the anchored gain.
+            // Track-level normalization toward targetLufs. A track whose loudness
+            // is not known yet keeps the previous track's level rather than
+            // jumping to unity; the scan below ramps it once an estimate lands.
+            if (normalizationEnabled) {
+                synchronized(lock) { knownNormGainLocked(track) }?.let { mainNorm.setNow(it) }
+            } else {
+                mainNorm.setNow(1f)
+            }
+            // Unmeasured track started directly: scan it in the background
+            // outside the lock (sub plays block on source I/O). A busy analysis
+            // slot is covered by the playing-track backfill in analyzeBlocking.
             val needsBaselineAnalysis = if (normalizationEnabled) {
                 synchronized(lock) {
                     val id = idOf(track)
                     normGainBaseline == 0f &&
                         !analysisState.active &&
-                        readyNextTrack == null &&
-                        pendingNextTrack == null &&
                         (id == null || !AnalysisCaches.norm.contains(id))
                 }
             } else false
@@ -672,7 +674,7 @@ class GuildMixer(
         if (!claimFeeder(feederId)) {
             // Rival chain: snapshot only — mutating ramps/chainPos here would
             // double every fade and run the chain counter at 2x.
-            return Gains(mainGain.current * mainNormGain, subGain.current * subNormGain)
+            return Gains(mainGain.current * mainNorm.current, subGain.current * subNorm.current)
         }
         val endOfChunk = chainPos.addAndGet(samples.toLong())
         // Lock-free on purpose: this runs on the voice thread for every ~20ms
@@ -709,7 +711,9 @@ class GuildMixer(
             mainGain.advance(samples)
             subGain.advance(samples)
         }
-        return Gains(mainGain.current * mainNormGain, subGain.current * subNormGain)
+        mainNorm.advance(samples)
+        subNorm.advance(samples)
+        return Gains(mainGain.current * mainNorm.current, subGain.current * subNorm.current)
     }
 
     fun takeSub(samples: Int, channels: Int, out: Array<FloatArray>): Int {
@@ -857,12 +861,27 @@ class GuildMixer(
 
     /** Test seam: pin the normalization gains without a decoder. */
     internal fun normalizeForTest(mainGain: Float, subGain: Float = 1f) {
-        mainNormGain = mainGain
-        subNormGain = subGain
+        mainNorm.setNow(mainGain)
+        subNorm.setNow(subGain)
     }
 
     /** Test seam: read the sub normalization gain without a decoder. */
-    internal fun subNormGainForTest(): Float = subNormGain
+    internal fun subNormGainForTest(): Float = subNorm.current
+
+    /** Test seam: deliver a loudness result as the analysis thread would. */
+    internal fun loudnessForTest(identifier: String, lufs: Float, provisional: Boolean = false) {
+        if (provisional) {
+            noteProvisionalLoudness(identifier, lufs)
+        } else {
+            AnalysisCaches.norm[identifier] = lufs
+            applyAnalyzedNormGain(identifier)
+        }
+    }
+
+    /** Test seam: arm an overlap's incoming normalization exactly as the crossfade path does. */
+    internal fun armSubNormForTest(next: AudioTrack) = synchronized(lock) {
+        subNorm.setNow(incomingNormGainLocked(next))
+    }
 
     /**
      * Test seam: seed the first-track baseline and optionally the track's
@@ -1372,13 +1391,16 @@ class GuildMixer(
         announcementQueue.clear()
     }
 
-    /** Normalization gain of the currently playing main track (1 while unknown/disabled). */
-    fun currentTrackGain(): Float = mainNormGain
+    /**
+     * Normalization gain the main track is playing at or ramping toward (1 while
+     * disabled). An unmeasured track reports the level it inherited.
+     */
+    fun currentTrackGain(): Float = mainNorm.target
 
     /** Analyzed gain of the queued next track; null while analysis is pending. */
     fun nextTrackGain(): Float? = synchronized(lock) {
         val next = readyNextTrack ?: pendingNextTrack ?: return null
-        normGainForLocked(next).takeIf { it != 1f }
+        knownNormGainLocked(next)
     }
 
     /** Identifier of the preheated next track (pending or ready), so clients can verify which track the server will start. */
@@ -1432,7 +1454,7 @@ class GuildMixer(
             siphon.clear()
             // Overlays are announcements: they use their original level, not
             // the outgoing crossfade track's normalization gain.
-            subNormGain = 1f
+            subNorm.setNow(1f)
             mainGain.rampTo(duck.coerceIn(0f, 1f), msToSamples(duckFadeMs))
             subGain.setNow(0f)
             subGain.rampTo(1f, msToSamples(150))
@@ -1721,7 +1743,7 @@ class GuildMixer(
                 // Sub-track normalization gain: applied on top of the sin curve.
                 activeRecipe = plan.recipe
                 plan.recipe?.let { TransitionMemory.global.record(guildId, it.strategy) }
-                subNormGain = if (normalizationEnabled) normGainForLocked(next) else 1f
+                subNorm.setNow(incomingNormGainLocked(next))
                 if (startSample > plan.startMs * SAMPLE_RATE / 1000) {
                     log.debug(
                         "crossfade on guild {} armed {}ms after its window opened " +
@@ -1989,8 +2011,8 @@ class GuildMixer(
             mainGain.rampTo(1f, msToSamples(maskMs).coerceAtLeast(1))
             // Handoff carries the sub track's normalization gain over to the
             // main slot so the incoming track keeps its level through the mask.
-            mainNormGain = subNormGain
-            subNormGain = 1f
+            mainNorm.copyFrom(subNorm)
+            subNorm.setNow(1f)
             tailCutter.reset()
             val mainPlayer = main
             if (mainPlayer == null) {
@@ -2077,7 +2099,7 @@ class GuildMixer(
             val armed = subTrack
             subTrack = null
             protocol.armedHandoffId = null
-            subNormGain = 1f
+            subNorm.setNow(1f)
             subGen++
             siphon.clear()
             mainGain.rampTo(1f, msToSamples(duckFadeMs))
@@ -2106,7 +2128,7 @@ class GuildMixer(
             subTrack = null
             sequentialOverlayId = null
             sequentialOverlayChannel = AnnounceChannel.BOTH
-            subNormGain = 1f
+            subNorm.setNow(1f)
             siphon.clear()
             // Release the music duck only if no parallel overlays are still
             // holding it; otherwise the last parallel overlay will release it.
@@ -2176,7 +2198,7 @@ class GuildMixer(
             // Inherit the analyzed normalization gain immediately before play
             // so the gapless transition doesn't reset the gain to 1.0f mid-stream.
             if (normalizationEnabled) {
-                mainNormGain = normGainForLocked(n)
+                knownNormGainLocked(n)?.let { mainNorm.setNow(it) }
             }
             GaplessPlan(n, protocol.gate.lastKnownEpoch, protocol.advanceSeq.get(), slotRevision, enc, protocol.preserveTransition, null, requestedStartMs)
         }
@@ -2246,6 +2268,18 @@ class GuildMixer(
 
     private fun normGainForLocked(track: AudioTrack): Float =
         AnalysisCaches.normGainFor(track, targetLufs, normGainBaseline)
+
+    /** Gain from the full or provisional loudness of [track]; null while neither is known. */
+    private fun knownNormGainLocked(track: AudioTrack): Float? =
+        AnalysisCaches.knownNormGainFor(track, targetLufs, normGainBaseline)
+
+    /**
+     * Starting normalization gain for an incoming crossfade track. An unmeasured
+     * track inherits the outgoing level, so a late analysis ramps it rather than
+     * making it enter at unity and then drop.
+     */
+    private fun incomingNormGainLocked(next: AudioTrack): Float =
+        if (normalizationEnabled) knownNormGainLocked(next) ?: mainNorm.target else 1f
     fun peekNextTrim(): TrimPoints? = synchronized(lock) {
         val next = readyNextTrack ?: pendingNextTrack ?: return null
         trimForLocked(next).takeIf { it != TrimPoints.NONE }
@@ -2326,7 +2360,7 @@ class GuildMixer(
     /**
      * Schedules a background loudness scan of the currently playing track so
      * its measured LUFS lands in the shared cache (and, if it is still the
-     * playing track, its [mainNormGain] updates immediately). Runs on the
+     * playing track, its normalization gain ramps to it). Runs on the
      * dedicated analysis decoder, never the live sub player.
      */
     internal fun scheduleBaselineAnalysis(track: AudioTrack) {
@@ -2344,16 +2378,11 @@ class GuildMixer(
                 return@execute
             }
             try {
-                val loudness = analysisService.measureBaseline(clone)
+                val trackId = idOf(track) ?: track.identifier
+                val loudness = analysisService.measureBaseline(clone) { noteProvisionalLoudness(trackId, it) }
                 if (loudness != null) {
-                    val trackId = idOf(track) ?: track.identifier
                     AnalysisCaches.norm[trackId] = loudness
-                    synchronized(lock) {
-                        val playing = main?.audioPlayer?.playingTrack
-                        if (normalizationEnabled && playing != null && idOf(playing) == trackId) {
-                            mainNormGain = normGainForLocked(playing)
-                        }
-                    }
+                    applyAnalyzedNormGain(trackId)
                     log.info("normalization baseline guild {}: lufs={}", guildId, loudness)
                 }
             } catch (e: Exception) {
@@ -2501,7 +2530,8 @@ class GuildMixer(
             val needKey = doKey && !AnalysisCaches.key.contains(identifier)
             val result = analysisService.analyze(
                 track,
-                TrackAnalysisSettings(
+                onLoudnessEstimate = if (hasNorm) { lufs -> noteProvisionalLoudness(identifier, lufs) } else null,
+                settings = TrackAnalysisSettings(
                     silence = hasSilence,
                     normalization = hasNorm,
                     bpm = needBpm,
@@ -2556,6 +2586,22 @@ class GuildMixer(
                     }
                 }
             }
+            if (doNorm && !result.aborted) {
+                // The playing track's own scan is skipped while this slot is busy;
+                // measure it now so it does not keep an inherited level all track.
+                val playing = synchronized(lock) { main?.audioPlayer?.playingTrack }
+                val playingId = playing?.let { idOf(it) }
+                if (playing != null && playingId != null && playingId != identifier &&
+                    !AnalysisCaches.norm.contains(playingId) && normGainBaseline == 0f
+                ) {
+                    val loudness = analysisService.measureBaseline(playing) { noteProvisionalLoudness(playingId, it) }
+                    if (loudness != null) {
+                        AnalysisCaches.norm[playingId] = loudness
+                        applyAnalyzedNormGain(playingId)
+                        log.info("normalization guild {} (playing track): lufs={}", guildId, loudness)
+                    }
+                }
+            }
             if (doSilence && !result.aborted) {
                 val playing = synchronized(lock) { main?.audioPlayer?.playingTrack }
                 val playingId = playing?.let { idOf(it) }
@@ -2603,18 +2649,27 @@ class GuildMixer(
         }
     }
 
+    /** Ramps the playing and overlapping track toward a newly known loudness. */
     private fun applyAnalyzedNormGain(identifier: String) {
         synchronized(lock) {
             if (!normalizationEnabled) return
             val playing = main?.audioPlayer?.playingTrack
             if (playing != null && idOf(playing) == identifier) {
-                mainNormGain = normGainForLocked(playing)
+                knownNormGainLocked(playing)?.let { mainNorm.rampTo(it, msToSamples(NORM_RAMP_MS)) }
             }
             val activeSub = subTrack
             if (xfadeActive && activeSub != null && idOf(activeSub) == identifier) {
-                subNormGain = normGainForLocked(activeSub)
+                knownNormGainLocked(activeSub)?.let { subNorm.rampTo(it, msToSamples(NORM_RAMP_MS)) }
             }
         }
+    }
+
+    /** Provisional loudness from a scan's opening seconds; ignored once the full value exists. */
+    private fun noteProvisionalLoudness(identifier: String, lufs: Float) {
+        if (AnalysisCaches.norm.contains(identifier)) return
+        AnalysisCaches.normProvisional[identifier] = lufs
+        applyAnalyzedNormGain(identifier)
+        log.debug("provisional normalization guild {}: lufs={}", guildId, lufs)
     }
 
 
@@ -2666,6 +2721,8 @@ class GuildMixer(
     companion object {
         private val log = LoggerFactory.getLogger(GuildMixer::class.java)
         private const val SAMPLE_RATE = 48000
+        /** Normalization gain changes from late loudness results glide over this span. */
+        internal const val NORM_RAMP_MS = 1_000L
 
         /** Max time past the window opening to wait for incoming-track analysis before overlapping anyway. */
         private const val FEATURE_WAIT_MS = 2000L

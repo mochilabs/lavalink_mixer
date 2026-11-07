@@ -25,7 +25,10 @@ internal class BoundedCache<V : Any>(
 }
 
 internal object AnalysisCaches {
+    /** Integrated LUFS of the whole track. Its presence means normalization analysis is done. */
     val norm = BoundedCache<Float>()
+    /** LUFS of a track's opening seconds, used only until [norm] has the full-track value. */
+    val normProvisional = BoundedCache<Float>()
     val trim = BoundedCache<TrimPoints>()
     val bpm = BoundedCache<BpmDetector.BpmResult>()
     val bpmHead = BoundedCache<ExtendedBeatGrid>()
@@ -39,9 +42,17 @@ internal object AnalysisCaches {
         return trim[id] ?: TrimPoints.NONE
     }
 
-    fun normGainFor(track: AudioTrack, targetLufs: Float, normGainBaseline: Float): Float {
-        val id = idOf(track) ?: return 1f
-        val measuredLufs = norm[id] ?: return 1f
+    fun normGainFor(track: AudioTrack, targetLufs: Float, normGainBaseline: Float): Float =
+        knownNormGainFor(track, targetLufs, normGainBaseline) ?: 1f
+
+    /**
+     * Gain from the full-track loudness, else from the provisional opening estimate;
+     * null while neither is known, so callers can keep the current level instead of
+     * jumping to unity.
+     */
+    fun knownNormGainFor(track: AudioTrack, targetLufs: Float, normGainBaseline: Float): Float? {
+        val id = idOf(track) ?: return null
+        val measuredLufs = norm[id] ?: normProvisional[id] ?: return null
         val target = if (normGainBaseline != 0f) normGainBaseline else targetLufs
         return NormalizationGain.fromLufs(measuredLufs, targetLufs = target).gain
     }

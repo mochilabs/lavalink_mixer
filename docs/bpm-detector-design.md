@@ -88,6 +88,45 @@ as metrical salience. There is no special-case BPM band or forced division by tw
 These are tested DSP policies, not a trained model or a claim to solve metrical
 ambiguity for all music.
 
+## Root cause of eighth-note and jittered fast-tempo octave errors
+
+Two independent faults remained after the hat fix.
+
+Coverage is a superset measure. A grid at half the period contains every point of
+the slower grid, so `coverage(P/2) >= coverage(P)` for any onsets. When the events
+between beats are as long as the beats (sustained eighth-note bass) the duration
+salience no longer separates them, accent periodicity ties, and coverage decides
+for the faster grid. 100 BPM with eighth-note hats and bass scored 0.70 at 200 BPM
+against 0.39 at 100 BPM (coverage 0.99 against 0.44). The prior at one octave
+width gives only 0.79 between 100 and 200 BPM and cannot arbitrate.
+
+Fast candidates also lost their grid fit under timing jitter.
+`supportedOnsetPeriod` centered its interval window on the integer lag, not the
+parabolic sub-hop period. With ±15ms jitter at 190 BPM (31.58 hops) the window
+around 31 truncated the interval distribution on one side, the median fell to
+31.16 hops, WLS kept the slip, and coverage collapsed to 0.16, so 95 BPM won. A
+constant grid over the whole window needs period precision proportional to the
+square of the period, so fast tempos fail first. The window is now centered on
+the sub-hop period.
+
+The selected candidate is then checked for subdivision when it is at least
+155 BPM. The doubled fast period and both of its alternating phases are scored by
+the mean onset attack prominence at half-beat positions relative to beat
+positions (`ρ`, the smaller of the two phases). The slower reading wins when
+`15 (0.48 − ρ) + log prior_0.5(slow) − log prior_0.5(fast) > 0`, its accent
+periodicity is at least 80% of the fast one, and at least 25% of the aligned
+onsets fall on half beats. `prior_0.5` is the 120 BPM log prior with a half-octave
+width.
+
+Measured `ρ`: eighth-note hats/bass at 85–110 BPM gave 0.38–0.48; fast backbeats
+with audible snares gave 0.54–0.99. Loud/soft alternation of one kick at 125 and
+150 BPM gave 0.35–0.37, indistinguishable from subdivisions, which is why
+readings below 155 BPM are not checked. A fast backbeat whose snare is far weaker
+than the kick (0.36–0.40) reads as half time; `BpmOctaveTest` records this limit.
+The margins around 0.48 are small (0.475 and 0.536 in the closest cases), and the
+constants were fitted to these synthetic patterns during development, not to a
+held-out set or real recordings.
+
 ## Reproducible checks and limits
 
 Run the deterministic synthetic and local WAV tests with JDK 17:
@@ -96,7 +135,8 @@ Run the deterministic synthetic and local WAV tests with JDK 17:
 ./gradlew test --tests 'io.github.mochilabs.mixer.BpmPrecisionTest' \
   --tests 'io.github.mochilabs.mixer.BpmGridTest' \
   --tests 'io.github.mochilabs.mixer.BpmDetectorTest' \
-  --tests 'io.github.mochilabs.mixer.BpmIntegrationTest'
+  --tests 'io.github.mochilabs.mixer.BpmIntegrationTest' \
+  --tests 'io.github.mochilabs.mixer.BpmOctaveTest'
 ```
 
 The tests print measured values into the Gradle test report. Enable DEBUG for

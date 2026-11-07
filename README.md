@@ -174,7 +174,7 @@ Crossfades use equal-power gains and soft limiting above an absolute mixed ampli
 
 Silence analysis scans seekable tracks near their start and end. Realtime detection monitors raw main PCM before gain application. For tracks with a known duration, an early cut requires confirmed silence in the tail window after the first five seconds. Streams require at least `max(tailConfirmMs, 3000)` ms of silence. Advancement uses an armed next track when available.
 
-Normalization uses K-weighting, 400 ms windows with 75% overlap, and absolute and relative loudness gates. Gain is capped at `1.0`, so quiet tracks are not amplified. The target is configurable from -30 to -6 LUFS through REST.
+Normalization uses K-weighting, 400 ms windows with 75% overlap, and absolute and relative loudness gates. Gain is capped at `1.0`, so quiet tracks are not amplified. The target is configurable from -30 to -6 LUFS through REST. A provisional estimate from the first 8 seconds of decoded audio applies before the full-track measurement finishes. Gain changes from late results ramp over one second. A track whose loudness is not known yet keeps the previous track's level instead of starting at unity. `currentTrackGain` reports the level the current track is playing at or ramping toward.
 
 ### Announcements
 

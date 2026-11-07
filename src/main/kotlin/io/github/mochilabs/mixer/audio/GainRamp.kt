@@ -41,5 +41,15 @@ class GainRamp(
         }
     }
 
+    /** Takes over [other]'s level and any ramp in progress. */
+    fun copyFrom(other: GainRamp) {
+        val c = other.current
+        val t = other.target
+        val s = other.step
+        current = c
+        target = t
+        step = s
+    }
+
     val settled: Boolean get() = step == 0f
 }

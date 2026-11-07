@@ -286,9 +286,18 @@ components:
         mixerFilterActive: { type: boolean }
         crossfadeHandoffInMs: { type: [integer, 'null'], format: int64 }
         announcementsQueued: { type: integer }
-        currentTrackGain: { type: number, format: float }
+        currentTrackGain:
+          type: number
+          format: float
+          description: >-
+            Normalization gain the current track plays at or ramps toward (1 while
+            disabled). An unmeasured track reports the level it inherited from the
+            previous track.
         currentTrackGainDb: { type: number, format: float }
-        nextTrackGain: { type: [number, 'null'], format: float }
+        nextTrackGain:
+          type: [number, 'null']
+          format: float
+          description: Gain of the queued next track from its full or provisional loudness; null while unknown.
         nextTrackGainDb: { type: [number, 'null'], format: float }
         bpmDetectionEnabled: { type: boolean }
         keyDetectionEnabled: { type: boolean }

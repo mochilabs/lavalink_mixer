@@ -102,7 +102,15 @@ internal class TrackAnalysisService(
         analysisBroken = false
     }
 
-    fun analyze(track: AudioTrack, settings: TrackAnalysisSettings): TrackAnalysisResult {
+    /**
+     * [onLoudnessEstimate] receives a provisional integrated loudness after the first
+     * [PROVISIONAL_LOUDNESS_MS] of decoded audio, before the full-track scan finishes.
+     */
+    fun analyze(
+        track: AudioTrack,
+        settings: TrackAnalysisSettings,
+        onLoudnessEstimate: ((Float) -> Unit)? = null,
+    ): TrackAnalysisResult {
         val factory = ensureAnalysisPlayer().second
         try {
             val duration = try {
@@ -143,14 +151,16 @@ internal class TrackAnalysisService(
                     bpmAttempted = true
                 }
             } else if (settings.silence || settings.normalization) {
+                // Loudness first: playback gain waits on it, while trim points are
+                // only needed at the next transition.
+                if (settings.normalization) {
+                    loudness = measureLoudnessBlocking(track, factory, onLoudnessEstimate)
+                }
                 if (settings.silence) {
                     lead = scanHead(track, factory, settings)
                     if (seekable && duration > 0 && duration < Long.MAX_VALUE / 2) {
                         tail = scanTail(track, factory, duration, settings)
                     }
-                }
-                if (settings.normalization) {
-                    loudness = measureLoudnessBlocking(track, factory)
                 }
             }
 
@@ -314,10 +324,10 @@ internal class TrackAnalysisService(
     private fun firstOnOrAfter(anchor: Double, step: Double, from: Double): Long =
         Math.round(anchor + Math.ceil((from - anchor) / step) * step)
 
-    fun measureBaseline(track: AudioTrack): Float? {
+    fun measureBaseline(track: AudioTrack, onLoudnessEstimate: ((Float) -> Unit)? = null): Float? {
         val factory = ensureAnalysisPlayer().second
         return try {
-            measureLoudnessBlocking(track, factory)
+            measureLoudnessBlocking(track, factory, onLoudnessEstimate)
         } finally {
             stopTrack()
         }
@@ -537,7 +547,11 @@ internal class TrackAnalysisService(
         return if (lastEnd < 0) collectedMs else (collectedMs - lastEnd).coerceAtLeast(0)
     }
 
-    private fun measureLoudnessBlocking(track: AudioTrack, factory: SiphonFactory): Float? {
+    private fun measureLoudnessBlocking(
+        track: AudioTrack,
+        factory: SiphonFactory,
+        onEstimate: ((Float) -> Unit)? = null,
+    ): Float? {
         val tap = SiphonQueue(maxFrames = 512)
         factory.addTap(tap)
         try {
@@ -546,6 +560,9 @@ internal class TrackAnalysisService(
             sub.playTrack(clone)
             val meter = LoudnessMeter()
             val pumpFrame = newProvideFrame()
+            val estimateAfter = PROVISIONAL_LOUDNESS_MS * SAMPLE_RATE / 1000
+            var fedSamples = 0L
+            var estimated = onEstimate == null
             val durationMs = try {
                 clone.duration
             } catch (e: Exception) {
@@ -564,6 +581,13 @@ internal class TrackAnalysisService(
                     val took = tap.take(1920, 2, chunk)
                     if (took <= 0) break
                     meter.feed(chunk, 0, took)
+                    fedSamples += took
+                }
+                if (!estimated && fedSamples >= estimateAfter) {
+                    estimated = true
+                    // A silent opening gates to -70 LUFS; report nothing rather than unity gain.
+                    val provisional = meter.finish()
+                    if (provisional > -70f) onEstimate?.invoke(provisional)
                 }
             }
             stopTrack()
@@ -629,23 +653,29 @@ internal class TrackAnalysisService(
         }
     }
 
+    /**
+     * Pulls decoded frames as fast as the analysis decoder produces them. The
+     * timed provide parks the thread while the source buffers (network reads),
+     * so there is no fixed pacing sleep; the old 8-frames-per-10ms pacing capped
+     * analysis at about 16x realtime (15s for a 4-minute track).
+     */
     private fun pumpSub(sub: AudioPlayer, frame: MutableAudioFrame) {
         var burst = 0
         while (burst < ANALYSIS_PUMP_BURST && !analysisBroken) {
             try {
-                if (!sub.provide(frame)) break
+                if (!sub.provide(frame, ANALYSIS_PROVIDE_WAIT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)) break
+            } catch (e: java.util.concurrent.TimeoutException) {
+                break
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                analysisBroken = true
+                break
             } catch (e: Exception) {
                 analysisBroken = true
                 log.warn("analysis pump failed on guild {}", guildId, e)
                 break
             }
             burst++
-        }
-        try {
-            Thread.sleep(if (burst > 0) ANALYSIS_PUMP_SLEEP_MS else ANALYSIS_IDLE_SLEEP_MS)
-        } catch (e: InterruptedException) {
-            Thread.currentThread().interrupt()
-            analysisBroken = true
         }
     }
 
@@ -677,8 +707,13 @@ internal class TrackAnalysisService(
         private const val MISSING_END_BPM_BAND = 0.04f
         private const val SCAN_TIMEOUT_MS = 45_000L
         private const val LOUDNESS_GRACE_MS = 5_000L
-        private const val ANALYSIS_PUMP_BURST = 8
-        private const val ANALYSIS_PUMP_SLEEP_MS = 10L
-        private const val ANALYSIS_IDLE_SLEEP_MS = 20L
+        /** Audio decoded before a provisional loudness is reported; matters most for network-bound sources. */
+        const val PROVISIONAL_LOUDNESS_MS = 8_000L
+        /**
+         * Frames pulled before the caller drains the tap: 2.56s of audio, well inside
+         * the tap's 512-frame and 8s sample bounds so a burst never overflows.
+         */
+        private const val ANALYSIS_PUMP_BURST = 128
+        private const val ANALYSIS_PROVIDE_WAIT_MS = 20L
     }
 }

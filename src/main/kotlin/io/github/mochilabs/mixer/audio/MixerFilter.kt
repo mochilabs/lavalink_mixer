@@ -52,6 +52,20 @@ class MixerFilter(
     private var subScratch = emptyArray<FloatArray>()
     private var parallelScratch = emptyArray<FloatArray>()
     private var overlayScratch = emptyArray<FloatArray>()
+    private val crossoverMain = CrossoverLR4()
+    private val crossoverSub = CrossoverLR4()
+    private var scratchMainLow = emptyArray<FloatArray>()
+    private var scratchMainHigh = emptyArray<FloatArray>()
+    private var scratchSubLow = emptyArray<FloatArray>()
+    private var scratchSubHigh = emptyArray<FloatArray>()
+    private val echoBuffer = CircularDelayBuffer()
+    private var echoScratchL = FloatArray(1024)
+    private var echoScratchR = FloatArray(1024)
+    private val sweepFilterL = PcmBiquadFilter()
+    private val sweepFilterR = PcmBiquadFilter()
+    private var lastRecipe: TransitionRecipe? = null
+    // Allocated once: the last ~100ms of main PCM replayed through crossoverMain at recipe activation.
+    private val preRollFrames = arrayOf(FloatArray(PRE_ROLL_SAMPLES), FloatArray(PRE_ROLL_SAMPLES))
 
     override fun process(input: Array<FloatArray>, offset: Int, length: Int) {
         if (length <= 0) return
@@ -69,7 +83,6 @@ class MixerFilter(
             mixInto(mixer, input, offset, length)
         } catch (e: Exception) {
             // Leave input (possibly) untouched and throttle the log:
-            // this runs ~50x/sec, so only the first occurrence per minute.
             if (now() - lastWarn >= 60_000) {
                 lastWarn = now()
                 log.warn("mixer filter failed on guild {}, degrading to passthrough", guildId, e)
@@ -102,9 +115,47 @@ class MixerFilter(
         }
 
         val parallels = mixer.advanceParallelOverlays(length, feederId)
-        if (gains.main >= 0.999f && gains.sub <= 0.001f && parallels.isEmpty()) return // idle passthrough
+        val recipe = mixer.activeRecipe
+        if (recipe !== lastRecipe) {
+            lastRecipe = recipe
+            if (recipe != null) {
+                // echoBuffer still holds main PCM up to the previous chunk (this chunk is written below),
+                // so replaying its tail leaves the crossover state continuous with this chunk.
+                crossoverMain.reset()
+                echoBuffer.copyRecent(preRollFrames[0], preRollFrames[1], PRE_ROLL_SAMPLES)
+                crossoverMain.preRoll(preRollFrames, PRE_ROLL_SAMPLES)
+                crossoverSub.reset()
+                sweepFilterL.reset()
+                sweepFilterR.reset()
+                log.debug(
+                    "mixer filter activated recipe strategy={} totalSamples={} on guild {}",
+                    recipe.strategy, recipe.totalSamples, guildId,
+                )
+            }
+        }
+        val isRecipeActive = (recipe != null)
+        val echoTrigger = if (isRecipeActive) recipe?.echoTrigger else null
+        val endChainSample = mixer.chainSamplePos
+        val currentSample = mixer.xfadeRecipeSampleAt(endChainSample)
+        val hasEcho = (isRecipeActive && echoTrigger != null && currentSample >= echoTrigger.atSample)
 
-        if (gains.sub <= 0.001f && parallels.isEmpty()) {
+        if (!hasEcho) {
+            val inR = if (input.size > 1) input[1] else input[0]
+            echoBuffer.write(input[0], inR, offset, length)
+        }
+        if (isRecipeActive) {
+            val mainCutoffHz = recipe.filterCutoffAt(TrackTarget.OUTGOING, currentSample)
+            if (mainCutoffHz != null) {
+                sweepFilterL.setHighPass(48000, mainCutoffHz)
+                sweepFilterL.process(input[0], input[0], inputOffset = offset, outputOffset = offset, length = length)
+                if (input.size > 1) {
+                    sweepFilterR.setHighPass(48000, mainCutoffHz)
+                    sweepFilterR.process(input[1], input[1], inputOffset = offset, outputOffset = offset, length = length)
+                }
+            }
+        }
+        if (!isRecipeActive && gains.main >= 0.999f && gains.sub <= 0.001f && parallels.isEmpty()) return // idle passthrough
+        if (!isRecipeActive && gains.sub <= 0.001f && parallels.isEmpty()) {
             // Main-only (fade-in/mask/duck release): scale in place, no sub buffer.
             if (gains.main < 0.999f) {
                 for (c in input.indices) {
@@ -186,12 +237,87 @@ class MixerFilter(
             }
         }
 
+        if (hasEcho) {
+            ensureEchoScratch(length)
+            val termGain = recipe.echoTerminationGainAt(currentSample)
+            echoScratchL.fill(0f, 0, length)
+            echoScratchR.fill(0f, 0, length)
+            echoBuffer.readAndMix(echoTrigger.delaySamples, echoTrigger.feedback, echoScratchL, echoScratchR, 0, length, termGain)
+        }
+        val doBassProcessing = isRecipeActive && (
+            recipe.strategy == TransitionStrategy.PHRASE_MATCHED_BASS_SWAP ||
+            recipe.strategy == TransitionStrategy.SHORT_BASS_SWAP ||
+            recipe.hasBassCuts
+        )
+
+        if (doBassProcessing) {
+            // Bass ramps (~15 ms) can be shorter than one chunk, so evaluate per sample
+            // while a ramp is in flight and use the constant gain once both ends agree.
+            val chunkStartSample = mixer.xfadeRecipeSampleAt(endChainSample - length)
+            val mainBassStart = recipe.bassGainAt(TrackTarget.OUTGOING, chunkStartSample)
+            val mainBassEnd = recipe.bassGainAt(TrackTarget.OUTGOING, currentSample)
+            val subBassStart = recipe.bassGainAt(TrackTarget.INCOMING, chunkStartSample)
+            val subBassEnd = recipe.bassGainAt(TrackTarget.INCOMING, currentSample)
+            val bassRamping = mainBassStart != mainBassEnd || subBassStart != subBassEnd
+            val sampleSpan = (currentSample - chunkStartSample).coerceAtLeast(0L)
+            scratchMainLow = ensureScratch(scratchMainLow, input.size, length)
+            scratchMainHigh = ensureScratch(scratchMainHigh, input.size, length)
+            scratchSubLow = ensureScratch(scratchSubLow, input.size, length)
+            scratchSubHigh = ensureScratch(scratchSubHigh, input.size, length)
+
+            val inL = input[0]
+            val inR = if (input.size > 1) input[1] else input[0]
+            crossoverMain.processTrack(
+                inL, inR,
+                scratchMainLow[0], if (input.size > 1) scratchMainLow[1] else scratchMainLow[0],
+                scratchMainHigh[0], if (input.size > 1) scratchMainHigh[1] else scratchMainHigh[0],
+                length, offset
+            )
+
+            val subL = sub[0]
+            val subR = if (sub.size > 1) sub[1] else sub[0]
+            crossoverSub.processTrack(
+                subL, subR,
+                scratchSubLow[0], if (sub.size > 1) scratchSubLow[1] else scratchSubLow[0],
+                scratchSubHigh[0], if (sub.size > 1) scratchSubHigh[1] else scratchSubHigh[0],
+                length, 0
+            )
+
+            for (c in input.indices) {
+                val channel = input[c]
+                val end = offset + length
+                val mLow = scratchMainLow[c]
+                val mHigh = scratchMainHigh[c]
+                val sLow = scratchSubLow[c]
+                val sHigh = scratchSubHigh[c]
+
+                for (i in offset until end) {
+                    val idx = i - offset
+                    var mainBassGain = mainBassEnd
+                    var subBassGain = subBassEnd
+                    if (bassRamping) {
+                        val at = chunkStartSample + sampleSpan * (idx + 1) / length
+                        mainBassGain = recipe.bassGainAt(TrackTarget.OUTGOING, at)
+                        subBassGain = recipe.bassGainAt(TrackTarget.INCOMING, at)
+                    }
+                    val mainAudio = mLow[idx] * mainBassGain + mHigh[idx]
+                    val subAudio = sLow[idx] * subBassGain + sHigh[idx]
+                    var sum = mainAudio * gains.main + subAudio * gains.sub
+                    if (parallel != null) sum += parallel[c][idx]
+                    channel[i] = softLimit(sum)
+                }
+            }
+            return
+        }
+
         for (c in input.indices) {
             val channel = input[c]
             val subChannel = sub[c]
             val end = offset + length
+            val echoArr = if (c == 0) echoScratchL else echoScratchR
             for (i in offset until end) {
                 var sum = channel[i] * gains.main + subChannel[i - offset] * gains.sub
+                if (hasEcho) sum += echoArr[i - offset]
                 if (parallel != null) sum += parallel[c][i - offset]
                 channel[i] = softLimit(sum)
             }
@@ -204,6 +330,13 @@ class MixerFilter(
             buffer.getOrNull(channel)?.takeIf { it.size >= samples } ?: FloatArray(samples)
         }
     }
+    private fun ensureEchoScratch(samples: Int) {
+        if (echoScratchL.size < samples) {
+            echoScratchL = FloatArray(samples)
+            echoScratchR = FloatArray(samples)
+        }
+    }
+
 
     private fun warnUnbound() {
         val t = now()
@@ -253,6 +386,9 @@ class MixerFilter(
         private val log = LoggerFactory.getLogger(MixerFilter::class.java)
 
         private val FILTER_SEQ = java.util.concurrent.atomic.AtomicLong(0L)
+
+        /** 100ms at 48kHz: enough for the 200Hz LR4 crossover state to settle. */
+        private const val PRE_ROLL_SAMPLES = 4800
 
         /** Knee start; audio below this passes through bit-identically. */
         private const val SOFT_LIMIT_THRESHOLD: Float = 0.9f

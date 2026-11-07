@@ -81,11 +81,11 @@ class AdaptiveRuntimeTest {
             val first = track()
             val second = track()
             f.playing = first
-            AnalysisCaches.bpmTail[first.identifier] = BeatGrid(120f, 0, 1f)
+            AnalysisCaches.bpmTail[first.identifier] = ExtendedBeatGrid(120f, 0L, 1f)
             assertEquals(GuildMixer.CurrentTempo(first.info.identifier, 120f), f.mixer.currentTempo())
             f.playing = second
             assertNull(f.mixer.currentTempo(), "old main BPM must not survive a replacement")
-            AnalysisCaches.bpmHead[second.identifier] = BeatGrid(125f, 0, 1f)
+            AnalysisCaches.bpmHead[second.identifier] = ExtendedBeatGrid(125f, 0L, 1f)
             assertEquals(GuildMixer.CurrentTempo(second.info.identifier, 125f), f.mixer.currentTempo())
             f.mixer.updateBpm(false)
             assertNull(f.mixer.currentTempo())
@@ -112,8 +112,8 @@ class AdaptiveRuntimeTest {
             val features = TransitionFeatures(0, 10000, emptyList(), 0.2f, 1f,
                 KeyEstimate.Unknown("fixture"), emptyList())
             AnalysisCaches.bpm[warmup.identifier] = BpmDetector.BpmResult(120f, 0, 1f)
-            AnalysisCaches.bpmHead[warmup.identifier] = BeatGrid(120f, 0, 1f)
-            AnalysisCaches.bpmTail[warmup.identifier] = BeatGrid(120f, 0, 1f)
+            AnalysisCaches.bpmHead[warmup.identifier] = ExtendedBeatGrid(120f, 0L, 1f)
+            AnalysisCaches.bpmTail[warmup.identifier] = ExtendedBeatGrid(120f, 0L, 1f)
             AnalysisCaches.featuresHead[warmup.identifier] = features
             AnalysisCaches.featuresTail[warmup.identifier] = features
             f.tasks.removeFirst().run()
@@ -140,7 +140,7 @@ class AdaptiveRuntimeTest {
             assertIs<ArmResult.Success>(f.mixer.arm(2, "next-arm", next, false, "encoded", false))
             f.mixer.poll()
             assertEquals("short_crossfade", f.mixer.transitionStatus.kind)
-            assertEquals("missing_features", f.mixer.transitionStatus.reason)
+            assertEquals("missing_all_metadata", f.mixer.transitionStatus.reason)
         }
     }
 

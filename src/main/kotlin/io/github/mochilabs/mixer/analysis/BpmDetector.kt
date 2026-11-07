@@ -109,9 +109,51 @@ object BpmDetector {
             confidence = det.confidence,
         )
     }
+    fun analyzeExtendedGrid(
+        frames: List<Array<FloatArray>>,
+        sampleRate: Int = 48000,
+        minBpm: Float = 60f,
+        maxBpm: Float = 200f,
+        windowStartMs: Long = 0L,
+    ): ExtendedBeatGrid? {
+        val det = detect(frames, sampleRate, minBpm, maxBpm) ?: return null
+        val periodSamples = (sampleRate.toDouble() * 60.0) / det.bpm.toDouble()
+        val hopSamples = (sampleRate.toDouble() * HOP_MS / 1000.0)
+        val windowStartSamples = Math.round(windowStartMs.toDouble() * sampleRate.toDouble() / 1000.0)
+
+        val rawPhaseSample = Math.round(det.phaseHops * hopSamples)
+        val periodSamplesL = Math.round(periodSamples)
+        val phaseSampleLocal = if (periodSamplesL > 0) ((rawPhaseSample % periodSamplesL) + periodSamplesL) % periodSamplesL else 0L
+        val phaseSample = windowStartSamples + phaseSampleLocal
+
+        val rawDownbeatSample = Math.round(det.downbeatHopOffset * hopSamples)
+        val barSamplesL = periodSamplesL * 4L
+        val downbeatSampleLocal = if (barSamplesL > 0) ((rawDownbeatSample % barSamplesL) + barSamplesL) % barSamplesL else phaseSampleLocal
+        val downbeatSample = windowStartSamples + downbeatSampleLocal
+
+        return ExtendedBeatGrid(
+            bpm = det.bpm,
+            phaseSample = phaseSample,
+            bpmConfidence = det.confidence,
+            downbeatSample = downbeatSample,
+            downbeatConfidence = det.downbeatConfidence,
+            phraseConfidence = 0.0f,
+            isNon44Meter = det.isNon44Meter,
+            sampleRate = sampleRate,
+        )
+    }
+
 
     /** Scalar result of one detection pass, shared by both public entry points. */
-    private class Detection(val bpm: Float, val confidence: Float, val firstBeatIdx: Int, val phaseHops: Double = 0.0)
+    private class Detection(
+        val bpm: Float,
+        val confidence: Float,
+        val firstBeatIdx: Int,
+        val phaseHops: Double = 0.0,
+        val downbeatHopOffset: Double = 0.0,
+        val downbeatConfidence: Float = 0.0f,
+        val isNon44Meter: Boolean = false,
+    )
     private fun detect(
         frames: List<Array<FloatArray>>,
         sampleRate: Int,
@@ -312,9 +354,73 @@ object BpmDetector {
 
         val (refinedPeriod, phaseHops, _) = candidateGrids.getValue(chosenLag)
         val bpm = (60_000.0 / (refinedPeriod * HOP_MS)).toFloat()
-        return Detection(bpm, chosenConf, firstBeatIdx, phaseHops)
-    }
 
+        // Metric structure analysis (downbeat & 3/4 check)
+        val periodHops = refinedPeriod
+        val lag3 = round(3.0 * periodHops).toInt()
+        val lag4 = round(4.0 * periodHops).toInt()
+        val lag6 = round(6.0 * periodHops).toInt()
+        val lag8 = round(8.0 * periodHops).toInt()
+
+        val r3 = if (lag3 in 1 until n && accentVariance > 0.0) normalizedCorrelation(accentSignal, accentVariance, lag3) else 0.0
+        val r6 = if (lag6 in 1 until n && accentVariance > 0.0) normalizedCorrelation(accentSignal, accentVariance, lag6) else 0.0
+        val r4 = if (lag4 in 1 until n && accentVariance > 0.0) normalizedCorrelation(accentSignal, accentVariance, lag4) else 0.0
+        val r8 = if (lag8 in 1 until n && accentVariance > 0.0) normalizedCorrelation(accentSignal, accentVariance, lag8) else 0.0
+
+        val tripleScore = maxOf(0.0, r3) + maxOf(0.0, r6)
+        val quadScore = maxOf(0.0, r4) + maxOf(0.0, r8)
+        val isNon44 = (tripleScore > 1.25 * quadScore && r3 > 0.35)
+
+        var bestDownbeatHop = phaseHops
+        var downbeatConf = 0.0f
+
+        if (!isNon44 && onsets.isNotEmpty()) {
+            val barHops = 4.0 * periodHops
+            val phaseScores = DoubleArray(4)
+            val phaseCounts = IntArray(4)
+            val tolHops = maxOf(1.5, periodHops * 0.25)
+
+            for (onset in onsets) {
+                val rawOffset = (onset.hop - phaseHops) % barHops
+                val normOffset = (rawOffset + barHops) % barHops
+                for (p in 0 until 4) {
+                    val target = p * periodHops
+                    val dist = abs(normOffset - target)
+                    val circularDist = minOf(dist, barHops - dist)
+                    if (circularDist <= tolHops) {
+                        val weight = 1.0 - (circularDist / tolHops)
+                        phaseScores[p] += onset.salience * weight
+                        phaseCounts[p]++
+                    }
+                }
+            }
+
+            for (p in 0 until 4) {
+                if (phaseCounts[p] > 0) {
+                    phaseScores[p] /= phaseCounts[p].toDouble()
+                }
+            }
+
+            val bestPhase = (0 until 4).maxByOrNull { phaseScores[it] } ?: 0
+            val bestScore = phaseScores[bestPhase]
+            val otherMean = (phaseScores.sum() - bestScore) / 3.0
+            if (bestScore > 1e-4 && otherMean > 1e-4) {
+                val contrast = ((bestScore - otherMean) / otherMean).coerceIn(0.0, 1.0)
+                downbeatConf = (chosenConf * contrast).toFloat().coerceIn(0f, 1f)
+            }
+            bestDownbeatHop = phaseHops + bestPhase * periodHops
+        }
+
+        return Detection(
+            bpm = bpm,
+            confidence = chosenConf,
+            firstBeatIdx = firstBeatIdx,
+            phaseHops = phaseHops,
+            downbeatHopOffset = bestDownbeatHop,
+            downbeatConfidence = downbeatConf,
+            isNon44Meter = isNon44,
+        )
+    }
     private fun supportedOnsetPeriod(
         onsets: List<Onset>,
         lag: Int,

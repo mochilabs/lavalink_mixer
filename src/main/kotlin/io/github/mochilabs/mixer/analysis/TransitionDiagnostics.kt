@@ -13,12 +13,14 @@ internal fun transitionAnalysisLog(outgoingId: String?, incomingId: String?): St
             is KeyEstimate.Unknown -> "unknown(${estimate.reason})"
             null -> "unknown(not_analyzed)"
         }
-        return "bpm=${grid?.bpm ?: "unknown"} bpmConfidence=${grid?.confidence ?: "unknown"} " +
+        return "bpm=${grid?.bpm ?: "unknown"} bpmConfidence=${grid?.bpmConfidence ?: "unknown"} " +
             "beatPhaseMs=${grid?.phaseMs ?: "unknown"} key=$keyDescription " +
             "keyWindowMs=${key?.let { "${it.windowStartMs}..${it.windowEndMs}" } ?: "unknown"} " +
             "featureWindowMs=${features?.let { "${it.windowStartMs}..${it.windowEndMs}" } ?: "unknown"} " +
             "rms=${features?.rms ?: "unknown"} rhythmStability=${features?.rhythmicStability ?: "unknown"} " +
-            "featureStatus=${features?.unknownReason ?: if (features == null) "not_analyzed" else "ready"}"
+            "featureStatus=${features?.unknownReason ?: if (features == null) "not_analyzed" else "ready"} " +
+            "downbeatConfidence=${grid?.downbeatConfidence ?: "unknown"} " +
+            "phraseConfidence=${grid?.phraseConfidence ?: "unknown"}"
     }
     return "bpmMethod=onset_acf_wls keyMethod=chroma_profile " +
         "outgoing={${describe(outgoingId, true)}} incoming={${describe(incomingId, false)}}"

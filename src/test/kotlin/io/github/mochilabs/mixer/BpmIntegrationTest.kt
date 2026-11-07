@@ -119,7 +119,7 @@ class BpmIntegrationTest {
             val headGrid = AnalysisCaches.bpmHead[track.identifier]
             assertNotNull(headGrid, "bpmHead should be recovered by smart retry")
             assertTrue(kotlin.math.abs(headGrid.bpm - 120f) < 1.5f, "recovered bpm=${headGrid.bpm}")
-            assertTrue(headGrid.confidence > 0.25f, "recovered confidence=${headGrid.confidence}")
+            assertTrue(headGrid.bpmConfidence > 0.25f, "recovered confidence=${headGrid.bpmConfidence}")
             // Phase should be projected into the period [0..500ms)
             assertTrue(headGrid.phaseMs in 0L..500L, "projected phase=${headGrid.phaseMs}")
         } finally {
@@ -187,6 +187,33 @@ class BpmIntegrationTest {
             assertNull(mixer.maybeRetryAnalysis(), "complete trimmed scans must not exhaust retries")
         } finally {
             mixer.destroy()
+            manager.shutdown()
+            file.delete()
+        }
+    }
+
+    @Test
+    fun `head projected from tail without local beat measurement keeps downbeat confidence at zero`() {
+        val manager = manager()
+        // 12s track, 6s drumless intro, 5s scan: smart retry is skipped (5000 + 10000 >= 12000),
+        // so the head is synthesized from the 120 BPM tail and must not claim a verified downbeat.
+        val file = introThenBeatFile("mixer-tail-projected-head", introSec = 6, bpm = 120.0, totalSec = 12)
+        val service = TrackAnalysisService(manager, 48L)
+        try {
+            val track = loadTrack(manager, file)
+            val result = service.analyze(track, TrackAnalysisSettings(
+                silence = false, normalization = false, bpm = true,
+                silenceThresholdDb = -50f, silenceMinSoundMs = 1,
+                silenceHeadScanMs = 5000, silenceTailScanMs = 5000, bpmScanMs = 5000,
+            ))
+            val tail = assertNotNull(result.bpmTail)
+            val head = assertNotNull(result.bpmHead)
+            assertTrue(tail.downbeatConfidence > 0f, "tail has real beats (got ${tail.downbeatConfidence})")
+            assertEquals(120f, head.bpm, 1.5f)
+            assertEquals(0f, head.downbeatConfidence, "extrapolated head must not pass downbeat gates")
+            assertEquals(0f, head.phraseConfidence, "extrapolated head must not pass phrase gates")
+        } finally {
+            service.destroy()
             manager.shutdown()
             file.delete()
         }

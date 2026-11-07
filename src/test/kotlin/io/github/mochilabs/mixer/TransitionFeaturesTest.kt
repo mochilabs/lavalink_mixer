@@ -46,7 +46,7 @@ class TransitionFeaturesTest {
         fun pulses(positions: List<Int>) = frames(6) { i ->
             if (positions.any { i in it until it + 960 }) 0.2f else 0f
         }
-        val grid = BeatGrid(120f, 0, 0.9f)
+        val grid = ExtendedBeatGrid(120f, 0L, 0.9f)
         val steady = TransitionFeatureAnalyzer.analyze(pulses((0 until 12).map { it * 24000 }), grid = grid)
         val uneven = TransitionFeatureAnalyzer.analyze(pulses(listOf(0, 6000, 51000, 67000, 99000, 130000, 139000, 200000)), grid = grid)
         assertTrue((steady.rhythmicStability ?: 0f) > 0.95f)

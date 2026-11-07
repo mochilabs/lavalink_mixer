@@ -32,9 +32,9 @@ class TransitionDiagnosticsTest {
     fun `log describes outgoing tail and incoming head with measured key and confidence`() {
         val outgoing = "diagnostic-out-${UUID.randomUUID()}"
         val incoming = "diagnostic-in-${UUID.randomUUID()}"
-        AnalysisCaches.bpmHead[outgoing] = BeatGrid(90f, 100L, 0.2f)
-        AnalysisCaches.bpmTail[outgoing] = BeatGrid(120f, 2100L, 0.9f)
-        AnalysisCaches.bpmHead[incoming] = BeatGrid(125f, 50L, 0.8f)
+        AnalysisCaches.bpmHead[outgoing] = ExtendedBeatGrid(90f, 100L * 48L, 0.2f)
+        AnalysisCaches.bpmTail[outgoing] = ExtendedBeatGrid(120f, 2100L * 48L, 0.9f)
+        AnalysisCaches.bpmHead[incoming] = ExtendedBeatGrid(125f, 50L * 48L, 0.8f)
         AnalysisCaches.featuresTail[outgoing] = TransitionFeatures(2000, 8000, emptyList(), 0.2f, 0.95f,
             KeyEstimate.Candidate(7, KeyMode.MINOR, 0.7f), emptyList())
         AnalysisCaches.featuresHead[incoming] = TransitionFeatures(0, 4000, emptyList(), 0.1f, 0.85f,

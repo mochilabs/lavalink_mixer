@@ -207,4 +207,28 @@ class BpmGridTest {
         // Phase should align with the true 250ms pulse, not the 60ms rogue click
         assertNear(grid.phaseMs.toFloat(), 250f, 25f, "phase anchored to periodic beats")
     }
+    @Test
+    fun `extended beat grid maintains exact double period and sample accurate beat calculation`() {
+        val grid = ExtendedBeatGrid(
+            bpm = 126f,
+            phaseSample = 1200L,
+            bpmConfidence = 0.95f,
+            downbeatSample = 1200L,
+            downbeatConfidence = 0.85f,
+            phraseConfidence = 0.75f,
+            sampleRate = 48000,
+        )
+        val expectedPeriodSamples = 48000.0 * 60.0 / 126.0
+        kotlin.test.assertEquals(expectedPeriodSamples, grid.periodSamples, 1e-6)
+        // 100 beats forward
+        val beat100 = grid.beatSample(100)
+        val expectedSample = Math.round(1200L + 100 * expectedPeriodSamples)
+        kotlin.test.assertEquals(expectedSample, beat100)
+
+        // Legacy conversion round-trip
+        val legacy = grid.toLegacyBeatGrid()
+        kotlin.test.assertEquals(126f, legacy.bpm)
+        kotlin.test.assertEquals(25L, legacy.phaseMs) // 1200 / 48 = 25ms
+        kotlin.test.assertEquals(0.95f, legacy.confidence)
+    }
 }

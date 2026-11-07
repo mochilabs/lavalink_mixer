@@ -96,11 +96,11 @@ object BpmCalibration {
         window: String,
         durationMs: Long?,
         scanMs: Long,
-        grid: BeatGrid?,
+        grid: ExtendedBeatGrid?,
         status: String,
         error: String = "",
     ) {
-        writer.appendLine(listOf(file, window, durationMs, scanMs, grid?.bpm, grid?.phaseMs, grid?.confidence, status, error)
+        writer.appendLine(listOf(file, window, durationMs, scanMs, grid?.bpm, grid?.phaseMs, grid?.bpmConfidence, status, error)
             .joinToString("\t") { value ->
                 value?.toString()?.replace("\\", "\\\\")?.replace("\t", "\\t")
                     ?.replace("\r", "\\r")?.replace("\n", "\\n") ?: ""

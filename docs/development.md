@@ -52,7 +52,7 @@ Use these existing tests as starting points:
 | Analysis ownership and retries | `AnalysisIsolatedFromLiveSubTest`, `DeferredAnalysisTest` |
 | Silence and trim | `SilenceAnalyzerTest`, `TailCutDeciderTest`, `TrimTransitionTest` |
 | Loudness | `NormalizationGainTest`, `NormalizationBaselineTest`, `NormalizationIntegrationTest` |
-| BPM and beat matching | `RealFftTest`, `BpmDetectorTest`, `BpmPrecisionTest`, `BpmGridTest`, `BpmIntegrationTest`, `BeatMatchPolicyTest`, `BeatMatchIntegrationTest`, `BeatMatchOutputTest`, `TempoStretcherTest`, `TempoEnvelopeTest`, `AdaptiveRecoveryIntegrationTest`, `AdaptiveRuntimeTest`, `AdaptiveTransitionRaceTest`, `TransitionFeaturesTest`, `AdaptiveTransitionPlannerTest` |
+| BPM and beat matching | `RealFftTest`, `BpmDetectorTest`, `BpmPrecisionTest`, `BpmGridTest`, `BpmIntegrationTest`, `DownbeatDetectorTest`, `PhraseDetectionTest`, `BeatMatchIntegrationTest`, `BeatMatchOutputTest`, `TempoStretcherTest`, `TempoEnvelopeTest`, `AdaptiveRecoveryIntegrationTest`, `AdaptiveRuntimeTest`, `AdaptiveTransitionRaceTest`, `TransitionFeaturesTest`, `AdaptiveTransitionPlannerTest`, `AutomixBoundaryMatrixTest`, `TransitionRecipeTest`, `TransitionMemoryTest`, `BassSwapIntegrationTest`, `EchoOutIntegrationTest`, `CrossoverLR4Test` |
 
 Integration tests generate local WAV files and exercise Lavaplayer players.
 They do not require a running Discord bot. Some tests exercise native audio
@@ -100,10 +100,13 @@ and state when that validation is unavailable.
 ## Read transition logs
 
 A started crossfade produces one INFO line. `beatMatched=true` means preparation
-committed with beat matching active. `targetBpm`, `rateRatio`, and `fadeBeats`
-report its target tempo, source speed ratio, and number of fade beats. A fallback
-reports `beatMatched=false`, `rateRatio=1.0`, and its reason. `durationMs` is the
-remaining overlap window; `lateMs` records preparation delay beyond the planned start.
+committed with beat matching active. `strategy` reports the selected `TransitionStrategy`
+(`phrase_matched_bass_swap`, `short_bass_swap`, `beatmatched_blend`, `downbeat_cut`,
+`echo_out`, `degraded_filter_sweep`, `absolute_fallback`, or `crossfade`). `targetBpm`,
+`rateRatio`, `fadeBeats`, and `echoDelayMs` report its target tempo, source speed ratio,
+number of fade beats, and Echo Out delay length. A fallback reports `beatMatched=false`,
+`rateRatio=1.0`, and its reason. `durationMs` is the remaining overlap window; `lateMs`
+records preparation delay beyond the planned start.
 
 The `outgoing={...}` and `incoming={...}` groups snapshot cached planning inputs:
 
@@ -111,11 +114,11 @@ The `outgoing={...}` and `incoming={...}` groups snapshot cached planning inputs
 | --- | --- |
 | `bpm`, `bpmConfidence` | Beat-grid tempo and periodicity confidence. Outgoing prefers the tail grid; incoming uses the head grid. |
 | `beatPhaseMs` | Track-relative fitted grid phase, not a musical downbeat. |
+| `downbeatConfidence`, `phraseConfidence` | Bar-level downbeat contrast and 8/16-bar phrase boundary energy contrast merged onto the extended grid. |
 | `key`, `keyConfidence` | Local pitch name and major/minor mode, such as `G:minor`, with heuristic confidence. Unknown keys retain their reason. |
 | `keyWindowMs` | Source interval covered by the key estimate. Independent head-key analysis is used only if transition features are absent. |
 | `featureWindowMs`, `featureStatus` | Source interval and validity of the transition features. |
 | `rms`, `rhythmStability` | RMS amplitude and energy-envelope correlation at the beat period. |
-
 `bpmMethod=onset_acf_wls` names onset analysis, autocorrelation tempo candidates,
 and weighted least-squares grid fitting. `keyMethod=chroma_profile` names chroma
 correlation against major/minor profiles. `limits` contains the planner's minimum

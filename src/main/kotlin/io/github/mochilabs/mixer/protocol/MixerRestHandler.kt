@@ -442,7 +442,7 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
                 decisionReason = transition.reason,
                 nextTrackBpm = mixer.peekNextBeatGrid()?.bpm ?: mixer.peekNextBpm()?.bpm,
                 nextTrackPhaseMs = mixer.peekNextBeatGrid()?.phaseMs ?: mixer.peekNextBpm()?.firstBeatMs,
-                nextTrackBpmConfidence = mixer.peekNextBeatGrid()?.confidence ?: mixer.peekNextBpm()?.confidence,
+                nextTrackBpmConfidence = mixer.peekNextBeatGrid()?.bpmConfidence ?: mixer.peekNextBpm()?.confidence,
                 beatmatchEnabled = mixer.beatmatchEnabled,
                 maxTempoChange = mixer.maxTempoChange,
                 beatmatchMinConfidence = mixer.beatmatchMinConfidence,

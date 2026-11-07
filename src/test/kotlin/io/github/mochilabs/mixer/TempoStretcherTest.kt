@@ -11,6 +11,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
+import kotlin.test.assertFailsWith
 class TempoStretcherTest {
 
     @Test
@@ -262,5 +263,61 @@ class TempoStretcherTest {
         assertContentEquals(FloatArray(100) { 0.25f } + FloatArray(100) { 0.5f }, mixed[0])
         chain.forEach { it.close() }
     }
+    @Test
+    fun `downstream InterruptedException is rethrown and does not mark nativeFailed`() {
+        val downstream = object : com.sedmelluq.discord.lavaplayer.filter.FloatPcmAudioFilter {
+            override fun process(input: Array<FloatArray>, offset: Int, length: Int) {
+                throw InterruptedException("playback stopped during handoff")
+            }
+            override fun seekPerformed(requestedTime: Long, providedTime: Long) = Unit
+            override fun flush() = Unit
+            override fun close() = Unit
+        }
+        val stretcher = TempoStretcher(
+            downstream = downstream,
+            channels = 2,
+            sampleRate = 48000,
+            initialSpeed = 1.06,
+            timescaleFactory = { ds, _, _ ->
+                object : com.sedmelluq.discord.lavaplayer.filter.FloatPcmAudioFilter {
+                    override fun process(input: Array<FloatArray>, offset: Int, length: Int) {
+                        ds.process(input, offset, length)
+                    }
+                    override fun seekPerformed(requestedTime: Long, providedTime: Long) = Unit
+                    override fun flush() = Unit
+                    override fun close() = Unit
+                }
+            },
+        )
+        assertTrue(stretcher.isActive)
+        assertFalse(stretcher.nativeFailed)
 
+        assertFailsWith<InterruptedException> {
+            stretcher.process(Array(2) { FloatArray(100) }, 0, 100)
+        }
+
+        assertFalse(stretcher.nativeFailed, "downstream InterruptedException must not be marked as a native timescale failure")
+        assertTrue(stretcher.isActive)
+    }
+
+    @Test
+    fun `clearNativeFailure and reset clear nativeFailed flag`() {
+        val queue = SiphonQueue()
+        val factory = SiphonFactory(queue, enableTimescale = true, timescaleFactory = { _, _, _ ->
+            throw UnsatisfiedLinkError("simulated native failure")
+        })
+        factory.setSpeed(1.1)
+        val output = Proxy.newProxyInstance(
+            UniversalPcmAudioFilter::class.java.classLoader,
+            arrayOf(UniversalPcmAudioFilter::class.java),
+        ) { _, _, _ -> null } as UniversalPcmAudioFilter
+        val chain = factory.buildChain(null, StandardAudioDataFormats.DISCORD_PCM_S16_LE, output)
+        val input = chain.first() as com.sedmelluq.discord.lavaplayer.filter.FloatPcmAudioFilter
+        input.process(Array(2) { FloatArray(100) }, 0, 100)
+
+        assertTrue(factory.nativeFailed)
+
+        factory.resetSpeed()
+        assertFalse(factory.nativeFailed, "resetSpeed must clear stale nativeFailed flag")
+    }
 }

@@ -101,12 +101,27 @@ class AdaptiveTransitionRaceTest {
         AnalysisCaches.featuresHead[incoming.id] = features.copy(leadingSilenceMs = 800)
     }
 
+    /** Seeds a full beatmatching cache so a crossfade plan can reach StartOverlap. */
+    private fun cacheBeatFeatures(outgoing: PositionedTrack, incoming: PositionedTrack) {
+        for (track in listOf(outgoing, incoming)) {
+            val grid = ExtendedBeatGrid(120f, 0L, 1f)
+            AnalysisCaches.bpm[track.id] = BpmDetector.BpmResult(120f, 0L, 1f)
+            AnalysisCaches.bpmHead[track.id] = grid
+            AnalysisCaches.bpmTail[track.id] = grid
+            val features = TransitionFeatures(0, 10000, emptyList(), 0.2f, 0.9f,
+                KeyEstimate.Candidate(0, KeyMode.MAJOR, 0.6f), emptyList())
+            AnalysisCaches.featuresHead[track.id] = features
+            AnalysisCaches.featuresTail[track.id] = features
+        }
+    }
+
     @Test
     fun `rearm after overlap planning preserves replacement slot and context`() {
         Fixture().use { f ->
-            val outgoing = PositionedTrack(9500)
+            val outgoing = PositionedTrack(8500)
             val oldNext = PositionedTrack()
             val replacement = PositionedTrack()
+            cacheBeatFeatures(outgoing, oldNext)
             f.play(outgoing.track)
             f.arm(oldNext)
             f.captureAction() // Establish main identity before the planning tick.
@@ -159,6 +174,43 @@ class AdaptiveTransitionRaceTest {
             assertEquals(800L, incoming.position, "TrackStart must not rewind to the older 400ms trim")
             assertTrue(incoming.seeks.isNotEmpty())
             assertTrue(incoming.seeks.all { it >= 800L })
+        }
+    }
+
+    @Test
+    fun `fade is held while incoming beatmatch features are pending and starts once cached`() {
+        Fixture().use { f ->
+            val outgoing = PositionedTrack(9000)
+            val incoming = PositionedTrack()
+            f.play(outgoing.track)
+            f.arm(incoming)
+            f.captureAction() // Establish main identity
+
+            // Features not cached: StartOverlap is blocked, poll returns None
+            val held = f.captureAction()
+            assertEquals("None", held.javaClass.simpleName, "crossfade must hold while incoming features are still being analyzed")
+
+            // Now analysis completes and populates the cache
+            cacheBeatFeatures(outgoing, incoming)
+
+            // Next tick: features are ready, StartOverlap fires with beatmatched plan
+            val action = f.captureAction()
+            assertEquals("StartOverlap", action.javaClass.simpleName)
+        }
+    }
+
+    @Test
+    fun `uncached incoming at file end advances gapless instead of fading`() {
+        Fixture().use { f ->
+            val outgoing = PositionedTrack(9600)
+            val incoming = PositionedTrack()
+            f.play(outgoing.track)
+            f.arm(incoming)
+            f.captureAction() // Establish main identity
+
+            // Features not cached and pos >= duration - 500: terminal escape yields AdvanceNext
+            val terminal = f.captureAction()
+            assertEquals("AdvanceNext", terminal.javaClass.simpleName, "terminal boundary must escape to gapless advance")
         }
     }
 }

@@ -117,7 +117,6 @@ class MixerFilter(
         if (recipe !== lastRecipe) {
             lastRecipe = recipe
             if (recipe != null) {
-                crossoverMain.reset()
                 crossoverSub.reset()
                 sweepFilterL.reset()
                 sweepFilterR.reset()
@@ -125,6 +124,9 @@ class MixerFilter(
                     "mixer filter activated recipe strategy={} totalSamples={} on guild {}",
                     recipe.strategy, recipe.totalSamples, guildId,
                 )
+            } else {
+                crossoverMain.reset()
+                crossoverSub.reset()
             }
         }
         val isRecipeActive = (recipe != null)
@@ -136,7 +138,9 @@ class MixerFilter(
             val inR = if (input.size > 1) input[1] else input[0]
             echoBuffer.write(input[0], inR, offset, length)
         }
-
+        if (!isRecipeActive) {
+            crossoverMain.preRoll(input, length, offset)
+        }
         if (isRecipeActive) {
             val mainCutoffHz = recipe.filterCutoffAt(TrackTarget.OUTGOING, currentSample)
             if (mainCutoffHz != null) {
@@ -233,9 +237,7 @@ class MixerFilter(
 
         if (hasEcho) {
             ensureEchoScratch(length)
-            val elapsed = currentSample - echoTrigger.atSample
-            val termDuration = echoTrigger.terminationRampSamples.coerceAtLeast(1)
-            val termGain = (1.0f - (elapsed.toFloat() / termDuration)).coerceIn(0f, 1f)
+            val termGain = recipe.echoTerminationGainAt(currentSample)
             echoScratchL.fill(0f, 0, length)
             echoScratchR.fill(0f, 0, length)
             echoBuffer.readAndMix(echoTrigger.delaySamples, echoTrigger.feedback, echoScratchL, echoScratchR, 0, length, termGain)

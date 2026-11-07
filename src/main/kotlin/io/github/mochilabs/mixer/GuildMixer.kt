@@ -1208,6 +1208,7 @@ class GuildMixer(
             preserveContext = protocol.preserveTransition,
             guildId = guildId,
             memory = TransitionMemory.global,
+            trackPairSeed = (outId to inId).hashCode(),
         )
         plannedRecipe = recipe
         transitionStatus = TransitionStatus(AdaptiveTransitionPlanner.legacyKind(recipe.strategy), recipe.reason)
@@ -1749,9 +1750,10 @@ class GuildMixer(
             return
         }
         val recipeStrategy = activeRecipe?.strategy?.name?.lowercase() ?: "crossfade"
+        val echoDelayMs = activeRecipe?.echoTrigger?.let { it.delaySamples * 1000L / SAMPLE_RATE } ?: 0L
         val beatmatchLog = if (started.beatMatched) {
-            "strategy=$recipeStrategy targetBpm=${plan.targetBpm} rateRatio=${plan.rateRatio} fadeBeats=${plan.fadeBeats}"
-        } else "strategy=$recipeStrategy rateRatio=1.0"
+            "strategy=$recipeStrategy targetBpm=${plan.targetBpm} rateRatio=${plan.rateRatio} fadeBeats=${plan.fadeBeats} echoDelayMs=$echoDelayMs"
+        } else "strategy=$recipeStrategy rateRatio=1.0 echoDelayMs=$echoDelayMs"
         log.info(
             "crossfade guild={} from='{}' to='{}' beatMatched={} reason={} durationMs={} lateMs={} {} {}",
             guildId, expected.outgoing?.let { titleOf(it) }?.replace('\n', ' ')?.replace('\r', ' '),

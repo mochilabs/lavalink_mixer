@@ -46,12 +46,12 @@ class CrossoverLR4(
         lp1R.reset(); lp2R.reset(); hp1R.reset(); hp2R.reset()
     }
 
-    fun preRoll(input: Array<FloatArray>, length: Int) {
-        if (length <= 0) return
+    fun preRoll(input: Array<FloatArray>, length: Int, offset: Int = 0) {
+        if (length <= 0 || input.isEmpty()) return
         ensureScratch(length)
         val inL = input[0]
         val inR = if (input.size > 1) input[1] else input[0]
-        processTrack(inL, inR, scratchL, scratchR, scratchL, scratchR, length)
+        processTrack(inL, inR, scratchL, scratchR, scratchL, scratchR, length, offset)
     }
 
     fun processTrack(
@@ -65,22 +65,26 @@ class CrossoverLR4(
         offset: Int = 0,
     ) {
         ensureScratch(length)
+        processChannel(inputL, lowL, highL, lp1L, lp2L, hp1L, hp2L, scratchL, length, offset)
+        processChannel(inputR, lowR, highR, lp1R, lp2R, hp1R, hp2R, scratchR, length, offset)
+    }
 
-        // Process Left Channel
-        // Stage 1 LP -> scratch, then Stage 2 LP -> lowL
-        lp1L.process(inputL, scratchL, inputOffset = offset, outputOffset = 0, length = length)
-        lp2L.process(scratchL, lowL, inputOffset = 0, outputOffset = 0, length = length)
-
-        // Stage 1 HP -> scratch, then Stage 2 HP -> highL
-        hp1L.process(inputL, scratchL, inputOffset = offset, outputOffset = 0, length = length)
-        hp2L.process(scratchL, highL, inputOffset = 0, outputOffset = 0, length = length)
-
-        // Process Right Channel
-        lp1R.process(inputR, scratchR, inputOffset = offset, outputOffset = 0, length = length)
-        lp2R.process(scratchR, lowR, inputOffset = 0, outputOffset = 0, length = length)
-
-        hp1R.process(inputR, scratchR, inputOffset = offset, outputOffset = 0, length = length)
-        hp2R.process(scratchR, highR, inputOffset = 0, outputOffset = 0, length = length)
+    private fun processChannel(
+        input: FloatArray,
+        low: FloatArray,
+        high: FloatArray,
+        lp1: PcmBiquadFilter,
+        lp2: PcmBiquadFilter,
+        hp1: PcmBiquadFilter,
+        hp2: PcmBiquadFilter,
+        scratch: FloatArray,
+        length: Int,
+        offset: Int,
+    ) {
+        lp1.process(input, scratch, inputOffset = offset, outputOffset = 0, length = length)
+        lp2.process(scratch, low, inputOffset = 0, outputOffset = 0, length = length)
+        hp1.process(input, scratch, inputOffset = offset, outputOffset = 0, length = length)
+        hp2.process(scratch, high, inputOffset = 0, outputOffset = 0, length = length)
     }
 
     private fun ensureScratch(needed: Int) {

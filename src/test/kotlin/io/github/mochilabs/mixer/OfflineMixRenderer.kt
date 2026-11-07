@@ -96,69 +96,70 @@ object OfflineMixRenderer {
 
         val mixer = GuildMixer(8888L, manager, config, Executor { })
         val player = manager.createPlayer()
-        player.setFilterFactory(PcmFilterFactory { _, _, downstream -> mutableListOf(mixer.newFilter(downstream)) })
-        mixer.attachMain(createIPlayer(mixer.guildId, player))
-
-        val trackA = loadTrack(manager, fileA)
-        val trackB = loadTrack(manager, fileB)
-
-        if (gridA != null) {
-            AnalysisCaches.bpm[trackA.identifier] = BpmDetector.BpmResult(gridA.bpm, gridA.phaseMs, gridA.bpmConfidence)
-            AnalysisCaches.bpmHead[trackA.identifier] = gridA
-            AnalysisCaches.bpmTail[trackA.identifier] = gridA
-        }
-        if (gridB != null) {
-            AnalysisCaches.bpm[trackB.identifier] = BpmDetector.BpmResult(gridB.bpm, gridB.phaseMs, gridB.bpmConfidence)
-            AnalysisCaches.bpmHead[trackB.identifier] = gridB
-            AnalysisCaches.bpmTail[trackB.identifier] = gridB
-        }
-
-        player.playTrack(trackA)
-        mixer.queueNext(CompletableFuture.completedFuture(trackB))
-
         val rawPcmFile = File.createTempFile("offline-mix-raw-", ".pcm").apply { deleteOnExit() }
         var totalBytesWritten = 0L
+        try {
+            player.setFilterFactory(PcmFilterFactory { _, _, downstream -> mutableListOf(mixer.newFilter(downstream)) })
+            mixer.attachMain(createIPlayer(mixer.guildId, player))
 
-        val buffer = ByteBuffer.allocate(FORMAT.maximumChunkSize())
-        val frame = MutableAudioFrame(buffer)
-        FileOutputStream(rawPcmFile).use { rawOut ->
-            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(maxDurationSeconds.toLong())
-            var frames = 0L
-            var handoffCompleted = false
+            val trackA = loadTrack(manager, fileA)
+            val trackB = loadTrack(manager, fileB)
 
-            while (System.nanoTime() < deadline) {
-                if (!handoffCompleted && player.playingTrack != null && player.playingTrack !== trackA) {
-                    handoffCompleted = true
-                }
+            if (gridA != null) {
+                AnalysisCaches.bpm[trackA.identifier] = BpmDetector.BpmResult(gridA.bpm, gridA.phaseMs, gridA.bpmConfidence)
+                AnalysisCaches.bpmHead[trackA.identifier] = gridA
+                AnalysisCaches.bpmTail[trackA.identifier] = gridA
+            }
+            if (gridB != null) {
+                AnalysisCaches.bpm[trackB.identifier] = BpmDetector.BpmResult(gridB.bpm, gridB.phaseMs, gridB.bpmConfidence)
+                AnalysisCaches.bpmHead[trackB.identifier] = gridB
+                AnalysisCaches.bpmTail[trackB.identifier] = gridB
+            }
 
-                if (player.provide(frame)) {
-                    val data = frame.data
-                    val length = frame.dataLength
-                    if (length > 0) {
-                        rawOut.write(data, 0, length)
-                        totalBytesWritten += length
+            player.playTrack(trackA)
+            mixer.queueNext(CompletableFuture.completedFuture(trackB))
+
+            val buffer = ByteBuffer.allocate(FORMAT.maximumChunkSize())
+            val frame = MutableAudioFrame(buffer)
+            FileOutputStream(rawPcmFile).use { rawOut ->
+                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(maxDurationSeconds.toLong())
+                var frames = 0L
+                var handoffCompleted = false
+
+                while (System.nanoTime() < deadline) {
+                    if (!handoffCompleted && player.playingTrack != null && player.playingTrack !== trackA) {
+                        handoffCompleted = true
                     }
-                    frames++
-                    mixer.drain()
-                    if (frames % 5L == 0L) mixer.poll()
 
-                    // If handoff happened and player stopped, we are done
-                    if (handoffCompleted && player.playingTrack == null) break
-                } else {
-                    mixer.poll()
-                    if (handoffCompleted && player.playingTrack == null) break
-                    Thread.sleep(1)
+                    if (player.provide(frame)) {
+                        val data = frame.data
+                        val length = frame.dataLength
+                        if (length > 0) {
+                            rawOut.write(data, 0, length)
+                            totalBytesWritten += length
+                        }
+                        frames++
+                        mixer.drain()
+                        if (frames % 5L == 0L) mixer.poll()
+
+                        // If handoff happened and player stopped, we are done
+                        if (handoffCompleted && player.playingTrack == null) break
+                    } else {
+                        mixer.poll()
+                        if (handoffCompleted && player.playingTrack == null) break
+                        Thread.sleep(1)
+                    }
                 }
             }
+
+            // Pack raw PCM into a standard WAV file
+            writeWavHeader(rawPcmFile, outputWav, totalBytesWritten, SAMPLE_RATE)
+        } finally {
+            mixer.destroy()
+            player.destroy()
+            manager.shutdown()
+            rawPcmFile.delete()
         }
-
-        mixer.destroy()
-        player.destroy()
-        manager.shutdown()
-
-        // Pack raw PCM into a standard WAV file
-        writeWavHeader(rawPcmFile, outputWav, totalBytesWritten, SAMPLE_RATE)
-        rawPcmFile.delete()
 
         return totalBytesWritten / 4 // 16-bit stereo = 4 bytes per sample frame
     }

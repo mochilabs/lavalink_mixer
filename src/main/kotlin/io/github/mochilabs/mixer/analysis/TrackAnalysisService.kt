@@ -213,10 +213,15 @@ internal class TrackAnalysisService(
                 if (bpmHead == null && bpmTail != null && bpmTail.periodMs.isFinite() && bpmTail.periodMs > 0) {
                     val periodMs = bpmTail.periodMs
                     val headPhaseMs = Math.round(((bpmTail.phaseMs % periodMs) + periodMs) % periodMs).toLong()
-                    bpmHead = ExtendedBeatGrid(
-                        bpm = bpmTail.bpm,
+                    val periodSamples = bpmTail.periodSamples
+                    val barSamples = periodSamples * 4.0
+                    val projectedDownbeatSample = Math.round(((bpmTail.downbeatSample.toDouble() % barSamples) + barSamples) % barSamples)
+                    bpmHead = bpmTail.copy(
                         phaseSample = Math.round(headPhaseMs.toDouble() * SAMPLE_RATE.toDouble() / 1000.0),
                         bpmConfidence = bpmTail.bpmConfidence * 0.85f,
+                        downbeatSample = projectedDownbeatSample,
+                        downbeatConfidence = bpmTail.downbeatConfidence * 0.85f,
+                        phraseConfidence = bpmTail.phraseConfidence * 0.85f,
                     )
                     if (bpm == null) bpm = BpmDetector.BpmResult(bpmHead.bpm, headPhaseMs, bpmHead.bpmConfidence)
                     if (featuresHead != null && headFrames.isNotEmpty()) {
@@ -224,10 +229,10 @@ internal class TrackAnalysisService(
                         bpmHead = mergePhraseConfidence(bpmHead, featuresHead)
                     }
                 } else if (bpmTail == null && bpmHead != null) {
-                    bpmTail = ExtendedBeatGrid(
-                        bpm = bpmHead.bpm,
-                        phaseSample = bpmHead.phaseSample,
+                    bpmTail = bpmHead.copy(
                         bpmConfidence = bpmHead.bpmConfidence * 0.85f,
+                        downbeatConfidence = bpmHead.downbeatConfidence * 0.85f,
+                        phraseConfidence = bpmHead.phraseConfidence * 0.85f,
                     )
                 }
             }

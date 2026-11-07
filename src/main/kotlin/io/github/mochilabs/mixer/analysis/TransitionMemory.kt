@@ -44,6 +44,27 @@ class TransitionMemory(val historySize: Int = 5) {
         }
     }
 
+    /**
+     * Ranks viable `(strategy, baseScore)` candidates using guild repetition weights
+     * and a deterministic [trackPairSeed] jitter when [trackPairSeed] is non-zero.
+     */
+    fun rank(
+        guildId: Long?,
+        candidates: List<Pair<TransitionStrategy, Float>>,
+        trackPairSeed: Int = 0,
+    ): TransitionStrategy {
+        val primary = candidates.first().first
+        if (guildId == null || candidates.size <= 1) return primary
+        return candidates.maxByOrNull { (strategy, baseScore) ->
+            val weight = repetitionWeight(guildId, strategy)
+            val jitter = if (trackPairSeed != 0 && weight < 1.0f) {
+                val mixed = (trackPairSeed xor (strategy.ordinal * 0x45d9f3b)) and 0x7fffffff
+                (mixed.toFloat() / Int.MAX_VALUE.toFloat()) * 0.04f
+            } else 0f
+            baseScore * weight + jitter
+        }?.first ?: primary
+    }
+
     fun clear(guildId: Long) {
         histories.remove(guildId)
     }

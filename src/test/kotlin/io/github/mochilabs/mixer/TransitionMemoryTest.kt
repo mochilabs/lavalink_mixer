@@ -50,4 +50,22 @@ class TransitionMemoryTest {
         val second = AdaptiveTransitionPlanner.plan(grid, grid, features, features, 8000L, 60000L, guildId = guildId, memory = memory)
         assertEquals(TransitionStrategy.SHORT_BASS_SWAP, second.strategy)
     }
+
+    @Test
+    fun `rank is deterministic for a given trackPairSeed and breaks close ties consistently`() {
+        val memory = TransitionMemory(historySize = 5)
+        val guildId = 4003L
+        memory.record(guildId, TransitionStrategy.PHRASE_MATCHED_BASS_SWAP)
+        memory.record(guildId, TransitionStrategy.SHORT_BASS_SWAP)
+
+        val candidates = listOf(
+            TransitionStrategy.PHRASE_MATCHED_BASS_SWAP to 1.0f,
+            TransitionStrategy.SHORT_BASS_SWAP to 0.85f,
+            TransitionStrategy.BEATMATCHED_BLEND to 0.42f,
+        )
+        val seed = ("trackA" to "trackB").hashCode()
+        val pick1 = memory.rank(guildId, candidates, seed)
+        val pick2 = memory.rank(guildId, candidates, seed)
+        assertEquals(pick1, pick2)
+    }
 }

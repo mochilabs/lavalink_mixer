@@ -75,4 +75,29 @@ class CrossoverLR4Test {
         assertTrue(lowRms > 0.65f, "low RMS must pass 60Hz bass (got $lowRms)")
         assertTrue(highRms < 0.15f, "high RMS must heavily attenuate 60Hz bass (got $highRms)")
     }
+
+    @Test
+    fun `preRoll warms filter state so entry chunk has no startup transient`() {
+        val warmCrossover = CrossoverLR4(sampleRate = sampleRate, crossoverHz = 200f)
+        val coldCrossover = CrossoverLR4(sampleRate = sampleRate, crossoverHz = 200f)
+        val omega = 2.0 * PI * 60.0 / sampleRate
+        val preRollSamples = 4800
+        val preRollBuf = FloatArray(preRollSamples) { i -> sin(omega * i).toFloat() }
+        warmCrossover.preRoll(arrayOf(preRollBuf, preRollBuf), preRollSamples)
+
+        val chunkSamples = 960
+        val chunk = FloatArray(chunkSamples) { i -> sin(omega * (preRollSamples + i)).toFloat() }
+        val warmLow = FloatArray(chunkSamples)
+        val warmHigh = FloatArray(chunkSamples)
+        val coldLow = FloatArray(chunkSamples)
+        val coldHigh = FloatArray(chunkSamples)
+
+        warmCrossover.processTrack(chunk, chunk, warmLow, warmLow, warmHigh, warmHigh, chunkSamples)
+        coldCrossover.processTrack(chunk, chunk, coldLow, coldLow, coldHigh, coldHigh, chunkSamples)
+
+        // Warmed crossover low-band RMS on the very first 5ms (240 samples) must be higher than cold start
+        val warmEarlyRms = sqrt(warmLow.slice(0 until 240).map { it * it }.average()).toFloat()
+        val coldEarlyRms = sqrt(coldLow.slice(0 until 240).map { it * it }.average()).toFloat()
+        assertTrue(warmEarlyRms > coldEarlyRms, "pre-rolled crossover must eliminate cold-start attenuation ($warmEarlyRms vs $coldEarlyRms)")
+    }
 }

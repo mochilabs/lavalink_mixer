@@ -155,4 +155,12 @@ data class TransitionRecipe(
         val progress = ((currentSample - sweep.startSample).toDouble() / span.toDouble()).coerceIn(0.0, 1.0).toFloat()
         return sweep.startHz + (sweep.endHz - sweep.startHz) * progress
     }
+
+    fun echoTerminationGainAt(currentSample: Long): Float {
+        val trigger = echoTrigger ?: return 0f
+        if (currentSample < trigger.atSample) return 0f
+        val elapsed = currentSample - trigger.atSample
+        val termDuration = trigger.terminationRampSamples.coerceAtLeast(1)
+        return (1.0f - (elapsed.toFloat() / termDuration)).coerceIn(0f, 1f)
+    }
 }

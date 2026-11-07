@@ -46,6 +46,15 @@ object AdaptiveTransitionPlanner {
             )
         }
 
+        if (requestedCrossfadeMs <= 0L || contentEndMs <= 0L) {
+            return TransitionRecipe(
+                strategy = TransitionStrategy.ABSOLUTE_FALLBACK,
+                totalSamples = 0L,
+                sync = BeatSyncConfig(enabled = false, targetBpm = 0f),
+                reason = "crossfade_unavailable",
+            )
+        }
+
         val outGrid = outgoingGridTail?.takeIf { it.bpmConfidence >= minConfidence && it.bpm.isFinite() && it.bpm > 0f }
         val inGrid = incomingGridHead?.takeIf { it.bpmConfidence >= minConfidence && it.bpm.isFinite() && it.bpm > 0f }
 
@@ -171,8 +180,9 @@ object AdaptiveTransitionPlanner {
 
             // Async fallback or incoming grid missing: Echo Out on outgoing tempo
             val delayBeats = if (outGrid.bpm >= 125f) 0.5f else 1.0f
-            val delaySamples = Math.round(delayBeats * (SAMPLE_RATE * 60.0 / outGrid.bpm.toDouble())).toInt().coerceIn(1, 95999)
-            val totalSamples = 96000L // 2.0s
+            val totalSamples = minOf(96000L, contentEndMs * SAMPLE_RATE / 1000L).coerceAtLeast(2L) // up to 2.0s
+            val delaySamples = Math.round(delayBeats * (SAMPLE_RATE * 60.0 / outGrid.bpm.toDouble())).toInt()
+                .coerceIn(1, (totalSamples - 1).toInt())
             log.debug(
                 "planner async echo_out guild={} bpmOut={} delaySamples={}",
                 guildId, outGrid.bpm, delaySamples,
@@ -193,7 +203,7 @@ object AdaptiveTransitionPlanner {
                         atSample = 0L,
                         delaySamples = delaySamples,
                         feedback = 0.65f,
-                        terminationRampSamples = 86400, // 1.8s
+                        terminationRampSamples = (totalSamples * 9 / 10).toInt().coerceAtLeast(1), // 1.8s at full length
                     ),
                 ),
                 reason = if (inGrid != null) "tempo_diff_exceeded" else "missing_incoming_grid",
@@ -203,7 +213,7 @@ object AdaptiveTransitionPlanner {
         // Level 1: BeatGrid failed, but waveform features are valid
         if (outgoingFeaturesTail != null && incomingFeaturesHead != null &&
             outgoingFeaturesTail.unknownReason == null && incomingFeaturesHead.unknownReason == null) {
-            val totalSamples = minOf(requestedCrossfadeMs, 4000L) * SAMPLE_RATE / 1000L
+            val totalSamples = minOf(requestedCrossfadeMs, 4000L, contentEndMs) * SAMPLE_RATE / 1000L
             log.debug("planner level1 degraded_filter_sweep guild={} totalSamples={}", guildId, totalSamples)
             return TransitionRecipe(
                 strategy = TransitionStrategy.DEGRADED_FILTER_SWEEP,
@@ -223,7 +233,7 @@ object AdaptiveTransitionPlanner {
         }
 
         // Level 2: Absolute safe fallback
-        val totalSamples = 5000L * SAMPLE_RATE / 1000L
+        val totalSamples = minOf(requestedCrossfadeMs, contentEndMs) * SAMPLE_RATE / 1000L
         log.debug("planner level2 absolute_fallback guild={} totalSamples={}", guildId, totalSamples)
         return TransitionRecipe(
             strategy = TransitionStrategy.ABSOLUTE_FALLBACK,
@@ -259,22 +269,32 @@ object AdaptiveTransitionPlanner {
         val isBassSwap = strategy == TransitionStrategy.PHRASE_MATCHED_BASS_SWAP || strategy == TransitionStrategy.SHORT_BASS_SWAP
         val maxFadeMs = (requestedCrossfadeMs - recoveryMs).coerceAtLeast(0L)
         val beatOptions = if (strategy == TransitionStrategy.PHRASE_MATCHED_BASS_SWAP) listOf(16, 8, 4, 2) else listOf(8, 4, 2)
-        val fadeBeats = beatOptions.firstOrNull { b -> round(b * periodMs).toLong() <= maxFadeMs } ?: 4
+        val fadeBeats = beatOptions.firstOrNull { b -> round(b * periodMs).toLong() <= maxFadeMs }
+            ?: return nonSyncWindowRecipe(
+                TransitionStrategy.ABSOLUTE_FALLBACK,
+                minOf(requestedCrossfadeMs, contentEndMs) * SAMPLE_RATE / 1000L,
+                contentEndMs, 1.0f, 0L,
+                reason = "fade_window_too_short",
+            )
         val fadeMs = round(fadeBeats * periodMs).toLong()
         val fadeSamples = Math.round(fadeBeats * periodSamples)
         val window = syncWindow(outGrid, inGrid, fadeMs, recoveryMs, contentEndMs, incomingLeadMs, incomingDurationMs, rateRatio, snapToDownbeat = isBassSwap)
             ?: return if (isBassSwap) {
                 beatmatchBlendOrFallback(outGrid, inGrid, requestedCrossfadeMs, contentEndMs, incomingLeadMs, incomingDurationMs, rateRatio)
             } else {
-                nonSyncWindowRecipe(TransitionStrategy.BEATMATCHED_BLEND, requestedCrossfadeMs, contentEndMs, rateRatio, recoverySamples)
+                nonSyncWindowRecipe(
+                    TransitionStrategy.BEATMATCHED_BLEND, requestedCrossfadeMs * SAMPLE_RATE / 1000L, contentEndMs, rateRatio,
+                    recoverySamples.coerceAtMost(requestedCrossfadeMs * SAMPLE_RATE / 2000L),
+                )
             }
         val totalSamples = fadeSamples + recoverySamples
         val automations = buildList {
             add(ParamAutomation.VolumeRamp(TrackTarget.OUTGOING, 0L, fadeSamples, 1.0f, 0.0f, RampCurve.EQUAL_POWER))
             add(ParamAutomation.VolumeRamp(TrackTarget.INCOMING, 0L, fadeSamples, 0.0f, 1.0f, RampCurve.EQUAL_POWER))
             if (isBassSwap) {
-                val cutBar = (fadeBeats / 4).coerceAtLeast(1)
-                val swapSample = Math.round(cutBar * 4 * periodSamples)
+                // Swap bass at the fade midpoint (a bar line for 8/16-beat fades) so both
+                // tracks overlap with the incoming low end muted, then trade places.
+                val swapSample = Math.round(fadeBeats / 2 * periodSamples)
                 add(ParamAutomation.BassCut(TrackTarget.INCOMING, 0L, muteLow = true))
                 add(ParamAutomation.BassCut(TrackTarget.INCOMING, swapSample, muteLow = false))
                 add(ParamAutomation.BassCut(TrackTarget.OUTGOING, swapSample, muteLow = true))
@@ -367,7 +387,11 @@ object AdaptiveTransitionPlanner {
             val desired = maxOf(500.0, abs(rateRatio - 1f) * 20_000.0)
             round(ceil(desired / periodMs) * periodMs).toLong()
         }
-        return nonSyncWindowRecipe(TransitionStrategy.BEATMATCHED_BLEND, requestedCrossfadeMs, contentEndMs, rateRatio, recoveryMs * SAMPLE_RATE / 1000L)
+        val totalSamples = requestedCrossfadeMs * SAMPLE_RATE / 1000L
+        return nonSyncWindowRecipe(
+            TransitionStrategy.BEATMATCHED_BLEND, totalSamples, contentEndMs, rateRatio,
+            (recoveryMs * SAMPLE_RATE / 1000L).coerceAtMost(totalSamples / 2),
+        )
     }
 
     private fun nonSyncWindowRecipe(

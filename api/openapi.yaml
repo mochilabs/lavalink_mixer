@@ -312,7 +312,7 @@ components:
           description: Track identifier captured atomically with currentTrackBpm. Clients must compare it to their confirmed current track before displaying the value.
         transitionKind:
           type: string
-          description: Most recently selected transition (none, preserve, silence_trim, short_crossfade, crossfade, beat_matched). The short_crossfade compatibility label denotes an equal-power fallback; its duration honors crossfadeMs, bounded by available outgoing content.
+          description: Most recently selected transition (none, preserve, short_crossfade, crossfade, beat_matched). The short_crossfade compatibility label denotes an equal-power fallback; its duration honors crossfadeMs, bounded by available outgoing content.
         decisionReason: { type: [string, 'null'] }
         nextTrackBpm:
           type: [number, 'null']

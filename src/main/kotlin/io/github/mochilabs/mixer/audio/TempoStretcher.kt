@@ -190,11 +190,18 @@ class TempoStretcher(
 
     override fun flush() {
         downstreamFailure = null
+        // The native converter may emit into downstream while flushing; a failure from
+        // downstream is rethrown, a native fault only disables stretching and the
+        // chain must still reach downstream.flush().
         try {
             delegate?.flush()
         } catch (t: Throwable) {
-            downstreamFailure = t
-            throw t
+            val failure = downstreamFailure
+            if (failure != null) throw failure
+            if (!nativeFailed) log.warn("Timescale audio filter flush failed; falling back to unshifted audio: {}", t.message, t)
+            nativeFailed = true
+            runCatching { delegate?.close() }
+            delegate = null
         }
         downstream.flush()
     }

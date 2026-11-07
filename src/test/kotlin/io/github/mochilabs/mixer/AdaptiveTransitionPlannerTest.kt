@@ -91,4 +91,59 @@ class AdaptiveTransitionPlannerTest {
         )
         assertEquals(TransitionStrategy.ABSOLUTE_FALLBACK, recipe.strategy)
     }
+
+    private fun planWith(
+        crossfadeMs: Long,
+        contentEndMs: Long = 60000L,
+        out: ExtendedBeatGrid? = null,
+        inc: ExtendedBeatGrid? = null,
+        incDurationMs: Long = -1L,
+        bpm: Boolean = true,
+    ) = AdaptiveTransitionPlanner.plan(
+        outgoingGridTail = out,
+        incomingGridHead = inc,
+        outgoingFeaturesTail = if (bpm) features() else null,
+        incomingFeaturesHead = if (bpm) features() else null,
+        requestedCrossfadeMs = crossfadeMs,
+        contentEndMs = contentEndMs,
+        incomingDurationMs = incDurationMs,
+    )
+
+    @Test
+    fun `fallback blend keeps the requested crossfade length in samples when the sync window is too short`() {
+        val g = ExtendedBeatGrid(bpm = 128f, phaseSample = 0L, bpmConfidence = 0.9f, downbeatConfidence = 0.8f, phraseConfidence = 0.7f)
+        // Incoming track too short for any sync window -> falls back to a plain blend.
+        val recipe = planWith(8000L, out = g, inc = g, incDurationMs = 3000L)
+        assertEquals(TransitionStrategy.BEATMATCHED_BLEND, recipe.strategy)
+        assertEquals(8000L * 48, recipe.totalSamples)
+    }
+
+    @Test
+    fun `absolute fallback honors configured crossfade and available content`() {
+        assertEquals(2000L * 48, planWith(2000L, bpm = false).totalSamples)
+        assertEquals(3000L * 48, planWith(8000L, contentEndMs = 3000L, bpm = false).totalSamples)
+    }
+
+    @Test
+    fun `uses a plain crossfade when no beat count fits the configured window`() {
+        val g = ExtendedBeatGrid(bpm = 70f, phaseSample = 0L, bpmConfidence = 0.9f, downbeatConfidence = 0.8f)
+        val recipe = planWith(1500L, out = g, inc = g)
+        assertEquals(TransitionStrategy.ABSOLUTE_FALLBACK, recipe.strategy)
+        assertEquals("fade_window_too_short", recipe.reason)
+        assertEquals(1500L * 48, recipe.totalSamples)
+    }
+
+    @Test
+    fun `non-positive crossfade yields no overlap`() {
+        assertEquals(0L, planWith(0L, bpm = false).totalSamples)
+    }
+
+    @Test
+    fun `bass swap lands inside the fade rather than at its end`() {
+        val g = ExtendedBeatGrid(bpm = 128f, phaseSample = 0L, bpmConfidence = 0.9f, downbeatConfidence = 0.8f, phraseConfidence = 0.7f)
+        val recipe = plan(g, g)
+        val fadeEnd = recipe.totalSamples - recipe.sync.recoverySamples
+        val swap = recipe.bassCuts.filter { it.atSample > 0L }.map { it.atSample }
+        assertTrue(swap.isNotEmpty() && swap.all { it in 1 until fadeEnd }, "swap=$swap fadeEnd=$fadeEnd")
+    }
 }

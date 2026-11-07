@@ -16,6 +16,8 @@ data class CrossfadePlan(
     val recoveryMs: Long = 0L,
     val transitionKind: String = if (beatMatched) "beat_matched" else "crossfade",
     val reason: String? = fallbackReason,
+    /** Recipe this plan was derived from; null for plain crossfades. Travels with the plan so a re-plan can't swap it. */
+    val recipe: TransitionRecipe? = null,
 )
 
 /** Timing rules for silence-trimmed transitions. */

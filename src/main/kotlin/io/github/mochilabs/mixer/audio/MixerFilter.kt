@@ -135,7 +135,8 @@ class MixerFilter(
         }
         val isRecipeActive = (recipe != null)
         val echoTrigger = if (isRecipeActive) recipe?.echoTrigger else null
-        val currentSample = mixer.currentXfadeSample
+        val endChainSample = mixer.chainSamplePos
+        val currentSample = mixer.xfadeRecipeSampleAt(endChainSample)
         val hasEcho = (isRecipeActive && echoTrigger != null && currentSample >= echoTrigger.atSample)
 
         if (!hasEcho) {
@@ -250,8 +251,15 @@ class MixerFilter(
         )
 
         if (doBassProcessing) {
-            val mainBassGain = recipe.bassGainAt(TrackTarget.OUTGOING, currentSample)
-            val subBassGain = recipe.bassGainAt(TrackTarget.INCOMING, currentSample)
+            // Bass ramps (~15 ms) can be shorter than one chunk, so evaluate per sample
+            // while a ramp is in flight and use the constant gain once both ends agree.
+            val chunkStartSample = mixer.xfadeRecipeSampleAt(endChainSample - length)
+            val mainBassStart = recipe.bassGainAt(TrackTarget.OUTGOING, chunkStartSample)
+            val mainBassEnd = recipe.bassGainAt(TrackTarget.OUTGOING, currentSample)
+            val subBassStart = recipe.bassGainAt(TrackTarget.INCOMING, chunkStartSample)
+            val subBassEnd = recipe.bassGainAt(TrackTarget.INCOMING, currentSample)
+            val bassRamping = mainBassStart != mainBassEnd || subBassStart != subBassEnd
+            val sampleSpan = (currentSample - chunkStartSample).coerceAtLeast(0L)
             scratchMainLow = ensureScratch(scratchMainLow, input.size, length)
             scratchMainHigh = ensureScratch(scratchMainHigh, input.size, length)
             scratchSubLow = ensureScratch(scratchSubLow, input.size, length)
@@ -285,6 +293,13 @@ class MixerFilter(
 
                 for (i in offset until end) {
                     val idx = i - offset
+                    var mainBassGain = mainBassEnd
+                    var subBassGain = subBassEnd
+                    if (bassRamping) {
+                        val at = chunkStartSample + sampleSpan * (idx + 1) / length
+                        mainBassGain = recipe.bassGainAt(TrackTarget.OUTGOING, at)
+                        subBassGain = recipe.bassGainAt(TrackTarget.INCOMING, at)
+                    }
                     val mainAudio = mLow[idx] * mainBassGain + mHigh[idx]
                     val subAudio = sLow[idx] * subBassGain + sHigh[idx]
                     var sum = mainAudio * gains.main + subAudio * gains.sub

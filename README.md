@@ -10,8 +10,10 @@
 A Kotlin plugin for [Lavalink v4](https://github.com/lavalink-devs/Lavalink) that mixes audio on the server before Opus encoding.
 
 - Equal-power crossfades and server-managed advancement without overlap.
-- Beat-matched transitions with 2-, 4-, or 8-beat fades, temporary tempo adjustment, and recovery to the incoming track's original speed.
-- Adaptive transition choices based on local energy, rhythm, key estimates, and silence.
+- An adaptive transition planner that picks one of seven strategies per track pair: phrase-matched or short bass swap, beat-matched blend, downbeat cut, echo out, filter sweep, or a plain crossfade.
+- Beat matching with 2- to 16-beat fades, temporary tempo adjustment, and recovery to the incoming track's original speed.
+- Bass swaps on a matched 4th-order Linkwitz-Riley crossover, so the two low ends trade places without comb filtering.
+- Transition memory that avoids repeating the same strategy back to back in a guild.
 - Leading and trailing silence trimming, plus realtime tail-silence detection.
 - EBU R128 loudness measurement and attenuation toward a configurable target, defaulting to -14 LUFS.
 - Sequential or parallel announcement audio with music ducking and stereo-channel selection.
@@ -28,7 +30,6 @@ The plugin requires no Lavalink source changes. Analysis runs in Kotlin/JVM on a
 - [Build and testing guide](docs/development.md)
 - [BPM detector design](docs/bpm-detector-design.md) and [BPM calibration](docs/bpm-calibration.md)
 - [BPM extraction algorithm explained in Korean](docs/bpm-extraction.ko.md)
-- [Adaptive transition calibration](docs/adaptive-calibration.md)
 
 ## Quickstart
 
@@ -119,7 +120,7 @@ Crossfade defaults to enabled. Silence trimming, normalization, and BPM detectio
 
 ## Transitions and audio processing
 
-### Beat matching and adaptive transitions
+### Enable beat matching
 
 Beat matching requires crossfade, BPM detection, and beat matching all enabled. `/mixer/bpm` can enable detection and matching together:
 
@@ -140,11 +141,31 @@ Content-Type: application/json
 
 `/mixer/beatmatch` toggles matching independently and does not enable BPM detection. If crossfade was disabled, enable it through `/mixer/crossfade` as well.
 
-Analysis extracts head and tail beat grids and local transition features. The planner can preserve a boundary, trim silence, use an equal-power crossfade, or choose a beat-matched fade. During a matched transition, the incoming track follows the outgoing tempo, then recovers to its original speed before handoff. `overlapMs` is the two-track fade duration, and `recoveryMs` is the incoming-only recovery period within the total transition window.
+### How a transition is chosen
 
-Missing grids, low confidence, unsuitable track pairs, or excessive tempo differences fall back to ordinary crossfade. The compatibility label `short_crossfade` keeps the configured crossfade duration, bounded by available outgoing content. It does not imply a fixed 1.5-second fade.
+Analysis extracts head and tail beat grids (tempo, beat phase, downbeat and phrase confidence) and local transition features (energy, rhythm stability, key). `AdaptiveTransitionPlanner` turns them into one declarative recipe per track pair, trying the most precise strategy first and degrading when the evidence is weaker:
 
-Beat-grid phase is not a musical downbeat. Confidence measures periodicity, and the adaptive thresholds remain heuristics awaiting representative music calibration. See the [BPM design notes](docs/bpm-detector-design.md) for detector details and limits.
+| Situation | Strategy | Wire `transitionKind` |
+| --- | --- | --- |
+| Tempos compatible, downbeats and phrases confident | `PHRASE_MATCHED_BASS_SWAP`: up to a 16-beat fade, bass swapped at the fade midpoint | `beat_matched` |
+| Tempos compatible, downbeats confident | `SHORT_BASS_SWAP`: up to an 8-beat fade with a bass swap | `beat_matched` |
+| Tempos compatible, bar boundaries uncertain or non-4/4 | `BEATMATCHED_BLEND`: 2-, 4-, or 8-beat phase-snapped fade | `beat_matched` |
+| Tempos too far apart, both downbeats confident, high energy | `DOWNBEAT_CUT`: 10 ms cut on a bar line | `crossfade` |
+| Tempos too far apart otherwise | `ECHO_OUT`: delayed echo of the outgoing track, up to 2 s | `crossfade` |
+| No usable grid, but valid features | `DEGRADED_FILTER_SWEEP`: high-pass sweep, up to 4 s | `crossfade` |
+| No usable metadata, or no beat count fits `crossfadeMs` | `ABSOLUTE_FALLBACK`: equal-power crossfade | `short_crossfade` |
+
+Tempo comparison is octave-normalized (half and double time count as a match) and uses a deadband around `maxTempoChange`; inside the deadband, energy, rhythm, and key compatibility decide. Fade length never exceeds `crossfadeMs` minus the recovery period. When no 2-, 4-, 8-, or 16-beat fade fits, the planner uses a plain equal-power crossfade of the configured length (`fade_window_too_short`). A `crossfadeMs` of zero or less produces no overlap.
+
+During a matched transition the incoming track follows the outgoing tempo, then recovers to its original speed before handoff. `overlapMs` is the two-track fade duration, and `recoveryMs` is the incoming-only recovery period within the total transition window.
+
+When two strategies are close, transition memory penalizes the ones used most recently in that guild, so consecutive transitions vary. A clear planner preference always wins.
+
+If a track has a measurable pulse at only one end, the plugin re-measures the other end near that tempo, and otherwise projects the tempo with beat phase moved into the target window. Downbeat and phrase stay unverified in that case, so such a track cannot use a bass swap or downbeat cut.
+
+If analysis for the incoming track is still running when the fade window opens, the mixer waits up to 2 seconds, then plans with whatever is cached. A fade that starts late is compressed so the outgoing track still reaches silence at the planned handoff. Native tempo-stretch failures fall back to an ordinary crossfade.
+
+Confidence values and thresholds are heuristics that await calibration on representative music. See the [BPM design notes](docs/bpm-detector-design.md) for detector details and limits.
 
 ### Crossfade, silence, and normalization
 
@@ -255,7 +276,7 @@ Consume these custom messages on the existing Lavalink WebSocket connection:
 
 Each started crossfade writes one INFO line with `beatMatched`, the decision or
 fallback reason, both tracks' BPM/key estimates and confidence, analysis windows,
-RMS energy, rhythm stability, and the selected tempo ratio and fade beats.
+RMS energy, rhythm stability, the selected strategy, and the tempo ratio and fade beats.
 The line names the BPM/key analysis methods and the confidence/tempo limits used
 by the planner. Missing and ambiguous measurements remain explicit. Confidence
 scores are heuristic, and keys describe the sampled windows.

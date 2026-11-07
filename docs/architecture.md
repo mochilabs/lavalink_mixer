@@ -411,10 +411,10 @@ protocol-v2 compatibility while the one-line `crossfade` log reports the active
 `AdaptiveTransitionPlanner` selects and generates declarative `TransitionRecipe` specifications
 across an uncertainty-margin multi-level decision waterfall:
 - **Level 0 (Grid-Based):** When `ExtendedBeatGrid` confidence is sufficient (`bpmConfidence >= minConfidence`).
-  - **Sync Domain ($\Delta_{\log} \le \text{margin}$):** Executes `PHRASE_MATCHED_BASS_SWAP` (16-beat fade, cut at bar 4) when both downbeats and phrases are confident (`downbeatConfidence >= 0.5`, `phraseConfidence >= 0.5`), degrading to `SHORT_BASS_SWAP` (8-beat) or `BEATMATCHED_BLEND` (2/4/8-beat, phase-snapped) when metric boundaries are uncertain or for non-4/4 meters.
+  - **Sync Domain ($\Delta_{\log} \le \text{margin}$):** Executes `PHRASE_MATCHED_BASS_SWAP` (up to a 16-beat fade, bass swapped at the fade midpoint) when both downbeats and phrases are confident (`downbeatConfidence >= 0.5`, `phraseConfidence >= 0.5`), degrading to `SHORT_BASS_SWAP` (up to 8 beats) or `BEATMATCHED_BLEND` (2/4/8-beat, phase-snapped) when metric boundaries are uncertain or for non-4/4 meters.
   - **Async Domain ($\Delta_{\log} > \text{margin}$):** Executes `DOWNBEAT_CUT` when both downbeats are confident and energetic, or `ECHO_OUT` (1/2-beat if BPM $\ge$ 125, 1-beat if BPM < 125) using a 96,000-sample circular delay buffer with an explicit linear termination ramp.
 - **Level 1 (Degraded):** When beat grids are absent but envelope features are valid, executes a time-based high-pass `DEGRADED_FILTER_SWEEP` ($20\text{Hz} \to 3000\text{Hz}$).
-- **Level 2 (Absolute Fallback):** When all metadata is missing or on buffer underrun, safely converges to a 5-second `ABSOLUTE_FALLBACK` Equal-Power crossfade.
+- **Level 2 (Absolute Fallback):** When all metadata is missing or on buffer underrun, converges to an `ABSOLUTE_FALLBACK` Equal-Power crossfade that keeps the configured `crossfadeMs`, bounded by the outgoing content. The same fallback applies when no 2/4/8/16-beat fade fits `crossfadeMs` (reason `fade_window_too_short`); a non-positive `crossfadeMs` yields no overlap.
 
 In `MixerFilter`, real-time DSP automation runs with zero heap allocations during playback:
 - **Dual LR4 Crossover (`CrossoverLR4`):** Both outgoing and incoming stereo audio streams pass through matched 4th-order Linkwitz-Riley filters (16 biquads total) at 200Hz. This guarantees identical group delay across both tracks, eliminating comb filtering while allowing low-frequency bass swap with 15ms smoothing ramps. When a recipe activates, the outgoing crossover is reset and pre-rolled with the last 100ms of main PCM from the delay buffer, so the first transition chunk starts from settled filter state without per-chunk work during normal playback.
@@ -459,3 +459,5 @@ is clamped to 1–16 per guild.
   running JAR.
 - The beat-matching plan describes work that is already implemented. Current
   source and tests establish what is present.
+
+A late-starting overlap compresses the recipe timeline into the remaining window, so the outgoing gain still reaches zero at the planned handoff. The poll loop waits at most 2 s for incoming analysis before planning with whatever is cached. A `CrossfadePlan` carries its own `TransitionRecipe`, so a re-plan between polls cannot swap the recipe an overlap activates. When one end of a track has no measurable pulse, the other end's tempo is projected with beat phase moved into the target window, and features computed on that projected grid drop their phrase fields.

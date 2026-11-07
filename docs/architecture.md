@@ -383,7 +383,16 @@ analysis; the cache does not guarantee one decode per identifier.
 
 `NormalizationGain` measures K-weighted loudness and calculates linear gain.
 Measurement filtering does not replace output PCM. Normalization defaults to
-attenuation only. Silence detection combines offline trim points with a realtime
+attenuation only. The gains are `GainRamp`s advanced only by the elected feeder.
+A provisional opening estimate (`AnalysisCaches.normProvisional`, first 8s of
+decoded audio) applies before the full-track value in `AnalysisCaches.norm`;
+only the full value marks normalization analysis complete. Late results ramp
+over `NORM_RAMP_MS`. An unmeasured track inherits the current level. When the
+playing track's own scan could not start because the analysis slot was busy,
+the next-track scan backfills it, as it already does for tail BPM and trim.
+The analysis pump pulls frames with a timed `provide` and no pacing sleep, so a
+scan runs at decoder or network speed (about 600x realtime for local WAV in tests)
+and occupies one analysis thread plus its decoder thread while it runs. Silence detection combines offline trim points with a realtime
 tail detector on raw main PCM before gain application.
 
 `TransitionFeatureAnalyzer` extracts bounded energy, rhythm stability, local chroma
@@ -439,7 +448,10 @@ enable BPM analysis in `updateBeatmatch()`.
 `BpmDetector` normalizes energy and spectral analysis levels, retains local
 autocorrelation tempo candidates, and fits each candidate's period/phase with WLS.
 Tempo selection combines duration-aware accent periodicity, coverage of those
-accents by the fitted grid, and a log-tempo prior. Onset timing weights remain
+accents by the fitted grid, and a log-tempo prior. Coverage favors the faster
+of two octave-related grids, so a winner of 155 BPM or more is checked against
+its doubled period: when the events between the slower beats are much weaker
+than those on them, they are subdivisions and the slower reading wins. Onset timing weights remain
 separate from metrical salience. Nearby integer BPM values are accepted only when the same assigned onsets support their residual.
 The first energy onset remains distinct from fitted grid phase. Confidence is
 periodicity, not metrical-level certainty. The detector remains pure Kotlin/JVM;

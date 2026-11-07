@@ -64,6 +64,14 @@ object BpmDetector {
     private const val SPECTRAL_ONSET_BIAS_HOPS = 1.15
     /** Include the attack preceding a flux centroid when measuring its duration. */
     private const val ACCENT_PREROLL_HOPS = 2.0
+    /** Pairwise subdivision check; measured on synthetic patterns, see docs/bpm-detector-design.md. */
+    private const val SUBDIVISION_CONTRAST_CENTER = 0.48
+    private const val SUBDIVISION_CONTRAST_GAIN = 15.0
+    private const val SUBDIVISION_PRIOR_SIGMA_OCT = 0.5
+    private const val SUBDIVISION_PERIOD_TOLERANCE = 0.03
+    private const val SUBDIVISION_MIN_ACCENT_RATIO = 0.8f
+    private const val SUBDIVISION_MIN_OFF_SHARE = 0.25
+    private const val SUBDIVISION_MIN_FAST_BPM = 155.0
     private const val SNAP_MAX_DELTA_BPM = 0.15
     private const val SNAP_MIN_ONSETS = 8
     private const val SNAP_MIN_BEAT_SPAN = 12
@@ -337,8 +345,11 @@ object BpmDetector {
             val supported = supportedOnsetPeriod(onsets, lag, refined) ?: refined
             lag to optimizePhaseAndPeriod(onsets, supported)
         }
-        val chosenLag = candidates.maxByOrNull { (lag, conf) ->
-            val accentConf = if (accentVariance > 0.0) sampleConfidence(accentSignal, accentVariance, lag) else conf
+        val accentConfs = candidates.associate { (lag, conf) ->
+            lag to if (accentVariance > 0.0) sampleConfidence(accentSignal, accentVariance, lag) else conf
+        }
+        val scoredLag = candidates.maxByOrNull { (lag, conf) ->
+            val accentConf = accentConfs.getValue(lag)
             val (period, phase, _) = candidateGrids.getValue(lag)
             // A half-tempo grid must account for the accents it leaves between its beats.
             val coverage = accentCoverage(onsets, period, phase)
@@ -346,6 +357,11 @@ object BpmDetector {
             log.debug("BPM candidate: lag={}, flux confidence={}, accent confidence={}, coverage={}, score={}", lag, conf, accentConf, coverage, score)
             score
         }?.first ?: bestLag
+        val chosenLag = if (scoredLag in candidateGrids) {
+            resolveSubdivision(scoredLag, onsets, candidateGrids, accentConfs)
+        } else {
+            scoredLag
+        }
 
         val energyConf = sampleConfidence(eDetrended, eVariance, chosenLag)
         val specConf = sampleConfidence(detrended, variance, chosenLag)
@@ -427,6 +443,10 @@ object BpmDetector {
         autoRefinedLag: Double,
     ): Double? {
         if (onsets.size < 4) return null
+        // Center the interval window on the sub-hop period. Centering it on the
+        // integer lag truncates a jittered interval distribution on one side and
+        // biases the median toward that integer (31.58 hops fitted as 31.16).
+        val center = autoRefinedLag
         val tol = maxOf(1.5, lag * 0.05)
 
         val matchedIntervals = mutableListOf<Double>()
@@ -437,8 +457,8 @@ object BpmDetector {
             for (j in (i + 1) until onsets.size) {
                 val o2 = onsets[j]
                 val diff = o2.hop - o1.hop
-                if (diff > lag + tol) break
-                if (abs(diff - lag) <= tol) {
+                if (diff > center + tol) break
+                if (abs(diff - center) <= tol) {
                     matchedIntervals.add(diff)
                     matchedWeights.add(minOf(o1.weight, o2.weight))
                 }
@@ -468,6 +488,87 @@ object BpmDetector {
             median
         }
         return period
+    }
+
+    /**
+     * Coverage always favors the faster of two octave-related grids: a grid at
+     * half the period contains every point of the slower grid. When the events
+     * between the slower grid's beats are clearly weaker than those on them,
+     * they are subdivisions (eighth-note hats or bass), not beats, and the
+     * slower grid is the beat level. Their attack-prominence ratio is weighed
+     * against a narrower pairwise tempo prior. Only fast readings of at least
+     * [SUBDIVISION_MIN_FAST_BPM] are checked: there, 100 BPM with eighth notes
+     * leaves 200, while 125 BPM with loud/soft kicks never collapses to 62.5.
+     */
+    private fun resolveSubdivision(
+        fastLag: Int,
+        onsets: List<Onset>,
+        grids: Map<Int, Triple<Double, Double, Float>>,
+        accentConfs: Map<Int, Float>,
+    ): Int {
+        val (fastPeriod, fastPhase, _) = grids.getValue(fastLag)
+        val fastBpm = 60_000.0 / (fastPeriod * HOP_MS)
+        // Below this, the halved reading (< ~78 BPM) is the less plausible beat level and
+        // loud/soft alternation of one sound looks just like beats with subdivisions.
+        if (fastBpm < SUBDIVISION_MIN_FAST_BPM) return fastLag
+        val fastAccent = accentConfs.getValue(fastLag)
+        val slow = grids.entries
+            .filter { (lag, grid) -> lag != fastLag && abs(grid.first / fastPeriod - 2.0) <= 2.0 * SUBDIVISION_PERIOD_TOLERANCE }
+            .maxByOrNull { (lag, _) -> accentConfs.getValue(lag) }
+            ?: return fastLag
+        val slowLag = slow.key
+        // The slower grid must itself be periodic; otherwise it is no beat candidate.
+        if (accentConfs.getValue(slowLag) < SUBDIVISION_MIN_ACCENT_RATIO * fastAccent) return fastLag
+        // Measure on the fast grid doubled, at both of its alternating phases. A
+        // separately fitted slow grid can lock half a beat off; the weaker of the
+        // two alternations decides, so a kick/snare backbeat never reads as subdivision.
+        val slowPeriod = 2.0 * fastPeriod
+        val (ratio, offShare) = listOf(fastPhase, fastPhase + fastPeriod)
+            .mapNotNull { halfBeatContrast(onsets, slowPeriod, it) }
+            .minByOrNull { it.first }
+            ?: return fastLag
+        if (offShare < SUBDIVISION_MIN_OFF_SHARE) return fastLag
+        val slowBpm = fastBpm / 2.0
+        val logPriorRatio = logPairPrior(slowBpm) - logPairPrior(fastBpm)
+        val evidence = SUBDIVISION_CONTRAST_GAIN * (SUBDIVISION_CONTRAST_CENTER - ratio) + logPriorRatio
+        log.debug(
+            "BPM subdivision check: fast={} slow={} offbeat/onbeat prominence={} offShare={} evidence={}",
+            fastBpm, slowBpm, ratio, offShare, evidence,
+        )
+        return if (evidence > 0.0) slowLag else fastLag
+    }
+
+    /**
+     * Mean attack prominence of onsets at half-beat positions relative to onsets on
+     * the beats of the (period, phase) grid, and the half-beat share of those onsets.
+     */
+    private fun halfBeatContrast(onsets: List<Onset>, period: Double, phase: Double): Pair<Double, Double>? {
+        val tolerance = maxOf(1.5, period * 0.10)
+        var onSum = 0.0
+        var onCount = 0.0
+        var offSum = 0.0
+        var offCount = 0.0
+        for (onset in onsets) {
+            val offset = ((onset.hop - phase) % period + period) % period
+            val beatDistance = minOf(offset, period - offset)
+            val halfDistance = abs(offset - period / 2.0)
+            if (beatDistance < tolerance) {
+                val kernel = cos(PI * beatDistance / (2.0 * tolerance)).let { it * it }
+                onSum += kernel * onset.weight
+                onCount += kernel
+            } else if (halfDistance < tolerance) {
+                val kernel = cos(PI * halfDistance / (2.0 * tolerance)).let { it * it }
+                offSum += kernel * onset.weight
+                offCount += kernel
+            }
+        }
+        if (onCount <= 0.0 || onSum <= 0.0 || offCount <= 0.0) return null
+        return (offSum / offCount) / (onSum / onCount) to offCount / (onCount + offCount)
+    }
+
+    private fun logPairPrior(bpm: Double): Double {
+        val oct = ln(bpm / PRIOR_CENTER_BPM) / ln(2.0)
+        return -0.5 * (oct / SUBDIVISION_PRIOR_SIGMA_OCT) * (oct / SUBDIVISION_PRIOR_SIGMA_OCT)
     }
 
     private fun accentCoverage(onsets: List<Onset>, period: Double, phase: Double): Double {

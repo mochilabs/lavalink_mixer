@@ -13,7 +13,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
- * Guards the normalization gain path: [GuildMixer.mainNormGain]/[GuildMixer.subNormGain]
+ * Guards the normalization gain path: the main and sub normalization gains
  * must multiply onto the fade curve so that a louder track stays attenuated
  * through a crossfade, and an overlay must not inherit the previous
  * crossfade track's gain.

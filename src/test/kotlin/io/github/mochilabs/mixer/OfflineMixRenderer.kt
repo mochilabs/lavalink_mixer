@@ -77,8 +77,8 @@ object OfflineMixRenderer {
         outputWav: File,
         crossfadeMs: Long = 2000L,
         maxDurationSeconds: Int = 30,
-        gridA: BeatGrid? = null,
-        gridB: BeatGrid? = null,
+        gridA: ExtendedBeatGrid? = null,
+        gridB: ExtendedBeatGrid? = null,
     ): Long {
         val manager = DefaultAudioPlayerManager().apply {
             registerSourceManager(LocalAudioSourceManager())
@@ -103,12 +103,12 @@ object OfflineMixRenderer {
         val trackB = loadTrack(manager, fileB)
 
         if (gridA != null) {
-            AnalysisCaches.bpm[trackA.identifier] = BpmDetector.BpmResult(gridA.bpm, gridA.phaseMs, gridA.confidence)
+            AnalysisCaches.bpm[trackA.identifier] = BpmDetector.BpmResult(gridA.bpm, gridA.phaseMs, gridA.bpmConfidence)
             AnalysisCaches.bpmHead[trackA.identifier] = gridA
             AnalysisCaches.bpmTail[trackA.identifier] = gridA
         }
         if (gridB != null) {
-            AnalysisCaches.bpm[trackB.identifier] = BpmDetector.BpmResult(gridB.bpm, gridB.phaseMs, gridB.confidence)
+            AnalysisCaches.bpm[trackB.identifier] = BpmDetector.BpmResult(gridB.bpm, gridB.phaseMs, gridB.bpmConfidence)
             AnalysisCaches.bpmHead[trackB.identifier] = gridB
             AnalysisCaches.bpmTail[trackB.identifier] = gridB
         }

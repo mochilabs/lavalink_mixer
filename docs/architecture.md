@@ -393,34 +393,34 @@ uses a bounded head scan, reusing BPM PCM when its coverage is sufficient. Its
 cache includes inconclusive results, so silence and ambiguous keys complete a
 scan. REST snapshots include track identity and window coverage. These are local
 major/minor estimates with heuristic confidence, not calibrated whole-song labels.
-`AdaptiveTransitionPlanner` compares candidate pairs within a 2-second nonsilent
-skip budget, and selects preserve, silence trim, short crossfade or beat matching.
-The thresholds are conservative heuristics awaiting representative music calibration.
-Equal-power fallback retains the configured crossfade duration, bounded by outgoing
-content; missing/unknown features do not impose a separate short-duration cap.
-The wire label `short_crossfade` remains for compatibility.
-`BeatMatchPolicy` chooses compatible beat grids and a 2-, 4-, or 8-beat fade.
-`CrossfadePlan.overlapMs` controls gain fading; `recoveryMs` reserves an incoming-only
-speed recovery inside the total window. `TempoEnvelope` runs on projected output
-sample coordinates in the secondary producer, so decoding ahead does not shift
+`AdaptiveTransitionPlanner` is the single planner for transitions. It consumes
+`ExtendedBeatGrid` (with downbeat and merged phrase confidence) and `TransitionFeatures`,
+generating a declarative `TransitionRecipe` and deriving the phase-snapped `CrossfadePlan`
+from that recipe. `CrossfadePlan.overlapMs` controls gain fading; `recoveryMs` reserves
+an incoming-only speed recovery inside the total window. `TempoEnvelope` runs on projected
+output sample coordinates in the secondary producer, so decoding ahead does not shift
 its schedule. Keeping the native delegate alive at unity avoids discarding its tail.
 Exact native per-output input positions are unavailable: FIFO source integration
-is tested to a tolerance, not claimed sample-exact WSOLA correspondence.
+is tested to a tolerance, not claimed sample-exact WSOLA correspondence. The wire
+labels (`beat_matched`, `short_crossfade`, `crossfade`, `preserve`) remain for
+protocol-v2 compatibility while the one-line `crossfade` log reports the active
+`strategy=` and metric confidences.
 
-### Adaptive Automix Engine (V2)
+### Adaptive Automix Engine
 
-`AdaptiveTransitionPlannerV2` selects and generates declarative `TransitionRecipe` specifications
+`AdaptiveTransitionPlanner` selects and generates declarative `TransitionRecipe` specifications
 across an uncertainty-margin multi-level decision waterfall:
-- **Level 0 (Grid-Based):** When `ExtendedBeatGrid` confidence is sufficient (`bpmConfidence >= 0.3`).
-  - **Sync Domain ($\Delta_{\log} \le \text{margin}$):** Executes `PHRASE_MATCHED_BASS_SWAP` (16-beat fade, cut at bar 4) when both downbeats and phrases are confident (`downbeatConfidence >= 0.5`, `phraseConfidence >= 0.5`), degrading to `SHORT_BASS_SWAP` (8-beat) or `BEATMATCHED_BLEND` (4-beat, 1-beat phase aligned) when metric boundaries are uncertain or for non-4/4 meters.
+- **Level 0 (Grid-Based):** When `ExtendedBeatGrid` confidence is sufficient (`bpmConfidence >= minConfidence`).
+  - **Sync Domain ($\Delta_{\log} \le \text{margin}$):** Executes `PHRASE_MATCHED_BASS_SWAP` (16-beat fade, cut at bar 4) when both downbeats and phrases are confident (`downbeatConfidence >= 0.5`, `phraseConfidence >= 0.5`), degrading to `SHORT_BASS_SWAP` (8-beat) or `BEATMATCHED_BLEND` (2/4/8-beat, phase-snapped) when metric boundaries are uncertain or for non-4/4 meters.
   - **Async Domain ($\Delta_{\log} > \text{margin}$):** Executes `DOWNBEAT_CUT` when both downbeats are confident and energetic, or `ECHO_OUT` (1/2-beat if BPM $\ge$ 125, 1-beat if BPM < 125) using a 96,000-sample circular delay buffer with an explicit linear termination ramp.
 - **Level 1 (Degraded):** When beat grids are absent but envelope features are valid, executes a time-based high-pass `DEGRADED_FILTER_SWEEP` ($20\text{Hz} \to 3000\text{Hz}$).
 - **Level 2 (Absolute Fallback):** When all metadata is missing or on buffer underrun, safely converges to a 5-second `ABSOLUTE_FALLBACK` Equal-Power crossfade.
 
 In `MixerFilter`, real-time DSP automation runs with zero heap allocations during playback:
 - **Dual LR4 Crossover (`CrossoverLR4`):** Both outgoing and incoming stereo audio streams pass through matched 4th-order Linkwitz-Riley filters (16 biquads total) at 200Hz. This guarantees identical group delay across both tracks, eliminating comb filtering while allowing low-frequency bass swap with 15ms smoothing ramps.
+- **High-Pass Filter Sweep (`PcmBiquadFilter`):** Executes `FilterCutoff` sweeps in place on the outgoing stream during degraded transitions.
 - **Circular Delay Buffer (`CircularDelayBuffer`):** Pre-allocated 96,000-sample stereo buffer (2.0s @ 48kHz, accommodating BPM 40) continuously banks incoming main audio and provides feedback delay with decay and linear fade-out termination on Echo Out triggers.
-- **Transition Memory (`TransitionMemory`):** Tracks the recent history of applied transition strategies per guild and applies multiplicative penalties to prevent consecutive mechanical repetition.
+- **Transition Memory (`TransitionMemory`):** Tracks the recent history of applied transition strategies per guild and applies multiplicative penalties to shift between viable candidates and prevent consecutive mechanical repetition.
 
 `requestPreanalysis` retains the latest warmup while another scan is queued or
 active, and writes enabled silence, BPM, feature, and key caches. It never arms, promotes or changes

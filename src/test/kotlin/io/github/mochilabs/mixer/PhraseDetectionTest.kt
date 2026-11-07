@@ -32,7 +32,7 @@ class PhraseDetectionTest {
             }
         }
 
-        val grid = BeatGrid(bpm, 0L, 0.9f)
+        val grid = ExtendedBeatGrid(bpm, 0L, 0.9f)
         val features = TransitionFeatureAnalyzer.analyze(listOf(arrayOf(buffer)), windowStartMs = 0L, grid = grid)
 
         assertTrue(features.phraseConfidence >= 0.5f, "phrase confidence must be >= 0.5 on clear 8-bar drop, got ${features.phraseConfidence}")

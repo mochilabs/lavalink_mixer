@@ -61,6 +61,9 @@ class MixerFilter(
     private val echoBuffer = CircularDelayBuffer()
     private var echoScratchL = FloatArray(1024)
     private var echoScratchR = FloatArray(1024)
+    private val sweepFilterL = PcmBiquadFilter()
+    private val sweepFilterR = PcmBiquadFilter()
+    private var lastRecipe: TransitionRecipe? = null
 
     override fun process(input: Array<FloatArray>, offset: Int, length: Int) {
         if (length <= 0) return
@@ -111,6 +114,19 @@ class MixerFilter(
 
         val parallels = mixer.advanceParallelOverlays(length, feederId)
         val recipe = mixer.activeRecipe
+        if (recipe !== lastRecipe) {
+            lastRecipe = recipe
+            if (recipe != null) {
+                crossoverMain.reset()
+                crossoverSub.reset()
+                sweepFilterL.reset()
+                sweepFilterR.reset()
+                log.debug(
+                    "mixer filter activated recipe strategy={} totalSamples={} on guild {}",
+                    recipe.strategy, recipe.totalSamples, guildId,
+                )
+            }
+        }
         val isRecipeActive = (recipe != null)
         val echoTrigger = if (isRecipeActive) recipe?.echoTrigger else null
         val currentSample = mixer.currentXfadeSample
@@ -121,6 +137,17 @@ class MixerFilter(
             echoBuffer.write(input[0], inR, offset, length)
         }
 
+        if (isRecipeActive) {
+            val mainCutoffHz = recipe.filterCutoffAt(TrackTarget.OUTGOING, currentSample)
+            if (mainCutoffHz != null) {
+                sweepFilterL.setHighPass(48000, mainCutoffHz)
+                sweepFilterL.process(input[0], input[0], inputOffset = offset, outputOffset = offset, length = length)
+                if (input.size > 1) {
+                    sweepFilterR.setHighPass(48000, mainCutoffHz)
+                    sweepFilterR.process(input[1], input[1], inputOffset = offset, outputOffset = offset, length = length)
+                }
+            }
+        }
         if (!isRecipeActive && gains.main >= 0.999f && gains.sub <= 0.001f && parallels.isEmpty()) return // idle passthrough
         if (!isRecipeActive && gains.sub <= 0.001f && parallels.isEmpty()) {
             // Main-only (fade-in/mask/duck release): scale in place, no sub buffer.
@@ -220,7 +247,6 @@ class MixerFilter(
         )
 
         if (doBassProcessing) {
-            val currentSample = mixer.currentXfadeSample
             val mainBassGain = recipe.bassGainAt(TrackTarget.OUTGOING, currentSample)
             val subBassGain = recipe.bassGainAt(TrackTarget.INCOMING, currentSample)
             scratchMainLow = ensureScratch(scratchMainLow, input.size, length)

@@ -11,13 +11,10 @@ enum class TrackTarget {
 enum class RampCurve {
     LINEAR,
     EQUAL_POWER,
-    EXPONENTIAL,
 }
 
 enum class FilterType {
     HIGH_PASS,
-    LOW_PASS,
-    BAND_PASS,
 }
 
 enum class TransitionStrategy {
@@ -27,7 +24,6 @@ enum class TransitionStrategy {
     ECHO_OUT,
     DOWNBEAT_CUT,
     DEGRADED_FILTER_SWEEP,
-    SILENCE_TRIM,
     ABSOLUTE_FALLBACK,
 }
 
@@ -112,10 +108,6 @@ data class TransitionRecipe(
                     } else {
                         sin(progress * Math.PI.toFloat() * 0.5f) * activeRamp.toGain
                     }
-                }
-                RampCurve.EXPONENTIAL -> {
-                    val p = progress * progress
-                    activeRamp.fromGain + (activeRamp.toGain - activeRamp.fromGain) * p
                 }
             }
         }

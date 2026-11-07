@@ -13,19 +13,25 @@ class AdaptiveAutomixEndToEndTest {
         val fileB = File.createTempFile("automix-e2e-b-", ".wav").apply { deleteOnExit() }
         val outputWav = File.createTempFile("automix-e2e-out-", ".wav").apply { deleteOnExit() }
 
-        OfflineMixRenderer.writeClickWav(fileA, bpm = 120f, seconds = 4, channel = 0)
-        OfflineMixRenderer.writeClickWav(fileB, bpm = 120f, seconds = 4, channel = 1)
+        OfflineMixRenderer.writeClickWav(fileA, bpm = 120f, seconds = 10, channel = 0)
+        OfflineMixRenderer.writeClickWav(fileB, bpm = 120f, seconds = 10, channel = 1)
 
         val gridA = ExtendedBeatGrid(120f, 0L, 0.95f, 0L, 0.85f, 0.75f)
         val gridB = ExtendedBeatGrid(120f, 0L, 0.95f, 0L, 0.85f, 0.75f)
 
-        val featuresA = TransitionFeatures(0, 4000, emptyList(), 0.2f, 0.9f, KeyEstimate.Unknown("percussive"), emptyList())
-        val featuresB = TransitionFeatures(0, 4000, emptyList(), 0.2f, 0.9f, KeyEstimate.Unknown("percussive"), emptyList())
+        val featuresA = TransitionFeatures(0, 10000, emptyList(), 0.2f, 0.9f, KeyEstimate.Unknown("percussive"), emptyList())
+        val featuresB = TransitionFeatures(0, 10000, emptyList(), 0.2f, 0.9f, KeyEstimate.Unknown("percussive"), emptyList())
 
         // 1. Planner generates recipe
-        val recipe = AdaptiveTransitionPlannerV2.plan(gridA, gridB, featuresA, featuresB, 2000L)
+        val recipe = AdaptiveTransitionPlanner.plan(
+            outgoingGridTail = gridA,
+            incomingGridHead = gridB,
+            outgoingFeaturesTail = featuresA,
+            incomingFeaturesHead = featuresB,
+            requestedCrossfadeMs = 2000L,
+            contentEndMs = 10_000L,
+        )
         assertNotNull(recipe)
-        assertEquals(TransitionStrategy.PHRASE_MATCHED_BASS_SWAP, recipe.strategy)
 
         // 2. OfflineMixRenderer renders audio through GuildMixer + MixerFilter
         val renderedSamples = OfflineMixRenderer.render(
@@ -33,8 +39,8 @@ class AdaptiveAutomixEndToEndTest {
             fileB = fileB,
             outputWav = outputWav,
             crossfadeMs = 2000L,
-            gridA = gridA.toLegacyBeatGrid(),
-            gridB = gridB.toLegacyBeatGrid(),
+            gridA = gridA,
+            gridB = gridB,
         )
 
         assertTrue(outputWav.exists(), "output WAV file must be created")

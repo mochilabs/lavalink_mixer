@@ -119,7 +119,7 @@ class BpmIntegrationTest {
             val headGrid = AnalysisCaches.bpmHead[track.identifier]
             assertNotNull(headGrid, "bpmHead should be recovered by smart retry")
             assertTrue(kotlin.math.abs(headGrid.bpm - 120f) < 1.5f, "recovered bpm=${headGrid.bpm}")
-            assertTrue(headGrid.confidence > 0.25f, "recovered confidence=${headGrid.confidence}")
+            assertTrue(headGrid.bpmConfidence > 0.25f, "recovered confidence=${headGrid.bpmConfidence}")
             // Phase should be projected into the period [0..500ms)
             assertTrue(headGrid.phaseMs in 0L..500L, "projected phase=${headGrid.phaseMs}")
         } finally {

@@ -104,7 +104,7 @@ class AdaptiveTransitionRaceTest {
     /** Seeds a full beatmatching cache so a crossfade plan can reach StartOverlap. */
     private fun cacheBeatFeatures(outgoing: PositionedTrack, incoming: PositionedTrack) {
         for (track in listOf(outgoing, incoming)) {
-            val grid = BeatGrid(120f, 0L, 1f)
+            val grid = ExtendedBeatGrid(120f, 0L, 1f)
             AnalysisCaches.bpm[track.id] = BpmDetector.BpmResult(120f, 0L, 1f)
             AnalysisCaches.bpmHead[track.id] = grid
             AnalysisCaches.bpmTail[track.id] = grid

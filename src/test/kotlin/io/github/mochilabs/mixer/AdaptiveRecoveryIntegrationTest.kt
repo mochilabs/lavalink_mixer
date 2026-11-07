@@ -22,6 +22,7 @@ import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlin.test.Test
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 /** Measures the PCM delivered by provide(), including the actual handoff boundary. */
@@ -58,8 +59,8 @@ class AdaptiveRecoveryIntegrationTest {
             mixer.attachMain(iPlayer(mixer.guildId, player))
             val outgoing = load(manager, fileA)
             val incoming = load(manager, fileB)
-            cacheGrid(outgoing, BeatGrid(outgoingBpm, 0L, 1f))
-            cacheGrid(incoming, BeatGrid(incomingBpm, incomingPhaseMs, 1f))
+            cacheGrid(outgoing, ExtendedBeatGrid(outgoingBpm, 0L, 1f))
+            cacheGrid(incoming, ExtendedBeatGrid(incomingBpm, incomingPhaseMs * 48L, 1f))
             player.playTrack(outgoing)
             mixer.queueNext(CompletableFuture.completedFuture(incoming))
 
@@ -100,13 +101,21 @@ class AdaptiveRecoveryIntegrationTest {
             assertTrue(handoffOutputSample >= 0, "handoff did not complete")
             assertTrue(right.size - handoffOutputSample >= sampleRate * 3, "required three seconds after handoff were not captured")
 
-            val decision = BeatMatchPolicy.decide(
-                BeatGrid(outgoingBpm, 0L, 1f), BeatGrid(incomingBpm, incomingPhaseMs, 1f),
-                outgoingSeconds * 1000L, config.crossfadeMs, maxTempoChange = config.maxTempoChange,
-            ) as TransitionDecision.BeatMatched
-            assertTrue(decision.recoveryMs >= 1500L, "test requires enough recovery to measure pulse intervals")
-            val recoveryStart = ((decision.startMs + decision.fadeMs) * sampleRate / 1000).toInt()
-            val plannedHandoff = (decision.handoffMs * sampleRate / 1000).toInt()
+            val contentEndMs = outgoingSeconds * 1000L
+            val recipe = AdaptiveTransitionPlanner.plan(
+                outgoingGridTail = ExtendedBeatGrid(outgoingBpm, 0L, 1f),
+                incomingGridHead = ExtendedBeatGrid(incomingBpm, incomingPhaseMs * 48L, 1f),
+                outgoingFeaturesTail = null,
+                incomingFeaturesHead = null,
+                requestedCrossfadeMs = config.crossfadeMs,
+                contentEndMs = contentEndMs,
+                incomingDurationMs = 12_000L,
+                maxTempoChange = config.maxTempoChange,
+            )
+            val plan = assertNotNull(AdaptiveTransitionPlanner.toCrossfadePlan(recipe, contentEndMs))
+            assertTrue(plan.recoveryMs >= 1500L, "test requires enough recovery to measure pulse intervals")
+            val recoveryStart = ((plan.startMs + plan.overlapMs) * sampleRate / 1000).toInt()
+            val plannedHandoff = (plan.handoffMs * sampleRate / 1000).toInt()
             val silentStart = recoveryStart + sampleRate / 10
             val silentEnd = minOf(plannedHandoff - sampleRate / 10, handoffOutputSample)
             assertTrue(silentEnd > silentStart)
@@ -115,7 +124,7 @@ class AdaptiveRecoveryIntegrationTest {
 
             val incomingOnsets = onsets(right)
             val held = incomingOnsets.filter {
-                it >= (decision.startMs * sampleRate / 1000).toInt() + sampleRate / 2 && it < recoveryStart
+                it >= (plan.startMs * sampleRate / 1000).toInt() + sampleRate / 2 && it < recoveryStart
             }
             assertTrue(held.size >= 3, "not enough overlap pulses")
             held.zipWithNext().forEach { (first, next) ->
@@ -166,8 +175,8 @@ class AdaptiveRecoveryIntegrationTest {
 
     private fun ms(samples: Int): Double = samples * 1000.0 / sampleRate
 
-    private fun cacheGrid(track: AudioTrack, grid: BeatGrid) {
-        AnalysisCaches.bpm[track.identifier] = BpmDetector.BpmResult(grid.bpm, grid.phaseMs, grid.confidence)
+    private fun cacheGrid(track: AudioTrack, grid: ExtendedBeatGrid) {
+        AnalysisCaches.bpm[track.identifier] = BpmDetector.BpmResult(grid.bpm, grid.phaseMs, grid.bpmConfidence)
         AnalysisCaches.bpmHead[track.identifier] = grid
         AnalysisCaches.bpmTail[track.identifier] = grid
         val features = TransitionFeatures(0, track.duration, emptyList(), 0.2f, 1f,

@@ -2,139 +2,93 @@ package io.github.mochilabs.mixer
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertIs
-import kotlin.test.assertNotNull
-import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class AdaptiveTransitionPlannerTest {
-    private val grid = BeatGrid(120f, 0, 0.9f)
-    private fun features(key: KeyEstimate = KeyEstimate.Unknown("percussive")) = TransitionFeatures(
-        windowStartMs = 0, windowEndMs = 10000, energyEnvelope = emptyList(), rms = 0.15f,
-        rhythmicStability = 0.9f, key = key, candidates = emptyList(),
-    )
-    private fun decide(
-        out: TransitionFeatures? = features(),
-        inc: TransitionFeatures? = features(),
-        preserve: Boolean = false,
-        crossfadeEnabled: Boolean = true,
-    ) = AdaptiveTransitionPlanner.decide(out, inc, grid, grid, 10000, 5000, preserveContext = preserve, crossfadeEnabled = crossfadeEnabled)
+    private fun features() = TransitionFeatures(0, 10000, emptyList(), 0.2f, 0.9f, KeyEstimate.Unknown("percussive"), emptyList())
 
-    @Test
-    fun `explicit preserve context bypasses even compatible beat matching`() {
-        val result = assertIs<AdaptiveTransitionDecision.Preserve>(decide(preserve = true))
-        assertEquals("preserve_context", result.reason)
-        assertNull(AdaptiveTransitionPlanner.toCrossfadePlan(result, 10000))
-    }
-
-    @Test
-    fun `missing and unknown features preserve configured crossfade duration`() {
-        for ((out, inc, reason) in listOf(
-            Triple(null, features(), "missing_features"),
-            Triple(features(), null, "missing_features"),
-            Triple(features().copy(unknownReason = "short_window"), features(), "unknown_features"),
-        )) {
-            for (requested in listOf(500L, 5000L, 10000L)) {
-                val decision = assertIs<AdaptiveTransitionDecision.ShortCrossfade>(
-                    AdaptiveTransitionPlanner.decide(out, inc, grid, grid, 60000, requested),
-                )
-                assertEquals(reason, decision.reason)
-                val plan = assertNotNull(AdaptiveTransitionPlanner.toCrossfadePlan(decision, 60000))
-                assertEquals(requested, plan.overlapMs)
-                assertEquals(60000L - requested, plan.startMs)
-                assertTrue(!plan.beatMatched)
-            }
-        }
-        val shortTrack = assertIs<AdaptiveTransitionDecision.ShortCrossfade>(
-            AdaptiveTransitionPlanner.decide(null, null, null, null, 2000, 10000),
+    private fun plan(out: ExtendedBeatGrid?, inc: ExtendedBeatGrid?, outF: TransitionFeatures? = features(), inF: TransitionFeatures? = features()) =
+        AdaptiveTransitionPlanner.plan(
+            outgoingGridTail = out,
+            incomingGridHead = inc,
+            outgoingFeaturesTail = outF,
+            incomingFeaturesHead = inF,
+            requestedCrossfadeMs = 5000L,
+            contentEndMs = 60000L,
         )
-        assertEquals(2000L, shortTrack.durationMs)
+
+    @Test
+    fun `plans PhraseMatchedBassSwap when BPM, downbeats, and phrases are all confident`() {
+        val outGrid = ExtendedBeatGrid(bpm = 128f, phaseSample = 0L, bpmConfidence = 0.9f, downbeatConfidence = 0.8f, phraseConfidence = 0.7f)
+        val inGrid = ExtendedBeatGrid(bpm = 128f, phaseSample = 0L, bpmConfidence = 0.9f, downbeatConfidence = 0.8f, phraseConfidence = 0.7f)
+
+        val recipe = plan(outGrid, inGrid)
+
+        assertEquals(TransitionStrategy.PHRASE_MATCHED_BASS_SWAP, recipe.strategy)
+        assertTrue(recipe.sync.enabled)
+        assertEquals(1.0f, recipe.sync.rateRatio)
+        assertTrue(recipe.automations.any { it is ParamAutomation.BassCut }, "must contain BassCut automations")
     }
 
     @Test
-    fun `stable compatible grids can match without claiming unknown keys compatible`() {
-        val result = assertIs<AdaptiveTransitionDecision.BeatMatched>(decide())
-        assertEquals(1f, result.transition.rateRatio)
-        assertTrue(assertNotNull(AdaptiveTransitionPlanner.toCrossfadePlan(result, 10000)).beatMatched)
+    fun `degrades to ShortBassSwap when phrase confidence is low`() {
+        val outGrid = ExtendedBeatGrid(bpm = 128f, phaseSample = 0L, bpmConfidence = 0.9f, downbeatConfidence = 0.8f, phraseConfidence = 0.2f)
+        val inGrid = ExtendedBeatGrid(bpm = 128f, phaseSample = 0L, bpmConfidence = 0.9f, downbeatConfidence = 0.8f, phraseConfidence = 0.2f)
+
+        assertEquals(TransitionStrategy.SHORT_BASS_SWAP, plan(outGrid, inGrid).strategy)
     }
 
     @Test
-    fun `only confident clashing keys shorten overlap`() {
-        val c = features(KeyEstimate.Candidate(0, KeyMode.MAJOR, 0.9f))
-        val fs = features(KeyEstimate.Candidate(6, KeyMode.MAJOR, 0.9f))
-        assertEquals("key_clash", assertIs<AdaptiveTransitionDecision.ShortCrossfade>(decide(c, fs)).reason)
-        assertIs<AdaptiveTransitionDecision.BeatMatched>(decide(c, features(KeyEstimate.Candidate(9, KeyMode.MINOR, 0.9f))))
-        assertIs<AdaptiveTransitionDecision.BeatMatched>(decide(c, features(KeyEstimate.Candidate(6, KeyMode.MAJOR, 0.2f))))
+    fun `degrades to BeatmatchedBlend when downbeat confidence is low`() {
+        val outGrid = ExtendedBeatGrid(bpm = 128f, phaseSample = 0L, bpmConfidence = 0.9f, downbeatConfidence = 0.2f)
+        val inGrid = ExtendedBeatGrid(bpm = 128f, phaseSample = 0L, bpmConfidence = 0.9f, downbeatConfidence = 0.2f)
+
+        assertEquals(TransitionStrategy.BEATMATCHED_BLEND, plan(outGrid, inGrid).strategy)
     }
 
     @Test
-    fun `quiet or unstable boundaries do not receive long beatmatched transitions`() {
-        assertEquals("low_energy", assertIs<AdaptiveTransitionDecision.ShortCrossfade>(decide(inc = features().copy(rms = 0.002f))).reason)
-        assertEquals("unstable_rhythm", assertIs<AdaptiveTransitionDecision.ShortCrossfade>(decide(inc = features().copy(rhythmicStability = 0.1f))).reason)
-        assertEquals("energy_mismatch", assertIs<AdaptiveTransitionDecision.ShortCrossfade>(decide(inc = features().copy(rms = 0.03f))).reason)
+    fun `selects Echo Out when BPM difference exceeds 6 percent and incoming downbeat is uncertain`() {
+        val outGrid = ExtendedBeatGrid(bpm = 140f, phaseSample = 0L, bpmConfidence = 0.9f, downbeatConfidence = 0.8f)
+        val inGrid = ExtendedBeatGrid(bpm = 100f, phaseSample = 0L, bpmConfidence = 0.9f, downbeatConfidence = 0.2f) // downbeat uncertain
+
+        val recipe = plan(outGrid, inGrid)
+        assertEquals(TransitionStrategy.ECHO_OUT, recipe.strategy)
+        assertTrue(recipe.automations.any { it is ParamAutomation.EchoTrigger })
     }
 
     @Test
-    fun `measured silence trims boundaries when crossfade is disabled`() {
-        val result = assertIs<AdaptiveTransitionDecision.SilenceTrim>(decide(
-            features().copy(trailingSilenceMs = 800), features().copy(leadingSilenceMs = 400),
-            crossfadeEnabled = false,
-        ))
-        assertEquals(9200L, result.outgoingContentEndMs)
-        assertEquals(400L, result.incomingStartMs)
-        assertNull(AdaptiveTransitionPlanner.toCrossfadePlan(result, 10000))
+    fun `selects Downbeat Cut when BPM difference exceeds 6 percent and both downbeats are confident`() {
+        val outGrid = ExtendedBeatGrid(bpm = 140f, phaseSample = 0L, bpmConfidence = 0.9f, downbeatConfidence = 0.8f)
+        val inGrid = ExtendedBeatGrid(bpm = 100f, phaseSample = 0L, bpmConfidence = 0.9f, downbeatConfidence = 0.8f)
 
-        val longSilence = assertIs<AdaptiveTransitionDecision.SilenceTrim>(decide(
-            features().copy(trailingSilenceMs = 4200), features().copy(leadingSilenceMs = 3100),
-            crossfadeEnabled = false,
-        ))
-        assertEquals(5800L, longSilence.outgoingContentEndMs)
-        assertEquals(3100L, longSilence.incomingStartMs)
+        assertEquals(TransitionStrategy.DOWNBEAT_CUT, plan(outGrid, inGrid).strategy)
     }
 
     @Test
-    fun `measured silence trims boundaries and performs beat matching when crossfade is enabled`() {
-        val result = assertIs<AdaptiveTransitionDecision.BeatMatched>(decide(
-            features().copy(trailingSilenceMs = 800), features().copy(leadingSilenceMs = 400),
-            crossfadeEnabled = true,
-        ))
-        assertTrue(result.transition.handoffMs <= 9200L, "handoff must not exceed trimmed trailing silence")
-        assertTrue(result.transition.incomingStartMs >= 400L, "incoming start must skip leading silence")
-        val plan = assertNotNull(AdaptiveTransitionPlanner.toCrossfadePlan(result, 10000))
-        assertTrue(plan.beatMatched)
+    fun `normalizes double-time 174 DnB to 87 Trap and selects Bass Swap`() {
+        val outGrid = ExtendedBeatGrid(bpm = 174f, phaseSample = 0L, bpmConfidence = 0.9f, downbeatConfidence = 0.8f, phraseConfidence = 0.7f)
+        val inGrid = ExtendedBeatGrid(bpm = 87f, phaseSample = 0L, bpmConfidence = 0.9f, downbeatConfidence = 0.8f, phraseConfidence = 0.7f)
+
+        val recipe = plan(outGrid, inGrid)
+        assertEquals(TransitionStrategy.PHRASE_MATCHED_BASS_SWAP, recipe.strategy)
+        assertEquals(1.0f, recipe.sync.rateRatio, 0.01f, "174 vs 87 must normalize to 1.0 ratio using m=0.5")
     }
+
     @Test
-    fun `bounded candidate with smoother boundary wins without a long skip`() {
-        val outgoing = features().copy(
-            rhythmicStability = 0.1f,
-            energyEnvelope = listOf(EnergyPoint(10000, 0.9f)),
-            candidates = listOf(TransitionCandidate(7000, 0.1f), TransitionCandidate(9500, 0.1f)),
+    fun `falls back to Level 1 Filter Sweep when beat grid is missing but features exist`() {
+        assertEquals(TransitionStrategy.DEGRADED_FILTER_SWEEP, plan(null, null).strategy)
+    }
+
+    @Test
+    fun `falls back to Level 2 Absolute Fallback when all features are missing`() {
+        val recipe = AdaptiveTransitionPlanner.plan(
+            outgoingGridTail = null,
+            incomingGridHead = null,
+            outgoingFeaturesTail = null,
+            incomingFeaturesHead = null,
+            requestedCrossfadeMs = 5000L,
+            contentEndMs = 60000L,
         )
-        val incoming = features().copy(rms = 0.1f, candidates = listOf(TransitionCandidate(4000, 0.9f)))
-        val result = assertIs<AdaptiveTransitionDecision.ShortCrossfade>(decide(outgoing, incoming))
-        assertEquals(9500L, result.outgoingContentEndMs)
-        assertEquals(0L, result.incomingStartMs)
-        val plan = assertNotNull(AdaptiveTransitionPlanner.toCrossfadePlan(result, 10000))
-        assertEquals(9500L, plan.handoffMs)
+        assertEquals(TransitionStrategy.ABSOLUTE_FALLBACK, recipe.strategy)
     }
-
-    @Test
-    fun `no candidates retain original boundaries and equal energy does not justify skipping`() {
-        val unknownRhythm = features().copy(rhythmicStability = null)
-        val unchanged = assertIs<AdaptiveTransitionDecision.ShortCrossfade>(decide(unknownRhythm, features()))
-        assertEquals(10000L, unchanged.outgoingContentEndMs)
-        assertEquals(0L, unchanged.incomingStartMs)
-        val candidates = unknownRhythm.copy(candidates = listOf(TransitionCandidate(8500, 0.15f)))
-        assertEquals(10000L, assertIs<AdaptiveTransitionDecision.ShortCrossfade>(decide(candidates)).outgoingContentEndMs)
-    }
-
-    @Test
-    fun `incomplete scans never trim to a partial decoded endpoint`() {
-        val partial = features().copy(windowEndMs = 5000, trailingSilenceMs = 1000, unknownReason = "incomplete_window")
-        val decision = assertIs<AdaptiveTransitionDecision.ShortCrossfade>(decide(partial))
-        assertEquals("unknown_features", decision.reason)
-        assertEquals(10000L, decision.outgoingContentEndMs)
-        assertEquals(0L, decision.incomingStartMs)
-    }
-
 }

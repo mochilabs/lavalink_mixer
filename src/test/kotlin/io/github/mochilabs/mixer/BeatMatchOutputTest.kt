@@ -22,6 +22,7 @@ import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlin.test.Test
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 /** Measures the PCM delivered by provide(), including the actual handoff boundary. */
@@ -65,8 +66,8 @@ class BeatMatchOutputTest {
             mixer.attachMain(iPlayer(mixer.guildId, player))
             val outgoing = load(manager, fileA)
             val incoming = load(manager, fileB)
-            cacheGrid(outgoing, BeatGrid(outgoingBpm, 0L, 1f))
-            cacheGrid(incoming, BeatGrid(incomingBpm, incomingPhaseMs, 1f))
+            cacheGrid(outgoing, ExtendedBeatGrid(outgoingBpm, 0L, 1f))
+            cacheGrid(incoming, ExtendedBeatGrid(incomingBpm, incomingPhaseMs * 48L, 1f))
             player.playTrack(outgoing)
             mixer.queueNext(CompletableFuture.completedFuture(incoming))
 
@@ -109,11 +110,19 @@ class BeatMatchOutputTest {
 
             val outgoingOnsets = onsets(left)
             val incomingOnsets = onsets(right)
-            val decision = BeatMatchPolicy.decide(
-                BeatGrid(outgoingBpm, 0L, 1f), BeatGrid(incomingBpm, incomingPhaseMs, 1f),
-                outgoingSeconds * 1000L, config.crossfadeMs,
-            ) as TransitionDecision.BeatMatched
-            val fadeEndSample = ((decision.startMs + decision.fadeMs) * sampleRate / 1000).toInt()
+            val contentEndMs = outgoingSeconds * 1000L
+            val recipe = AdaptiveTransitionPlanner.plan(
+                outgoingGridTail = ExtendedBeatGrid(outgoingBpm, 0L, 1f),
+                incomingGridHead = ExtendedBeatGrid(incomingBpm, incomingPhaseMs * 48L, 1f),
+                outgoingFeaturesTail = null,
+                incomingFeaturesHead = null,
+                requestedCrossfadeMs = config.crossfadeMs,
+                contentEndMs = contentEndMs,
+                incomingDurationMs = 12_000L,
+                maxTempoChange = config.maxTempoChange,
+            )
+            val plan = assertNotNull(AdaptiveTransitionPlanner.toCrossfadePlan(recipe, contentEndMs))
+            val fadeEndSample = ((plan.startMs + plan.overlapMs) * sampleRate / 1000).toInt()
             val overlapOnsets = incomingOnsets.filter { it < minOf(handoffOutputSample, fadeEndSample) }
             assertTrue(overlapOnsets.size >= fadeBeats - 1,
                 "expected at least ${fadeBeats - 1} incoming clicks during overlap; got ${overlapOnsets.map(::ms)}")
@@ -190,8 +199,8 @@ class BeatMatchOutputTest {
 
     private fun ms(samples: Int): Double = samples * 1000.0 / sampleRate
 
-    private fun cacheGrid(track: AudioTrack, grid: BeatGrid) {
-        AnalysisCaches.bpm[track.identifier] = BpmDetector.BpmResult(grid.bpm, grid.phaseMs, grid.confidence)
+    private fun cacheGrid(track: AudioTrack, grid: ExtendedBeatGrid) {
+        AnalysisCaches.bpm[track.identifier] = BpmDetector.BpmResult(grid.bpm, grid.phaseMs, grid.bpmConfidence)
         AnalysisCaches.bpmHead[track.identifier] = grid
         AnalysisCaches.bpmTail[track.identifier] = grid
         val features = TransitionFeatures(0, track.duration, emptyList(), 0.2f, 1f,

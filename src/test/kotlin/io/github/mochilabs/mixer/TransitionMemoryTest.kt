@@ -35,4 +35,19 @@ class TransitionMemoryTest {
         val agedWeight = memory.repetitionWeight(guildId, TransitionStrategy.PHRASE_MATCHED_BASS_SWAP)
         assertTrue(agedWeight >= 0.7f, "aged strategy weight should recover towards 1.0 (got $agedWeight)")
     }
+
+    @Test
+    fun `planner shifts away from recently repeated strategy when TransitionMemory is provided`() {
+        val memory = TransitionMemory(historySize = 5)
+        val guildId = 4002L
+        val grid = ExtendedBeatGrid(bpm = 128f, phaseSample = 0L, bpmConfidence = 0.9f, downbeatConfidence = 0.8f, phraseConfidence = 0.7f)
+        val features = TransitionFeatures(0, 10000, emptyList(), 0.2f, 0.9f, KeyEstimate.Unknown("percussive"), emptyList())
+
+        val first = AdaptiveTransitionPlanner.plan(grid, grid, features, features, 8000L, 60000L, guildId = guildId, memory = memory)
+        assertEquals(TransitionStrategy.PHRASE_MATCHED_BASS_SWAP, first.strategy)
+        memory.record(guildId, first.strategy)
+
+        val second = AdaptiveTransitionPlanner.plan(grid, grid, features, features, 8000L, 60000L, guildId = guildId, memory = memory)
+        assertEquals(TransitionStrategy.SHORT_BASS_SWAP, second.strategy)
+    }
 }

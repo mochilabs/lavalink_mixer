@@ -29,7 +29,7 @@ object TransitionFeatureAnalyzer {
     private const val MAX_SAMPLES = SOURCE_RATE * 62
     private const val SILENCE = 0.001f
 
-    fun analyze(frames: List<Array<FloatArray>>, windowStartMs: Long = 0L, grid: BeatGrid? = null): TransitionFeatures {
+    fun analyze(frames: List<Array<FloatArray>>, windowStartMs: Long = 0L, grid: ExtendedBeatGrid? = null): TransitionFeatures {
         val count = frames.sumOf { it.firstOrNull()?.size?.toLong() ?: 0L }.coerceAtMost(MAX_SAMPLES.toLong()).toInt()
         if (count == 0) return TransitionFeatures(windowStartMs, windowStartMs, emptyList(), 0f, null,
             KeyEstimate.Unknown("empty_audio"), emptyList(), unknownReason = "empty_audio")
@@ -97,7 +97,7 @@ object TransitionFeatureAnalyzer {
         )
     }
 
-    private fun detectPhrase(envelope: List<EnergyPoint>, grid: BeatGrid?): Pair<Float, Long> {
+    private fun detectPhrase(envelope: List<EnergyPoint>, grid: ExtendedBeatGrid?): Pair<Float, Long> {
         if (grid == null || !grid.periodMs.isFinite() || grid.periodMs <= 0 || envelope.size < 40) {
             return 0f to -1L
         }
@@ -131,7 +131,7 @@ object TransitionFeatureAnalyzer {
         return bestContrast.coerceIn(0f, 1f) to bestBoundary
     }
 
-    private fun stability(envelope: List<EnergyPoint>, grid: BeatGrid?): Float? {
+    private fun stability(envelope: List<EnergyPoint>, grid: ExtendedBeatGrid?): Float? {
         if (grid == null || !grid.periodMs.isFinite() || grid.periodMs <= 0) return null
         val lag = (grid.periodMs / 20).toInt().coerceAtLeast(1)
         if (envelope.size < lag * 4) return null

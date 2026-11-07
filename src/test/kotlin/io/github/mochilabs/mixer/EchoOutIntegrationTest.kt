@@ -32,8 +32,9 @@ class EchoOutIntegrationTest {
         )
 
         val config = MixerConfig().apply { crossfadeMs = 2000L }
-        val mixer = GuildMixer(3001L, com.sedmelluq.discord.lavaplayer.player.DefaultAudioPlayerManager(), config, java.util.concurrent.Executor { })
-
+        val manager = com.sedmelluq.discord.lavaplayer.player.DefaultAudioPlayerManager()
+        val mixer = GuildMixer(3001L, manager, config, java.util.concurrent.Executor { })
+        try {
         val output = mutableListOf<Float>()
         val downstream = object : com.sedmelluq.discord.lavaplayer.filter.FloatPcmAudioFilter {
             override fun process(input: Array<FloatArray>, offset: Int, length: Int) {
@@ -75,6 +76,10 @@ class EchoOutIntegrationTest {
 
         // After termination duration (termSamples = 72000), echo must be completely silent (< 1e-4)
         val tailMax = output.subList(termSamples + 2000, output.size).maxOf { abs(it) }
-        assertTrue(tailMax < 1e-4f, "echo tail must terminate cleanly to 0.0 after termination ramp (got $tailMax)")
+            assertTrue(tailMax < 1e-4f, "echo tail must terminate cleanly to 0.0 after termination ramp (got $tailMax)")
+        } finally {
+            mixer.destroy()
+            manager.shutdown()
+        }
     }
 }

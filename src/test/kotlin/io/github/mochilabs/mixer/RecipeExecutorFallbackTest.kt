@@ -87,15 +87,21 @@ class RecipeExecutorFallbackTest {
         )
 
         val config = MixerConfig().apply { crossfadeMs = 2000L }
-        val mixer = GuildMixer(1001L, com.sedmelluq.discord.lavaplayer.player.DefaultAudioPlayerManager(), config, java.util.concurrent.Executor { })
-        mixer.setActiveRecipeForTest(testRecipe, startSample = 0L, endSample = totalSamples)
+        val manager = com.sedmelluq.discord.lavaplayer.player.DefaultAudioPlayerManager()
+        val mixer = GuildMixer(1001L, manager, config, java.util.concurrent.Executor { })
+        try {
+            mixer.setActiveRecipeForTest(testRecipe, startSample = 0L, endSample = totalSamples)
 
-        assertEquals(testRecipe, mixer.activeRecipe)
+            assertEquals(testRecipe, mixer.activeRecipe)
 
-        // Advance 1 second (48000 samples)
-        val gains = mixer.advance(48000, 1L)
-        // With linear ramp, at 50% gains must be 0.5f
-        assertEquals(0.5f, gains.main, 0.05f)
-        assertEquals(0.5f, gains.sub, 0.05f)
+            // Advance 1 second (48000 samples)
+            val gains = mixer.advance(48000, 1L)
+            // With linear ramp, at 50% gains must be 0.5f
+            assertEquals(0.5f, gains.main, 0.05f)
+            assertEquals(0.5f, gains.sub, 0.05f)
+        } finally {
+            mixer.destroy()
+            manager.shutdown()
+        }
     }
 }

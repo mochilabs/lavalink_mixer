@@ -60,8 +60,10 @@ class BassSwapIntegrationTest {
         )
 
         val config = MixerConfig().apply { crossfadeMs = 2000L }
-        val mixer = GuildMixer(2001L, com.sedmelluq.discord.lavaplayer.player.DefaultAudioPlayerManager(), config, java.util.concurrent.Executor { })
-        mixer.setActiveRecipeForTest(recipe, startSample = 0L, endSample = totalSamples)
+        val manager = com.sedmelluq.discord.lavaplayer.player.DefaultAudioPlayerManager()
+        val mixer = GuildMixer(2001L, manager, config, java.util.concurrent.Executor { })
+        try {
+            mixer.setActiveRecipeForTest(recipe, startSample = 0L, endSample = totalSamples)
 
         // Mock downstream filter capturing mixed output
         var capturedSamples = 0
@@ -95,6 +97,10 @@ class BassSwapIntegrationTest {
             val delta = abs(output[i] - output[i - 1])
             assertTrue(delta < 0.25f, "sample-to-sample step at $i was $delta, must be smooth (< 0.25)")
         }
+        } finally {
+            mixer.destroy()
+            manager.shutdown()
+        }
     }
 
     @Test
@@ -114,8 +120,10 @@ class BassSwapIntegrationTest {
         )
 
         val config = MixerConfig().apply { crossfadeMs = 2000L }
-        val mixer = GuildMixer(2002L, com.sedmelluq.discord.lavaplayer.player.DefaultAudioPlayerManager(), config, java.util.concurrent.Executor { })
-        mixer.setActiveRecipeForTest(recipe, startSample = 0L, endSample = totalSamples)
+        val manager = com.sedmelluq.discord.lavaplayer.player.DefaultAudioPlayerManager()
+        val mixer = GuildMixer(2002L, manager, config, java.util.concurrent.Executor { })
+        try {
+            mixer.setActiveRecipeForTest(recipe, startSample = 0L, endSample = totalSamples)
 
         // Feed 60Hz pure sine wave to sub-siphon
         val subSine = FloatArray(totalSamples.toInt()) { i ->
@@ -149,6 +157,10 @@ class BassSwapIntegrationTest {
         val postRms = kotlin.math.sqrt(postSwapSamples.map { it * it }.average()).toFloat()
 
         assertTrue(preRms < 0.20f, "pre-swap sub-bass must be attenuated when bass is muted (got $preRms)")
-        assertTrue(postRms > 0.55f, "post-swap sub-bass must pass when bass is unmuted (got $postRms)")
+            assertTrue(postRms > 0.55f, "post-swap sub-bass must pass when bass is unmuted (got $postRms)")
+        } finally {
+            mixer.destroy()
+            manager.shutdown()
+        }
     }
 }

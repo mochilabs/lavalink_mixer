@@ -118,7 +118,7 @@ object AdaptiveTransitionPlanner {
                             val cutBar = (fadeBeats / 4).coerceAtLeast(1)
                             val fadeMs = round(fadeBeats * periodMs).toLong()
                             val fadeSamples = Math.round(fadeBeats * periodSamples)
-                            val window = syncWindow(outGrid, inGrid, fadeMs, recoveryMs, contentEndMs, incomingLeadMs, incomingDurationMs, rateRatio)
+                            val window = syncWindow(outGrid, inGrid, fadeMs, recoveryMs, contentEndMs, incomingLeadMs, incomingDurationMs, rateRatio, snapToDownbeat = true)
                                 ?: return beatmatchBlendOrFallback(outGrid, inGrid, requestedCrossfadeMs, contentEndMs, incomingLeadMs, incomingDurationMs, rateRatio)
                             val totalSamples = fadeSamples + recoverySamples
                             val swapSample = Math.round(cutBar * 4 * periodSamples)
@@ -188,7 +188,26 @@ object AdaptiveTransitionPlanner {
                         )
                         if (chosenAsync == TransitionStrategy.DOWNBEAT_CUT) {
                             val totalSamples = 480L // 10ms quick cut
-                            return nonSyncWindowRecipe(TransitionStrategy.DOWNBEAT_CUT, totalSamples, contentEndMs, 1.0f, 0L, reason = "tempo_diff_exceeded")
+                            val outBarMs = outGrid.periodMs * 4.0
+                            val kBar = floor((contentEndMs - outGrid.downbeatMs) / outBarMs).toLong()
+                            val snappedCutMs = (outGrid.downbeatMs + round(kBar * outBarMs).toLong()).coerceIn(10L, contentEndMs)
+                            val inBarMs = inGrid.periodMs * 4.0
+                            val leadMs = incomingLeadMs.coerceAtLeast(0L)
+                            val mBar = if (leadMs <= inGrid.downbeatMs) 0L else ceil((leadMs - inGrid.downbeatMs) / inBarMs).toLong()
+                            val inDownbeatMs = (inGrid.downbeatMs + round(mBar * inBarMs).toLong()).coerceAtLeast(0L)
+                            log.debug(
+                                "planner async downbeat_cut guild={} cutMs={} inStartMs={}",
+                                guildId, snappedCutMs, inDownbeatMs,
+                            )
+                            return nonSyncWindowRecipe(
+                                TransitionStrategy.DOWNBEAT_CUT,
+                                totalSamples,
+                                snappedCutMs,
+                                1.0f,
+                                0L,
+                                incomingStartSample = inDownbeatMs * SAMPLE_RATE / 1000L,
+                                reason = "tempo_diff_exceeded",
+                            )
                         }
                     }
                 }
@@ -198,6 +217,10 @@ object AdaptiveTransitionPlanner {
             val delayBeats = if (outGrid.bpm >= 125f) 0.5f else 1.0f
             val delaySamples = Math.round(delayBeats * (SAMPLE_RATE * 60.0 / outGrid.bpm.toDouble())).toInt().coerceIn(1, 95999)
             val totalSamples = 96000L // 2.0s
+            log.debug(
+                "planner async echo_out guild={} bpmOut={} delaySamples={}",
+                guildId, outGrid.bpm, delaySamples,
+            )
             return TransitionRecipe(
                 strategy = TransitionStrategy.ECHO_OUT,
                 totalSamples = totalSamples,
@@ -225,6 +248,7 @@ object AdaptiveTransitionPlanner {
         if (outgoingFeaturesTail != null && incomingFeaturesHead != null &&
             outgoingFeaturesTail.unknownReason == null && incomingFeaturesHead.unknownReason == null) {
             val totalSamples = minOf(requestedCrossfadeMs, 4000L) * SAMPLE_RATE / 1000L
+            log.debug("planner level1 degraded_filter_sweep guild={} totalSamples={}", guildId, totalSamples)
             return TransitionRecipe(
                 strategy = TransitionStrategy.DEGRADED_FILTER_SWEEP,
                 totalSamples = totalSamples,
@@ -244,6 +268,7 @@ object AdaptiveTransitionPlanner {
 
         // Level 2: Absolute safe fallback
         val totalSamples = 5000L * SAMPLE_RATE / 1000L
+        log.debug("planner level2 absolute_fallback guild={} totalSamples={}", guildId, totalSamples)
         return TransitionRecipe(
             strategy = TransitionStrategy.ABSOLUTE_FALLBACK,
             totalSamples = totalSamples,
@@ -287,17 +312,26 @@ object AdaptiveTransitionPlanner {
         incomingLeadMs: Long,
         incomingDurationMs: Long,
         rateRatio: Float,
+        snapToDownbeat: Boolean = false,
     ): SyncWindow? {
-        val outPeriod = outgoing.periodMs
-        val k = floor((contentEndMs - outgoing.phaseMs) / outPeriod).toLong()
-        val snappedHandoffMs = (outgoing.phaseMs + round(k * outPeriod).toLong()).coerceIn(fadeMs + recoveryMs, contentEndMs)
+        val outStep = if (snapToDownbeat) outgoing.periodMs * 4.0 else outgoing.periodMs
+        val outAnchor = if (snapToDownbeat) outgoing.downbeatMs else outgoing.phaseMs
+        val k = floor((contentEndMs - outAnchor) / outStep).toLong()
+        val candidateHandoffMs = outAnchor + round(k * outStep).toLong()
+        val snappedHandoffMs = if (candidateHandoffMs >= fadeMs + recoveryMs) {
+            candidateHandoffMs.coerceIn(fadeMs + recoveryMs, contentEndMs)
+        } else {
+            val kBeat = floor((contentEndMs - outgoing.phaseMs) / outgoing.periodMs).toLong()
+            (outgoing.phaseMs + round(kBeat * outgoing.periodMs).toLong()).coerceIn(fadeMs + recoveryMs, contentEndMs)
+        }
         val startMs = (snappedHandoffMs - fadeMs - recoveryMs).coerceAtLeast(0L)
         val handoffMs = startMs + fadeMs + recoveryMs
 
         val leadMs = incomingLeadMs.coerceAtLeast(0L)
-        val inPeriod = incoming.periodMs
-        val m = if (leadMs <= incoming.phaseMs) 0L else ceil((leadMs - incoming.phaseMs) / inPeriod).toLong()
-        val rawIncomingStartMs = (incoming.phaseMs + round(m * inPeriod).toLong()).coerceAtLeast(0L)
+        val inStep = if (snapToDownbeat) incoming.periodMs * 4.0 else incoming.periodMs
+        val inAnchor = if (snapToDownbeat) incoming.downbeatMs else incoming.phaseMs
+        val m = if (leadMs <= inAnchor) 0L else ceil((leadMs - inAnchor) / inStep).toLong()
+        val rawIncomingStartMs = (inAnchor + round(m * inStep).toLong()).coerceAtLeast(0L)
         if (incomingDurationMs > 0 && rawIncomingStartMs + fadeMs * rateRatio + recoveryMs * (rateRatio + 1f) / 2 >= incomingDurationMs - 500) {
             return null
         }
@@ -333,6 +367,7 @@ object AdaptiveTransitionPlanner {
         contentEndMs: Long,
         rateRatio: Float,
         recoverySamples: Long,
+        incomingStartSample: Long = 0L,
         reason: String = strategy.name.lowercase(),
     ): TransitionRecipe {
         val fadeSamples = (totalSamples - recoverySamples).coerceAtLeast(0L)
@@ -346,6 +381,7 @@ object AdaptiveTransitionPlanner {
                 rateRatio = rateRatio,
                 startSample = startSample,
                 handoffSample = contentEndMs * SAMPLE_RATE / 1000L,
+                incomingStartSample = incomingStartSample,
                 recoverySamples = recoverySamples,
             ),
             automations = listOf(

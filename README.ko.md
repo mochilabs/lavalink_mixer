@@ -30,6 +30,7 @@ Lavalink 소스를 수정할 필요가 없습니다. 분석은 별도 디코더�
 - [빌드 및 테스트 가이드](docs/development.md)
 - [BPM 검출기 설계](docs/bpm-detector-design.md)와 [BPM 캘리브레이션](docs/bpm-calibration.md)
 - [BPM 추출 알고리즘 해설](docs/bpm-extraction.ko.md)
+- [적응형 전환 캘리브레이션](docs/adaptive-calibration.md)
 
 ## 빠른 시작
 

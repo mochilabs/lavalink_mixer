@@ -30,6 +30,7 @@ The plugin requires no Lavalink source changes. Analysis runs in Kotlin/JVM on a
 - [Build and testing guide](docs/development.md)
 - [BPM detector design](docs/bpm-detector-design.md) and [BPM calibration](docs/bpm-calibration.md)
 - [BPM extraction algorithm explained in Korean](docs/bpm-extraction.ko.md)
+- [Adaptive transition calibration](docs/adaptive-calibration.md)
 
 ## Quickstart
 

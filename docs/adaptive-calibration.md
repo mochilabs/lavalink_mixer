@@ -68,33 +68,52 @@ command exits nonzero after processing the other pairs. Unknown rhythm or key
 on a successfully decoded track is a valid measurement, not a decoder failure.
 Text report cells escape backslashes, tabs, carriage returns, and newlines.
 
-The planner can choose:
+The report's `strategy` column is one of the planner's seven strategies, with
+the wire label in `transition_kind`:
 
-- **Preserve:** retain a requested original boundary or disabled overlap.
-- **SilenceTrim:** remove measured boundary silence without beat matching.
-- **ShortCrossfade:** use a bounded overlap when features are missing, rhythm is
-  uncertain, energy differs strongly, confident keys clash, or beat matching fails.
-- **BeatMatched:** use compatible local beat grids, followed by tempo recovery
-  when necessary. A beat is not a musical downbeat.
+- **PHRASE_MATCHED_BASS_SWAP** and **SHORT_BASS_SWAP** (`beat_matched`): compatible
+  tempos with confident downbeats (and phrases for the first). The bass is swapped
+  at the fade midpoint.
+- **BEATMATCHED_BLEND** (`beat_matched`): compatible tempos, but bar boundaries are
+  uncertain or the meter is not 4/4. A 2-, 4-, or 8-beat phase-snapped fade.
+- **DOWNBEAT_CUT** (`crossfade`): tempos too far apart, both downbeats confident,
+  both sides energetic. A 10 ms cut on a bar line.
+- **ECHO_OUT** (`crossfade`): tempos too far apart otherwise. A delayed echo of the
+  outgoing track, up to two seconds.
+- **DEGRADED_FILTER_SWEEP** (`crossfade`): no usable grid, but valid features.
+- **ABSOLUTE_FALLBACK** (`short_crossfade`): no usable metadata, or no 2-, 4-, 8-, or
+  16-beat fade fits the requested length (`fade_window_too_short`). It keeps the
+  requested length, bounded by the outgoing content.
 
-The feature analyzer uses 20 ms energy bins, at most eight boundary candidates,
-and at most 48 Hann-windowed Goertzel chroma measurements over C3–B5. Candidate
-comparison retains the original endpoint/start pair and penalizes skipped content;
-alternatives can move each boundary at most two seconds beyond the baseline
-(before the outgoing end or after the incoming trim). It weighs boundary energy,
-beat phase proximity, skipped time, and tempo cost. The local grid gives the same
-tempo cost to each boundary candidate; it is not a tempo map. This analysis has
-no vocal, verse, chorus, or downbeat recognition.
+A pair marked `preserve_context=true` reports `reason=preserve_context` and
+`transition_kind=preserve`. `start_ms` and `handoff_ms` then equal the outgoing
+duration, and no overlap columns are filled.
+
+Downbeat and phrase confidence are in `out_/in_downbeat_confidence` and
+`out_/in_phrase_confidence`. When only one end of a track had a measurable pulse,
+the other end carries a projected tempo with both confidences at 0, which keeps it
+out of the bass-swap and downbeat-cut strategies. Check these columns before
+trusting a strategy that depends on them.
+
+The runner calls the planner without a guild or transition memory, so the report
+shows the planner's own choice and not a varied one. It requests a 5000 ms
+transition and uses the full file duration as the outgoing content end, because
+silence analysis is off.
+
+The feature analyzer uses 20 ms energy bins and at most 48 Hann-windowed Goertzel
+chroma measurements over C3–B5. It has no vocal, verse, or chorus recognition.
+Downbeat and phrase detection are heuristics over the same local windows.
 
 Current conservative gates include RMS below 0.008, energy ratios above 3.16,
 rhythmic stability below 0.45, and key confidence at least 0.6 before rejecting a
-key clash. Unknown keys do not establish compatibility and do not alone prevent
+key clash. The tempo deadband is derived from `maxTempoChange` and the grids'
+confidence. Unknown keys do not establish compatibility and do not alone prevent
 rhythm matching. These values have not been fitted or validated on a real corpus.
 
 ## Review and tune
 
-Use one subset of pairs to inspect false beat approvals, unnecessary short fades,
-missed silence, and cuts into audible material. Review ambiguous keys separately
+Use one subset of pairs to inspect false beat approvals, wrong bass-swap or
+downbeat-cut choices, unnecessary short fades, and cuts into audible material. Review ambiguous keys separately
 from confident incorrect keys. Record reference beat offsets and half/double-tempo
 mistakes for both local windows. Include the plugin revision, scan setting, and
 reference notes with every report.

@@ -229,12 +229,12 @@ internal class TrackAnalysisService(
                     }
                 } else if (measuredTail == null && measuredHead != null) {
                     val remeasured = measureNear(tailFrames, tailStartMs, measuredHead)
-                    if (remeasured != null) {
-                        featuresTail = TransitionFeatureAnalyzer.analyze(tailFrames, tailStartMs, remeasured)
-                        bpmTail = mergePhraseConfidence(remeasured, featuresTail)
-                    } else {
-                        // Head positions extrapolate onto the tail; the planner snaps by whole periods.
-                        bpmTail = projectTempoOnly(measuredHead, measuredHead.phaseSample, measuredHead.downbeatSample)
+                    // Head positions extrapolate onto the tail; the planner snaps by whole periods.
+                    val tail = remeasured ?: projectTempoOnly(measuredHead, measuredHead.phaseSample, measuredHead.downbeatSample)
+                    bpmTail = tail
+                    if (tailFrames.isNotEmpty()) {
+                        featuresTail = TransitionFeatureAnalyzer.analyze(tailFrames, tailStartMs, tail)
+                        if (remeasured != null) bpmTail = mergePhraseConfidence(tail, featuresTail)
                     }
                 }
             }

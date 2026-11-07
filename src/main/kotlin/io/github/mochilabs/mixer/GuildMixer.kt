@@ -1208,7 +1208,7 @@ class GuildMixer(
             preserveContext = protocol.preserveTransition,
             guildId = guildId,
             memory = TransitionMemory.global,
-            trackPairSeed = (outId to inId).hashCode(),
+            trackPairSeed = 31 * (outId?.hashCode() ?: 0) + (inId?.hashCode() ?: 0),
         )
         plannedRecipe = recipe
         transitionStatus = TransitionStatus(AdaptiveTransitionPlanner.legacyKind(recipe.strategy), recipe.reason)

@@ -29,6 +29,19 @@ class CircularDelayBuffer(val capacity: Int = 96000) {
         writeHead = pos
     }
 
+    /** Copies the most recent [length] written frames into [outL]/[outR], oldest first. */
+    fun copyRecent(outL: FloatArray, outR: FloatArray, length: Int) {
+        val n = length.coerceIn(0, capacity)
+        var pos = writeHead - n
+        if (pos < 0) pos += capacity
+        for (i in 0 until n) {
+            outL[i] = bufferL[pos]
+            outR[i] = bufferR[pos]
+            pos++
+            if (pos >= capacity) pos = 0
+        }
+    }
+
     fun readAndMix(
         delaySamples: Int,
         feedback: Float,

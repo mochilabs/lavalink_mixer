@@ -52,20 +52,32 @@ class TransitionMemoryTest {
     }
 
     @Test
-    fun `rank is deterministic for a given trackPairSeed and breaks close ties consistently`() {
+    fun `track pair seed never overrides a clear planner preference`() {
         val memory = TransitionMemory(historySize = 5)
-        val guildId = 4003L
-        memory.record(guildId, TransitionStrategy.PHRASE_MATCHED_BASS_SWAP)
-        memory.record(guildId, TransitionStrategy.SHORT_BASS_SWAP)
-
         val candidates = listOf(
             TransitionStrategy.PHRASE_MATCHED_BASS_SWAP to 1.0f,
             TransitionStrategy.SHORT_BASS_SWAP to 0.85f,
-            TransitionStrategy.BEATMATCHED_BLEND to 0.42f,
+            TransitionStrategy.BEATMATCHED_BLEND to 0.70f,
         )
-        val seed = ("trackA" to "trackB").hashCode()
-        val pick1 = memory.rank(guildId, candidates, seed)
-        val pick2 = memory.rank(guildId, candidates, seed)
-        assertEquals(pick1, pick2)
+        for (seed in 1..500) {
+            assertEquals(TransitionStrategy.PHRASE_MATCHED_BASS_SWAP, memory.rank(4003L, candidates, seed), "seed=$seed")
+        }
+    }
+
+    @Test
+    fun `track pair seed resolves near ties differently across track pairs`() {
+        val memory = TransitionMemory(historySize = 5)
+        val guildId = 4004L
+        // PHRASE used three transitions ago: 1.0 * 0.75 = 0.75 vs SHORT 0.78, a near tie.
+        memory.record(guildId, TransitionStrategy.PHRASE_MATCHED_BASS_SWAP)
+        memory.record(guildId, TransitionStrategy.ECHO_OUT)
+        memory.record(guildId, TransitionStrategy.DOWNBEAT_CUT)
+        val candidates = listOf(
+            TransitionStrategy.PHRASE_MATCHED_BASS_SWAP to 1.0f,
+            TransitionStrategy.SHORT_BASS_SWAP to 0.78f,
+        )
+        assertEquals(TransitionStrategy.SHORT_BASS_SWAP, memory.rank(guildId, candidates, 0))
+        val picks = (1..200).map { memory.rank(guildId, candidates, ("out-$it" to "in-$it").hashCode()) }.toSet()
+        assertEquals(setOf(TransitionStrategy.PHRASE_MATCHED_BASS_SWAP, TransitionStrategy.SHORT_BASS_SWAP), picks)
     }
 }

@@ -64,4 +64,19 @@ class CircularDelayBufferTest {
         )
         assertEquals(0.0f, b3L[0], 1e-4f, "termination gain 0.0 must force output to 0.0")
     }
+
+    @Test
+    fun `copyRecent returns the latest frames oldest first across the wrap point`() {
+        val buffer = CircularDelayBuffer(capacity = 8)
+        val left = FloatArray(11) { it.toFloat() }
+        val right = FloatArray(11) { -it.toFloat() }
+        buffer.write(left, right, 0, 11) // write head wraps past capacity
+
+        val outL = FloatArray(5)
+        val outR = FloatArray(5)
+        buffer.copyRecent(outL, outR, 5)
+
+        assertTrue(floatArrayOf(6f, 7f, 8f, 9f, 10f).contentEquals(outL), "got ${outL.toList()}")
+        assertTrue(floatArrayOf(-6f, -7f, -8f, -9f, -10f).contentEquals(outR), "got ${outR.toList()}")
+    }
 }

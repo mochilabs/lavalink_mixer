@@ -417,10 +417,12 @@ across an uncertainty-margin multi-level decision waterfall:
 - **Level 2 (Absolute Fallback):** When all metadata is missing or on buffer underrun, safely converges to a 5-second `ABSOLUTE_FALLBACK` Equal-Power crossfade.
 
 In `MixerFilter`, real-time DSP automation runs with zero heap allocations during playback:
-- **Dual LR4 Crossover (`CrossoverLR4`):** Both outgoing and incoming stereo audio streams pass through matched 4th-order Linkwitz-Riley filters (16 biquads total) at 200Hz. This guarantees identical group delay across both tracks, eliminating comb filtering while allowing low-frequency bass swap with 15ms smoothing ramps.
+- **Dual LR4 Crossover (`CrossoverLR4`):** Both outgoing and incoming stereo audio streams pass through matched 4th-order Linkwitz-Riley filters (16 biquads total) at 200Hz. This guarantees identical group delay across both tracks, eliminating comb filtering while allowing low-frequency bass swap with 15ms smoothing ramps. When a recipe activates, the outgoing crossover is reset and pre-rolled with the last 100ms of main PCM from the delay buffer, so the first transition chunk starts from settled filter state without per-chunk work during normal playback.
 - **High-Pass Filter Sweep (`PcmBiquadFilter`):** Executes `FilterCutoff` sweeps in place on the outgoing stream during degraded transitions.
 - **Circular Delay Buffer (`CircularDelayBuffer`):** Pre-allocated 96,000-sample stereo buffer (2.0s @ 48kHz, accommodating BPM 40) continuously banks incoming main audio and provides feedback delay with decay and linear fade-out termination on Echo Out triggers.
-- **Transition Memory (`TransitionMemory`):** Tracks the recent history of applied transition strategies per guild and applies multiplicative penalties to shift between viable candidates and prevent consecutive mechanical repetition.
+- **Transition Memory (`TransitionMemory`):** Tracks the recent history of applied transition strategies per guild and applies multiplicative penalties to shift between viable candidates and prevent consecutive mechanical repetition. `rank` adds a deterministic track-pair bonus below 0.10, so penalized near-ties resolve differently per track pair while a clear planner preference (score gap ≥ 0.15) always wins.
+
+When BPM analysis finds a grid at only one end of a track, `TrackAnalysisService` re-measures the other end on its already decoded frames within ±4% of the measured tempo. If that still fails, it projects tempo and beat phase only; downbeat and phrase confidence stay 0 because a downbeat extrapolated across the track can drift off the bar.
 
 `requestPreanalysis` retains the latest warmup while another scan is queued or
 active, and writes enabled silence, BPM, feature, and key caches. It never arms, promotes or changes

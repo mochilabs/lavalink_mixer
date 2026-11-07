@@ -194,15 +194,17 @@ internal class TrackAnalysisService(
                         }
                     }
                 }
+                var tailFrames: List<Array<FloatArray>> = emptyList()
+                var tailStartMs = 0L
                 if (seekable && duration > 0 && duration < Long.MAX_VALUE / 2) {
                     val contentEndMs = if (tail > 0) (duration - tail).coerceAtLeast(0L) else duration
-                    val tailStartMs = (contentEndMs - settings.bpmScanMs).coerceAtLeast(0L)
+                    tailStartMs = (contentEndMs - settings.bpmScanMs).coerceAtLeast(0L)
                     if (tailStartMs == 0L) {
                         bpmTail = bpmHead
                         featuresTail = featuresHead
                     } else {
                         // Collect +2000ms buffer to compensate for decoder seek imprecision and ensure full scan window
-                        val tailFrames = collectFrom(track, factory, tailStartMs, msToSamples(settings.bpmScanMs + 2000))
+                        tailFrames = collectFrom(track, factory, tailStartMs, msToSamples(settings.bpmScanMs + 2000))
                         if (tailFrames.isNotEmpty()) {
                             bpmTail = BpmDetector.analyzeExtendedGrid(tailFrames, sampleRate = SAMPLE_RATE, windowStartMs = tailStartMs)
                             featuresTail = TransitionFeatureAnalyzer.analyze(tailFrames, tailStartMs, bpmTail)
@@ -210,30 +212,30 @@ internal class TrackAnalysisService(
                         }
                     }
                 }
-                if (bpmHead == null && bpmTail != null && bpmTail.periodMs.isFinite() && bpmTail.periodMs > 0) {
-                    val periodMs = bpmTail.periodMs
-                    val headPhaseMs = Math.round(((bpmTail.phaseMs % periodMs) + periodMs) % periodMs).toLong()
-                    val periodSamples = bpmTail.periodSamples
-                    val barSamples = periodSamples * 4.0
-                    val projectedDownbeatSample = Math.round(((bpmTail.downbeatSample.toDouble() % barSamples) + barSamples) % barSamples)
-                    bpmHead = bpmTail.copy(
-                        phaseSample = Math.round(headPhaseMs.toDouble() * SAMPLE_RATE.toDouble() / 1000.0),
-                        bpmConfidence = bpmTail.bpmConfidence * 0.85f,
-                        downbeatSample = projectedDownbeatSample,
-                        downbeatConfidence = bpmTail.downbeatConfidence * 0.85f,
-                        phraseConfidence = bpmTail.phraseConfidence * 0.85f,
+                val measuredTail = bpmTail
+                val measuredHead = bpmHead
+                if (measuredHead == null && measuredTail != null && measuredTail.periodMs.isFinite() && measuredTail.periodMs > 0) {
+                    val remeasured = measureNear(headFrames, 0L, measuredTail)
+                    val head = remeasured ?: projectTempoOnly(
+                        measuredTail,
+                        phaseSample = floorMod(measuredTail.phaseSample.toDouble(), measuredTail.periodSamples),
+                        downbeatSample = floorMod(measuredTail.downbeatSample.toDouble(), measuredTail.periodSamples * 4.0),
                     )
-                    if (bpm == null) bpm = BpmDetector.BpmResult(bpmHead.bpm, headPhaseMs, bpmHead.bpmConfidence)
-                    if (featuresHead != null && headFrames.isNotEmpty()) {
-                        featuresHead = TransitionFeatureAnalyzer.analyze(headFrames, grid = bpmHead)
-                        bpmHead = mergePhraseConfidence(bpmHead, featuresHead)
+                    bpmHead = head
+                    if (bpm == null) bpm = BpmDetector.BpmResult(head.bpm, head.phaseMs, head.bpmConfidence)
+                    if (headFrames.isNotEmpty()) {
+                        featuresHead = TransitionFeatureAnalyzer.analyze(headFrames, grid = head)
+                        if (remeasured != null) bpmHead = mergePhraseConfidence(head, featuresHead)
                     }
-                } else if (bpmTail == null && bpmHead != null) {
-                    bpmTail = bpmHead.copy(
-                        bpmConfidence = bpmHead.bpmConfidence * 0.85f,
-                        downbeatConfidence = bpmHead.downbeatConfidence * 0.85f,
-                        phraseConfidence = bpmHead.phraseConfidence * 0.85f,
-                    )
+                } else if (measuredTail == null && measuredHead != null) {
+                    val remeasured = measureNear(tailFrames, tailStartMs, measuredHead)
+                    if (remeasured != null) {
+                        featuresTail = TransitionFeatureAnalyzer.analyze(tailFrames, tailStartMs, remeasured)
+                        bpmTail = mergePhraseConfidence(remeasured, featuresTail)
+                    } else {
+                        // Head positions extrapolate onto the tail; the planner snaps by whole periods.
+                        bpmTail = projectTempoOnly(measuredHead, measuredHead.phaseSample, measuredHead.downbeatSample)
+                    }
                 }
             }
             if (settings.key && key == null) {
@@ -265,6 +267,37 @@ internal class TrackAnalysisService(
         if (phrase <= 0f) return grid
         return grid.copy(phraseConfidence = phrase)
     }
+
+    /**
+     * Measures the missing end on the frames already decoded for it, searching only
+     * within [MISSING_END_BPM_BAND] of [reference]'s tempo. Null when nothing is held
+     * or the window still has no usable pulse.
+     */
+    private fun measureNear(frames: List<Array<FloatArray>>, windowStartMs: Long, reference: ExtendedBeatGrid): ExtendedBeatGrid? {
+        if (frames.isEmpty()) return null
+        return BpmDetector.analyzeExtendedGrid(
+            frames,
+            sampleRate = SAMPLE_RATE,
+            minBpm = reference.bpm * (1f - MISSING_END_BPM_BAND),
+            maxBpm = reference.bpm * (1f + MISSING_END_BPM_BAND),
+            windowStartMs = windowStartMs,
+        )
+    }
+
+    /**
+     * Tempo-only grid extrapolated from the other end. Beat phase may drift across the
+     * track, so downbeat and phrase stay unverified (0) and cannot pass the planner's
+     * bar-alignment gates.
+     */
+    private fun projectTempoOnly(reference: ExtendedBeatGrid, phaseSample: Long, downbeatSample: Long) = reference.copy(
+        phaseSample = phaseSample,
+        bpmConfidence = reference.bpmConfidence * 0.85f,
+        downbeatSample = downbeatSample,
+        downbeatConfidence = 0f,
+        phraseConfidence = 0f,
+    )
+
+    private fun floorMod(value: Double, modulus: Double): Long = Math.round(((value % modulus) + modulus) % modulus)
 
     fun measureBaseline(track: AudioTrack): Float? {
         val factory = ensureAnalysisPlayer().second
@@ -625,6 +658,8 @@ internal class TrackAnalysisService(
     private companion object {
         private val log = LoggerFactory.getLogger(TrackAnalysisService::class.java)
         private const val SAMPLE_RATE = 48000
+        /** Relative tempo band searched when re-measuring a missing head/tail grid. */
+        private const val MISSING_END_BPM_BAND = 0.04f
         private const val SCAN_TIMEOUT_MS = 45_000L
         private const val LOUDNESS_GRACE_MS = 5_000L
         private const val ANALYSIS_PUMP_BURST = 8

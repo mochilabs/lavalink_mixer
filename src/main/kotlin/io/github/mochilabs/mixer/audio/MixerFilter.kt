@@ -64,6 +64,8 @@ class MixerFilter(
     private val sweepFilterL = PcmBiquadFilter()
     private val sweepFilterR = PcmBiquadFilter()
     private var lastRecipe: TransitionRecipe? = null
+    // Allocated once: the last ~100ms of main PCM replayed through crossoverMain at recipe activation.
+    private val preRollFrames = arrayOf(FloatArray(PRE_ROLL_SAMPLES), FloatArray(PRE_ROLL_SAMPLES))
 
     override fun process(input: Array<FloatArray>, offset: Int, length: Int) {
         if (length <= 0) return
@@ -117,6 +119,11 @@ class MixerFilter(
         if (recipe !== lastRecipe) {
             lastRecipe = recipe
             if (recipe != null) {
+                // echoBuffer still holds main PCM up to the previous chunk (this chunk is written below),
+                // so replaying its tail leaves the crossover state continuous with this chunk.
+                crossoverMain.reset()
+                echoBuffer.copyRecent(preRollFrames[0], preRollFrames[1], PRE_ROLL_SAMPLES)
+                crossoverMain.preRoll(preRollFrames, PRE_ROLL_SAMPLES)
                 crossoverSub.reset()
                 sweepFilterL.reset()
                 sweepFilterR.reset()
@@ -124,9 +131,6 @@ class MixerFilter(
                     "mixer filter activated recipe strategy={} totalSamples={} on guild {}",
                     recipe.strategy, recipe.totalSamples, guildId,
                 )
-            } else {
-                crossoverMain.reset()
-                crossoverSub.reset()
             }
         }
         val isRecipeActive = (recipe != null)
@@ -137,9 +141,6 @@ class MixerFilter(
         if (!hasEcho) {
             val inR = if (input.size > 1) input[1] else input[0]
             echoBuffer.write(input[0], inR, offset, length)
-        }
-        if (!isRecipeActive) {
-            crossoverMain.preRoll(input, length, offset)
         }
         if (isRecipeActive) {
             val mainCutoffHz = recipe.filterCutoffAt(TrackTarget.OUTGOING, currentSample)
@@ -370,6 +371,9 @@ class MixerFilter(
         private val log = LoggerFactory.getLogger(MixerFilter::class.java)
 
         private val FILTER_SEQ = java.util.concurrent.atomic.AtomicLong(0L)
+
+        /** 100ms at 48kHz: enough for the 200Hz LR4 crossover state to settle. */
+        private const val PRE_ROLL_SAMPLES = 4800
 
         /** Knee start; audio below this passes through bit-identically. */
         private const val SOFT_LIMIT_THRESHOLD: Float = 0.9f

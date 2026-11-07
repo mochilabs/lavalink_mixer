@@ -45,24 +45,35 @@ class TransitionMemory(val historySize: Int = 5) {
     }
 
     /**
-     * Ranks viable `(strategy, baseScore)` candidates using guild repetition weights
-     * and a deterministic [trackPairSeed] jitter when [trackPairSeed] is non-zero.
+     * Picks the best `(strategy, baseScore)` candidate after repetition penalties.
+     *
+     * A non-zero [trackPairSeed] adds a deterministic bonus in `[0, SEED_JITTER)` per
+     * strategy, so candidates whose penalized scores lie closer than [SEED_JITTER]
+     * resolve differently for different track pairs. Planner base scores differ by at
+     * least 0.15, so without history the seed never overrides the primary choice.
      */
     fun rank(
-        guildId: Long?,
+        guildId: Long,
         candidates: List<Pair<TransitionStrategy, Float>>,
         trackPairSeed: Int = 0,
     ): TransitionStrategy {
         val primary = candidates.first().first
-        if (guildId == null || candidates.size <= 1) return primary
+        if (candidates.size <= 1) return primary
         return candidates.maxByOrNull { (strategy, baseScore) ->
-            val weight = repetitionWeight(guildId, strategy)
-            val jitter = if (trackPairSeed != 0 && weight < 1.0f) {
-                val mixed = (trackPairSeed xor (strategy.ordinal * 0x45d9f3b)) and 0x7fffffff
-                (mixed.toFloat() / Int.MAX_VALUE.toFloat()) * 0.04f
-            } else 0f
-            baseScore * weight + jitter
+            baseScore * repetitionWeight(guildId, strategy) + seedJitter(trackPairSeed, strategy)
         }?.first ?: primary
+    }
+
+    private fun seedJitter(seed: Int, strategy: TransitionStrategy): Float {
+        if (seed == 0) return 0f
+        // lowbias32 finalizer: spreads adjacent seeds and ordinals across the full range.
+        var h = seed xor ((strategy.ordinal + 1) * -0x61c88647)
+        h = h xor (h ushr 16)
+        h *= 0x7feb352d
+        h = h xor (h ushr 15)
+        h *= 0x846ca68b.toInt()
+        h = h xor (h ushr 16)
+        return (h ushr 8).toFloat() / (1 shl 24).toFloat() * SEED_JITTER
     }
 
     fun clear(guildId: Long) {
@@ -70,6 +81,8 @@ class TransitionMemory(val historySize: Int = 5) {
     }
 
     companion object {
+        /** Upper bound of the track-pair tie-break bonus; below the 0.15 planner score gap. */
+        const val SEED_JITTER = 0.10f
         val global = TransitionMemory()
     }
 }

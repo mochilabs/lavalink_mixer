@@ -13,6 +13,13 @@ class MixerConfig {
     var duckLevel: Float = 0.2f
     var duckFadeMs: Long = 300
     var maskMs: Long = 80
+    /**
+     * Minimum outgoing audio left after a crossfade handoff when the incoming
+     * track is remote. That already-mixed audio covers the time the incoming
+     * clone needs to open and seek; 0 keeps the full window and accepts a
+     * gap on slow sources.
+     */
+    var handoffBridgeMs: Long = 1500
 
     // Volume normalization is opt-in: every preloaded track is decoded once
     // more for loudness analysis, which costs CPU/bandwidth.

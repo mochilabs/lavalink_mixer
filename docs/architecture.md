@@ -189,6 +189,33 @@ Secondary reads use output coordinates to account for bounded queue overflow.
 Discarded source progress contributes to the handoff seek, but not to the audible
 secondary sample counter. Underflow zero-fills without inventing source progress.
 
+The main chain runs up to `frameBufferDuration` ahead of playback, so at the
+handoff the outgoing executor's frame buffer still holds finished output: the
+incoming track at full gain, mixed past the handoff point. `startTrack` stops
+that executor, and the clone needs as long as its source takes to open and seek
+before it produces a frame. On a remote source that time was heard as a gap.
+`HandoffBridge` covers it. The plugin wraps Lavaplayer's frame-buffer factory;
+without a pending bridge the wrapper only delegates. `doHandoff` freezes a
+per-chunk map from main chain samples to consumed incoming source position
+(`HandoffSourceMap`) before it changes any gains, then starts the clone with the
+outgoing buffer armed on a thread-local. Inside `startTrack`, the wrapped factory
+drains the outgoing frames mixed before the freeze, maps where they end to an
+incoming source position, sets that as the clone's initial seek, and returns a
+`BridgingFrameBuffer` that plays those frames first, retimed into the clone's
+coordinates. The prefix survives the clone's own initial seek clear; after the
+clone delivers a frame, any later clear or seek drops it. A bridged handoff skips
+the mask ramp. Without a bridge (unseekable clone, no local outgoing buffer,
+nothing buffered) the handoff seeks to the consumed source position and masks
+as before.
+
+The bridge only exists if the outgoing decoder was still mixing after the
+handoff point. A crossfade that ends at the physical file end leaves nothing
+buffered, so when the incoming track is not a local file, planning ends the
+window at least `handoffBridgeMs` (default 1500) before the outgoing duration.
+Frame timecodes count samples after the main filter chain. A downstream filter
+that changes the sample rate, such as Lavalink's timescale, shifts the mapping
+and can misplace the seam by a few tens of milliseconds.
+
 Player end, stuck, and exception callbacks run while Lavaplayer holds its
 `trackSwitchLock`. They enqueue recovery on the guild's protocol action executor.
 Recovery acquires `playerMutationLock` there and rechecks player identity, epoch,

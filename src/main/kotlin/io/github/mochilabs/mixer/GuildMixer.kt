@@ -6,6 +6,9 @@ import com.sedmelluq.discord.lavaplayer.player.AudioPlayerManager
 import com.sedmelluq.discord.lavaplayer.player.event.AudioEventAdapter
 import com.sedmelluq.discord.lavaplayer.track.AudioTrack
 import com.sedmelluq.discord.lavaplayer.track.AudioTrackEndReason
+import com.sedmelluq.discord.lavaplayer.format.AudioDataFormat
+import com.sedmelluq.discord.lavaplayer.track.playback.AudioFrame
+import com.sedmelluq.discord.lavaplayer.track.playback.ImmutableAudioFrame
 import com.sedmelluq.discord.lavaplayer.track.playback.MutableAudioFrame
 import dev.arbjerg.lavalink.api.IPlayer
 import kotlinx.serialization.json.JsonObjectBuilder
@@ -53,6 +56,7 @@ class GuildMixer(
     @Volatile var duckLevel: Float = config.duckLevel
     @Volatile var duckFadeMs: Long = config.duckFadeMs
     @Volatile var maskMs: Long = config.maskMs
+    @Volatile var handoffBridgeMs: Long = config.handoffBridgeMs
     @Volatile var maxParallelOverlays: Int = config.maxParallelOverlays.coerceIn(1, 16)
 
     @Volatile var normalizationEnabled: Boolean = config.normalizationEnabled
@@ -336,6 +340,8 @@ class GuildMixer(
     /** Position within [subTrack] that has reached the audible output. */
     private val subOutputSamples = AtomicLong(0L)
     private val subSourceMilliSamples = AtomicLong(0L)
+    /** Per-chunk incoming source position, so a handoff can bridge already-mixed output. */
+    private val handoffSourceMap = HandoffSourceMap()
     @Volatile private var xfadeBeatMatched: Boolean = false
     @Volatile private var xfadeFallbackReason: String? = null
     private var subStartPositionMs: Long = 0L
@@ -831,6 +837,7 @@ class GuildMixer(
         if (end < 0 || chunkStart < end) {
             subSourceMilliSamples.set(read.sourcePositionMilliSamples)
         }
+        if (read.outputSamples > 0) handoffSourceMap.record(chunkStart + samples, read.sourcePositionMilliSamples)
         return read.outputSamples
     }
 
@@ -1214,7 +1221,8 @@ class GuildMixer(
                     it > 0L && protocol.armedOutgoingTrack === track
                 }
                 val contentEnd = minOf(TrimTransition.contentEnd(duration, trail), requestedEnd ?: duration)
-                val plan = planCrossfadeLocked(track, readyNextTrack ?: pendingNextTrack, contentEnd)
+                val incomingTrack = readyNextTrack ?: pendingNextTrack
+                val plan = planCrossfadeLocked(track, incomingTrack, bridgeSafeEndLocked(contentEnd, duration, incomingTrack))
                 val silenceBeforeOverlap = !protocol.preserveTransition && silenceSkipEnabled && plan != null &&
                     tailCutter.isConfirmedBefore(plan.startMs, duration, tailConfirmMs, silenceTailScanMs)
                 if (!protocol.preserveTransition && silenceSkipEnabled &&
@@ -1288,6 +1296,25 @@ class GuildMixer(
             transitionStatus = TransitionStatus("crossfade", "timescale_native_failed")
         }
     }
+
+    /**
+     * Ends the crossfade early enough that the outgoing decoder is still
+     * running at the handoff: only output it mixes after the handoff point
+     * can bridge the clone's start (see [HandoffBridge]). A handoff at the
+     * physical file end leaves nothing buffered, and a remote incoming
+     * source is then heard as a gap while it opens. Local files open in
+     * microseconds and keep the full window.
+     */
+    private fun bridgeSafeEndLocked(contentEnd: Long, duration: Long, incoming: AudioTrack?): Long {
+        val headroom = handoffBridgeMs
+        if (headroom <= 0L || incoming == null || isLocalSource(incoming)) return contentEnd
+        val latest = duration - headroom
+        if (latest <= 0L) return contentEnd
+        return minOf(contentEnd, latest)
+    }
+
+    private fun isLocalSource(track: AudioTrack): Boolean =
+        try { track.sourceManager?.sourceName == "local" } catch (_: Exception) { false }
 
     private fun planCrossfadeLocked(
         outgoingTrack: AudioTrack,
@@ -1831,6 +1858,7 @@ class GuildMixer(
                 xfadeMainTrack = mainTrack()
                 subOutputSamples.set(0L)
                 subSourceMilliSamples.set(0L)
+                handoffSourceMap.reset()
                 subStartPositionMs = incomingStartPosition
                 subStartMs = System.currentTimeMillis()
                 xfadeTotal = msToSamples(plan.durationMs).coerceAtLeast(1)
@@ -1964,6 +1992,8 @@ class GuildMixer(
         val subReportedMs: Long,
         val subOutMs: Long,
         val droppedFrames: Long,
+        val subStartPositionMs: Long,
+        val sourceMap: HandoffSourceMap.Snapshot,
     )
 
     private fun doHandoff() {
@@ -2003,6 +2033,9 @@ class GuildMixer(
             // second caller replays the whole transition and throws away the
             // mask ramp it just armed.
             if (!xfadeActive) return@doHandoff
+            // Before anything below changes what the feeder mixes: output
+            // after this point is never bridged.
+            val sourceMap = handoffSourceMap.freeze()
             refreshBeatmatchStatusLocked()
             val wasBeatMatched = xfadeBeatMatched
             val fallbackReason = xfadeFallbackReason
@@ -2042,6 +2075,8 @@ class GuildMixer(
                         subReportedMs = safePosition(sub),
                         subOutMs = subOutMs,
                         droppedFrames = siphon.droppedFrames,
+                        subStartPositionMs = subStartPositionMs,
+                        sourceMap = sourceMap,
                     ),
                     epochAtStart,
                     seqAtStart,
@@ -2123,11 +2158,12 @@ class GuildMixer(
                 return
             }
             try {
-                mainPlayer.play(handoff.clone)
+                val bridge = playHandoffClone(mainPlayer, handoff)
                 log.debug(
                     "crossfade handoff on guild {} at {}ms (sub decoder was at {}ms, " +
-                        "{}ms of sub audio heard, {} frames dropped)",
-                    guildId, handoff.outputPosition, handoff.subReportedMs, handoff.subOutMs, handoff.droppedFrames,
+                        "{}ms of sub audio heard, {} frames dropped; {})",
+                    guildId, bridge.positionMs.takeIf { it >= 0 } ?: handoff.outputPosition,
+                    handoff.subReportedMs, handoff.subOutMs, handoff.droppedFrames, bridge.describe(),
                 )
                 notifyMixerEvent("overlapEnd") {
                     put("reason", "handoff")
@@ -2148,6 +2184,96 @@ class GuildMixer(
                 fallbackAdvanceOrIdle()
             }
         }
+    }
+
+    private class BridgeResult {
+        @Volatile var frames: Int = 0
+        @Volatile var bridgeMs: Long = 0L
+        @Volatile var positionMs: Long = -1L
+        @Volatile var skipped: String? = null
+
+        fun describe(): String =
+            skipped?.let { "no bridge: $it" } ?: "bridged ${bridgeMs}ms ($frames frames), clone starts at ${positionMs}ms"
+    }
+
+    /**
+     * Starts the handoff clone behind the outgoing track's already-mixed
+     * frames (see [HandoffBridge]). The clone starts where those frames end,
+     * so its open/seek latency is covered instead of heard as a gap. Falls
+     * back to a plain start at [Handoff.outputPosition] with the mask ramp.
+     */
+    private fun playHandoffClone(mainPlayer: IPlayer, handoff: Handoff): BridgeResult {
+        val result = BridgeResult()
+        val outgoingBuffer = HandoffBridge.bufferOf(mainPlayer.audioPlayer.playingTrack)
+        val sourceMap = handoff.sourceMap
+        result.skipped = when {
+            !handoff.clone.isSeekable -> "incoming track is not seekable"
+            outgoingBuffer == null -> "outgoing track has no local frame buffer"
+            sourceMap.chainEnds.isEmpty() -> "no mixed incoming audio recorded"
+            !HandoffBridge.install(playerManager.configuration) -> "frame buffer factory unavailable"
+            else -> null
+        }
+        if (result.skipped != null || outgoingBuffer == null) {
+            mainPlayer.play(handoff.clone)
+            return result
+        }
+        val startedAt = System.nanoTime()
+        // Cleared by the builder; stays set when Lavaplayer did not create the
+        // clone's buffer through the wrapped factory on this thread.
+        result.skipped = "clone buffer was not created through the bridge factory"
+        val builder = object : HandoffBridge.PrefixBuilder {
+            override fun build(format: AudioDataFormat): List<AudioFrame>? {
+                val frameMs = format.frameDuration().toLong()
+                val lastChainEndMs = sourceMap.lastChainEnd * 1000L / SAMPLE_RATE
+                val frames = HandoffBridge.drain(outgoingBuffer, lastChainEndMs - frameMs, format)
+                if (frames.isEmpty()) {
+                    result.skipped = "outgoing buffer held no mixed incoming audio"
+                    return null
+                }
+                val endMs = frames.last().timecode + frameMs
+                val source = sourceMap.sourceAt(endMs * SAMPLE_RATE / 1000L)
+                if (source == null) {
+                    result.skipped = "buffered audio ends outside the recorded source map"
+                    return null
+                }
+                val duration = handoff.clone.duration
+                val positionMs = (handoff.subStartPositionMs + source / 1000L * 1000L / SAMPLE_RATE).let {
+                    if (duration > 0) it.coerceIn(0L, duration) else it.coerceAtLeast(0L)
+                }
+                // Runs before the clone's executor exists: this becomes its initial seek.
+                handoff.clone.position = positionMs
+                // The seam is continuous; the mask ramp would only dip it.
+                mainGain.setNow(1f)
+                result.skipped = null
+                result.frames = frames.size
+                result.bridgeMs = frames.size * frameMs
+                result.positionMs = positionMs
+                return frames.map { ImmutableAudioFrame(positionMs - (endMs - it.timecode), it.data, it.volume, it.format) }
+            }
+
+            override fun onSourceStarted(startupMs: Long, prefixLeftFrames: Int) {
+                if (prefixLeftFrames > 0) {
+                    log.debug(
+                        "handoff clone on guild {} produced audio after {}ms with {}ms of bridge left",
+                        guildId, startupMs, prefixLeftFrames * 20L,
+                    )
+                } else {
+                    // The bridge ran dry before the clone produced audio: a gap was heard.
+                    log.info(
+                        "handoff clone on guild {} took {}ms to produce audio; the {}ms bridge left a ~{}ms gap",
+                        guildId, startupMs, result.bridgeMs, (startupMs - result.bridgeMs).coerceAtLeast(0L),
+                    )
+                }
+            }
+        }
+        HandoffBridge.withPrefix(builder) { mainPlayer.play(handoff.clone) }
+        if (result.skipped == null) {
+            log.debug(
+                "handoff bridge on guild {}: {}ms of mixed audio covers the clone's start (built in {}us)",
+                guildId, result.bridgeMs, (System.nanoTime() - startedAt) / 1000L,
+            )
+        }
+        return result
     }
 
     /** After an aborted/stale handoff, fall back to advancing the slot or idle. */

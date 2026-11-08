@@ -84,6 +84,7 @@ mixer:
   crossfadeEnabled: true
   crossfadeMs: 5000
   fadeInMs: 300
+  handoffBridgeMs: 1500
 
   # Announcement ducking and concurrency
   duckLevel: 0.2
@@ -118,6 +119,8 @@ mixer:
 Per-guild REST endpoints override the settings listed in the [API tables](#rest-api). Worker count, ducking-ramp duration, and the parallel-overlay limit have no dedicated REST setter. `analysisThreads` is clamped to 1–8, and `maxParallelOverlays` to 1–16.
 
 Crossfade defaults to enabled. Silence trimming, normalization, and BPM detection default to disabled because analysis requires extra decoding. Beat matching also defaults to disabled.
+
+When the incoming track is not a local file, a crossfade ends at least `handoffBridgeMs` before the outgoing track's end. The outgoing audio already mixed after that point plays while the incoming track reopens its stream at the handoff, so a slow source does not cut out. `0` keeps the full window and accepts a short gap on slow sources. It has no REST setter.
 
 ## Transitions and audio processing
 

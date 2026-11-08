@@ -43,6 +43,7 @@ Use these existing tests as starting points:
 | --- | --- |
 | Epochs, idempotency, reset, override | `GuildMixerProtocolTest` |
 | Stale transitions and handoff | `StaleXfadeAbortTest`, `CrossfadeMixIntegrationTest`, `XfadeVoicePathTest` |
+| Handoff output continuity on slow sources | `HandoffContinuityTest` (provided output, slow local HTTP server), `HandoffBridgeTest` |
 | Filter chain binding and reconnects | `MixerFilterExtensionTest`, `ChainDiagnosticTest`, `FeederArbitrationTest`, `FirstTrackIntegrationTest` |
 | PCM and gain behavior | `MixerFilterTest`, `GainRampTest`, `SiphonQueueTest` |
 | Transition callback locks and decoder readiness | `PlayerCallbackLockTest`, `OverlapPreparationTest`, `XfadeVoicePathTest` |

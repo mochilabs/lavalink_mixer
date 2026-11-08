@@ -1450,9 +1450,10 @@ class GuildMixer(
         duckLevel: Float,
         mode: AnnounceMode = AnnounceMode.SEQUENTIAL,
         channel: AnnounceChannel = AnnounceChannel.BOTH,
+        gain: Float = 1f,
     ): Pair<Long, Int> =
         synchronized(lock) {
-            announcementQueue.enqueue(identifier, encodedTrack, duckLevel, mode, channel)
+            announcementQueue.enqueue(identifier, encodedTrack, duckLevel, mode, channel, sanitizeAnnounceGain(gain))
         }
 
     fun takeNextAnnouncement(): AnnouncementItem? = synchronized(lock) {
@@ -1529,9 +1530,11 @@ class GuildMixer(
         announcementId: Long? = null,
         mode: AnnounceMode = AnnounceMode.SEQUENTIAL,
         channel: AnnounceChannel = AnnounceChannel.BOTH,
+        gain: Float = 1f,
     ): AudioTrack {
+        val level = sanitizeAnnounceGain(gain)
         if (mode == AnnounceMode.PARALLEL) {
-            startParallelOverlay(track, duck, announcementId, channel)
+            startParallelOverlay(track, duck, announcementId, channel, level)
             return track
         }
         val (sub, gen) = synchronized(lock) {
@@ -1550,7 +1553,7 @@ class GuildMixer(
             subNorm.setNow(1f)
             mainGain.rampTo(duck.coerceIn(0f, 1f), msToSamples(duckFadeMs))
             subGain.setNow(0f)
-            subGain.rampTo(1f, msToSamples(150))
+            subGain.rampTo(level, msToSamples(150))
             s to ++subGen
         }
         try {
@@ -1593,6 +1596,7 @@ class GuildMixer(
         duck: Float,
         announcementId: Long?,
         channel: AnnounceChannel = AnnounceChannel.BOTH,
+        level: Float = 1f,
     ) {
         val slot = synchronized(lock) {
             if (parallelOverlays.size >= maxParallelOverlays) {
@@ -1608,7 +1612,7 @@ class GuildMixer(
             s.track = track
             s.active = true
             s.ramp.setNow(0f)
-            s.ramp.rampTo(1f, msToSamples(150))
+            s.ramp.rampTo(level, msToSamples(150))
             publishParallelOverlaysLocked()
             // First parallel overlay (or a parallel overlay while music is
             // not otherwise ducked) ducks the music.
@@ -2817,6 +2821,10 @@ class GuildMixer(
         private const val SAMPLE_RATE = 48000
         /** The idle carrier outlives the last announcement by this long, bridging back-to-back requests and the audible tail. */
         internal const val IDLE_CARRIER_GRACE_MS = 1_000L
+        /** Per-announcement gain bound; non-finite or negative values fall back to unity/zero. */
+        internal const val MAX_ANNOUNCE_GAIN = 4f
+        internal fun sanitizeAnnounceGain(gain: Float): Float =
+            if (gain.isNaN()) 1f else gain.coerceIn(0f, MAX_ANNOUNCE_GAIN)
         /** Normalization gain changes from late loudness results glide over this span. */
         internal const val NORM_RAMP_MS = 1_000L
 

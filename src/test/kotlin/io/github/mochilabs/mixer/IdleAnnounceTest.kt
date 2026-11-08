@@ -171,6 +171,40 @@ class IdleAnnounceTest {
     }
 
     @Test
+    fun `announce gain scales the announcement level in sequential and parallel mode`() {
+        // Tone peak is 16000: 0.5 -> ~8000, 1.5 -> ~24000 (below the 0.9 soft-limit knee).
+        for ((guild, mode, gain, expected) in listOf(
+            Quad(78L, AnnounceMode.SEQUENTIAL, 0.5f, 8000),
+            Quad(79L, AnnounceMode.SEQUENTIAL, 1.5f, 24000),
+            Quad(80L, AnnounceMode.PARALLEL, 0.5f, 8000),
+            Quad(81L, AnnounceMode.PARALLEL, 1.5f, 24000),
+        )) {
+            withRig(guildId = guild) { rig ->
+                val file = toneFile("mixer-idle-gain", 440.0, 1)
+                try {
+                    rig.plugin.announce(guild, file.absolutePath, null, 0.2f, mode, AnnounceChannel.BOTH, gain)
+                    assertTrue(waitUntil(10_000) { rig.socket.messagesOfType("announceEnd").size == 1 }, "announcement did not finish ($mode, gain $gain)")
+                    val peak = rig.leftPeak.get()
+                    assertTrue(peak in (expected * 0.85).toInt()..(expected * 1.15).toInt(), "$mode gain $gain: peak $peak, expected ~$expected")
+                } finally {
+                    file.delete()
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `announce gain is bounded and non finite values fall back to unity`() {
+        assertEquals(1f, GuildMixer.sanitizeAnnounceGain(Float.NaN))
+        assertEquals(0f, GuildMixer.sanitizeAnnounceGain(-3f))
+        assertEquals(GuildMixer.MAX_ANNOUNCE_GAIN, GuildMixer.sanitizeAnnounceGain(100f))
+        assertEquals(GuildMixer.MAX_ANNOUNCE_GAIN, GuildMixer.sanitizeAnnounceGain(Float.POSITIVE_INFINITY))
+        assertEquals(1.7f, GuildMixer.sanitizeAnnounceGain(1.7f))
+    }
+
+    private data class Quad(val guild: Long, val mode: AnnounceMode, val gain: Float, val expected: Int)
+
+    @Test
     fun `the carrier can be encoded like any track Lavalink reports to the client`() {
         val manager = DefaultAudioPlayerManager()
         val out = java.io.ByteArrayOutputStream()

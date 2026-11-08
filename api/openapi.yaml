@@ -363,6 +363,11 @@ components:
         identifier: { type: [string, 'null'] }
         encodedTrack: { type: [string, 'null'] }
         duckLevel: { type: [number, 'null'], format: float }
+        gain:
+          type: [number, 'null']
+          format: float
+          default: 1.0
+          description: Linear gain for this announcement only, clamped to [0, 4]; omitted or null is 1.0. It does not change the music duck. Summed output above 0.9 full scale is soft-limited.
         mode:
           type: [string, 'null']
           examples: [sequential, parallel]

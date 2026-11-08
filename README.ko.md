@@ -245,7 +245,7 @@ Content-Type: application/json
 | `POST` | `/mixer/beatmatch` | `{ guildId, enabled, maxTempoChange?, minConfidence? }` |
 | `POST` | `/mixer/silence` | `{ guildId, enabled, thresholdDb?, minSoundMs?, headScanMs?, tailScanMs?, tailConfirmMs? }` |
 | `POST` | `/mixer/normalization` | `{ guildId, enabled, targetLufs? }` |
-| `POST` | `/mixer/announce` | `{ guildId, identifier?, encodedTrack?, duckLevel?, mode?, channel? }`, HTTP 202 |
+| `POST` | `/mixer/announce` | `{ guildId, identifier?, encodedTrack?, duckLevel?, gain?, mode?, channel? }`, HTTP 202 |
 | `POST` | `/mixer/announce/cancel` | `{ guildId }` |
 | `DELETE` | `/mixer/announce/queue?guildId=...` | 길드 ID 쿼리 |
 

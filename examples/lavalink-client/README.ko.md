@@ -385,10 +385,10 @@ POST /mixer/announce
 Authorization: <Lavalink password>
 Content-Type: application/json
 
-{"guildId":"123456789012345678","encodedTrack":"<announcement encoded track>","duckLevel":0.2,"mode":"parallel","channel":"both"}
+{"guildId":"123456789012345678","encodedTrack":"<announcement encoded track>","duckLevel":0.2,"gain":1.5,"mode":"parallel","channel":"both"}
 ```
 
-순차 모드는 기본이며 크로스페이드와 서브 플레이어를 공유합니다. 병렬 모드는 별도 플레이어를 사용하며 기본 동시 상한은 4개입니다. `channel`은 `both`, `left`, `right`를 지원합니다. TTS를 사용하려면 서버에서 해당 오디오를 해석할 소스를 별도로 구성합니다.
+순차 모드는 기본이며 크로스페이드와 서브 플레이어를 공유합니다. 병렬 모드는 별도 플레이어를 사용하며 기본 동시 상한은 4개입니다. `channel`은 `both`, `left`, `right`를 지원합니다. 선택 필드 `gain`(기본 1.0, 0~4로 제한)은 해당 공지의 음량만 키우거나 줄이며 음악 덕킹에는 영향이 없습니다. TTS를 사용하려면 서버에서 해당 오디오를 해석할 소스를 별도로 구성합니다.
 
 HTTP 202 응답의 `id`, `position`, `queueLength`는 접수 결과입니다. 실제 시작은 `announceStart`로 확인합니다. 병렬 이벤트의 `announcementId`를 보관해 개별 표시를 갱신합니다. 순차 `announceEnd`에는 이 ID가 없을 수 있습니다.
 

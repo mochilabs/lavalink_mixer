@@ -23,6 +23,7 @@ data class AnnouncementItem(
     val duckLevel: Float,
     val mode: AnnounceMode,
     val channel: AnnounceChannel = AnnounceChannel.BOTH,
+    val gain: Float = 1f,
 )
 
 enum class AnnounceMode { SEQUENTIAL, PARALLEL }
@@ -60,8 +61,9 @@ internal class AnnouncementQueue(
         duckLevel: Float,
         mode: AnnounceMode,
         channel: AnnounceChannel = AnnounceChannel.BOTH,
+        gain: Float = 1f,
     ): Pair<Long, Int> {
-        val item = AnnouncementItem(++seq, identifier, encodedTrack, duckLevel, mode, channel)
+        val item = AnnouncementItem(++seq, identifier, encodedTrack, duckLevel, mode, channel, gain)
         queue.addLast(item)
         log.info("queued announcement {} on guild {} (channel {}, {} waiting)", item.id, guildId, channel, queue.size)
         return item.id to queue.size

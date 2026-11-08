@@ -90,6 +90,8 @@ data class AnnounceRequest(
     val identifier: String? = null,
     val encodedTrack: String? = null,
     val duckLevel: Float? = null,
+    /** Linear gain applied to this announcement only (default 1.0, clamped to [0, 4]). Does not affect the music duck. */
+    val gain: Float? = null,
     /** `sequential` (default, plays after the current overlay finishes) or `parallel` (plays concurrently, up to maxParallelOverlays). */
     val mode: String? = null,
     /** Target stereo channel: `left` / `l`, `right` / `r`, or `both` / null (default). */
@@ -480,7 +482,7 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
             else -> throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Unknown announce mode '${body.mode}' (use 'sequential' or 'parallel')")
         }
         val channel = AnnounceChannel.from(body.channel)
-        val (id, position) = plugin.announce(guildId, body.identifier, body.encodedTrack, body.duckLevel, mode, channel)
+        val (id, position) = plugin.announce(guildId, body.identifier, body.encodedTrack, body.duckLevel, mode, channel, body.gain)
         return ResponseEntity.accepted().body(
             AnnounceQueuedResponse(
                 guildId = body.guildId,

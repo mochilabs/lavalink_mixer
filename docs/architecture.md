@@ -464,6 +464,12 @@ an item if the secondary player becomes busy. Parallel announcements own
 separate players, queues, and gain ramps. Their count defaults to four and
 is clamped to 1–16 per guild.
 
+Each announcement carries an optional `gain` (default 1.0, clamped to [0, 4] by
+`GuildMixer.sanitizeAnnounceGain`). It is the target of the overlay's own fade-in
+ramp (`subGain` for sequential, `OverlaySlot.ramp` for parallel) and is independent
+of the music duck on `mainGain`. Normalization stays unity for overlays.
+`MixerFilter.softLimit` still bounds the summed output.
+
 ### Announcements on an idle main player
 
 Lavaplayer runs the filter chain only while a track plays, and `MixerFilter` is the only place overlay PCM is mixed. With no main track the siphons are never read, so an announcement would stay silent and `overlayActive` would never clear. `GuildMixer.maintainIdleCarrier()` runs on the shared scheduler before `maybeStartAnnouncement` and covers this:

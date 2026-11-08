@@ -68,7 +68,7 @@ class GuildMixer(
                 subNorm.rampTo(1f, msToSamples(NORM_RAMP_MS))
                 return
             }
-            val playing = main?.audioPlayer?.playingTrack
+            val playing = mainTrack()
             if (playing != null) {
                 knownNormGainLocked(playing)?.let { mainNorm.rampTo(it, msToSamples(NORM_RAMP_MS)) }
                 val id = idOf(playing)
@@ -115,7 +115,7 @@ class GuildMixer(
         val playing = synchronized(lock) {
             keyDetectionEnabled = enabled
             scanMs?.let { keyScanMs = it.coerceIn(5000, 60000) }
-            if (enabled) main?.audioPlayer?.playingTrack else null
+            if (enabled) mainTrack() else null
         }
         playing?.let { track ->
             runCatching { track.makeClone() }.getOrNull()?.let { requestPreanalysis(it) }
@@ -139,7 +139,7 @@ class GuildMixer(
             confirmMs?.let { tailConfirmMs = it.coerceIn(300, 10000) }
             tailWatch = enabled && !protocol.preserveTransition
             if (!enabled) tailCutter.reset()
-            if (enabled) main?.audioPlayer?.playingTrack else null
+            if (enabled) mainTrack() else null
         }
         playing?.let { track ->
             runCatching { track.makeClone() }.getOrNull()?.let { requestPreanalysis(it) }
@@ -171,7 +171,7 @@ class GuildMixer(
         override val playerMutationLock: Any get() = this@GuildMixer.playerMutationLock
         override val playerManager: AudioPlayerManager get() = this@GuildMixer.playerManager
         override val mainPlayer: IPlayer? get() = main
-        override val playingTrack: AudioTrack? get() = main?.audioPlayer?.playingTrack
+        override val playingTrack: AudioTrack? get() = mainTrack()
         override val crossfadeMs: Long get() = this@GuildMixer.crossfadeMs
         override val prefetchLeadMs: Long get() = if (bpmDetectionEnabled && beatmatchEnabled) {
             (bpmScanMs * 2 + 7000L).coerceAtMost(120_000L)
@@ -408,6 +408,11 @@ class GuildMixer(
 
     val mainListener = object : AudioEventAdapter() {
         override fun onTrackStart(player: AudioPlayer, track: AudioTrack) {
+            // The idle carrier is not playback: no state machine, analysis or
+            // sequence bookkeeping. Anything else starting means a real track
+            // took over the player, so the carrier reference is stale.
+            if (SilenceAudioTrack.isCarrier(track)) return
+            synchronized(lock) { idleCarrierIdleSinceMs = 0L }
             // Snapshot under lock; the (potentially blocking) seek runs outside it
             // so the voice thread never stalls behind us.
             val snap = synchronized(lock) {
@@ -510,12 +515,13 @@ class GuildMixer(
         }
 
         override fun onTrackEnd(player: AudioPlayer, track: AudioTrack, endReason: AudioTrackEndReason) {
+            if (SilenceAudioTrack.isCarrier(track)) return
             val currentMain = synchronized(lock) { main?.audioPlayer }
             if (currentMain != null && player !== currentMain) return
             if (endReason != AudioTrackEndReason.FINISHED && endReason != AudioTrackEndReason.LOAD_FAILED) {
                 if (endReason == AudioTrackEndReason.STOPPED || endReason == AudioTrackEndReason.CLEANUP) {
                     synchronized(lock) {
-                        if (!xfadeActive && main?.audioPlayer?.playingTrack == null) {
+                        if (!xfadeActive && mainTrack() == null) {
                             protocol.playbackState = PlaybackState.IDLE
                         }
                     }
@@ -533,6 +539,7 @@ class GuildMixer(
         }
 
         override fun onTrackStuck(player: AudioPlayer, track: AudioTrack, thresholdMs: Long) {
+            if (SilenceAudioTrack.isCarrier(track)) return
             val currentMain = synchronized(lock) { main?.audioPlayer }
             if (currentMain != null && player !== currentMain) return
             val title = runCatching { track.info.title }.getOrDefault("unknown")
@@ -541,6 +548,7 @@ class GuildMixer(
         }
 
         override fun onTrackException(player: AudioPlayer, track: AudioTrack, exception: com.sedmelluq.discord.lavaplayer.tools.FriendlyException) {
+            if (SilenceAudioTrack.isCarrier(track)) return
             val currentMain = synchronized(lock) { main?.audioPlayer }
             if (currentMain != null && player !== currentMain) return
             val title = runCatching { track.info.title }.getOrDefault("unknown")
@@ -663,6 +671,91 @@ class GuildMixer(
 
     /** Whether this mixer's main (newest attached) player is [player]. */
     fun isMain(player: IPlayer): Boolean = main === player
+
+    /**
+     * The track the bot is playing on the main player. Null while the player is
+     * idle or only plays the internal [SilenceAudioTrack] carrier: the carrier
+     * must never look like playback to transitions, JIT, analysis or recovery.
+     */
+    internal fun mainTrack(): AudioTrack? {
+        val playing = main?.audioPlayer?.playingTrack
+        return if (SilenceAudioTrack.isCarrier(playing)) null else playing
+    }
+
+    /** True while the idle-announcement carrier is what the main player plays. */
+    fun isIdleCarrierActive(): Boolean = SilenceAudioTrack.isCarrier(main?.audioPlayer?.playingTrack)
+
+    /** Wall-clock time the carrier last became unneeded; 0 while needed. Guarded by [lock]. */
+    private var idleCarrierIdleSinceMs: Long = 0L
+
+    private enum class CarrierAction { NONE, START, STOP }
+
+    /**
+     * Scheduler tick. Plays the silent carrier on an idle main player while an
+     * announcement is queued, resolving or audible, so [MixerFilter] gets chunks to
+     * mix into; stops it once nothing needs it for [IDLE_CARRIER_GRACE_MS]. A track
+     * the bot starts replaces the carrier through Lavaplayer, so yielding needs no
+     * work here.
+     */
+    fun maintainIdleCarrier() {
+        val action = synchronized(lock) {
+            val player = main?.audioPlayer ?: return
+            val playing = player.playingTrack
+            val needed = overlayActive || parallelOverlays.isNotEmpty() || announcementQueue.hasWork
+            when {
+                needed -> {
+                    idleCarrierIdleSinceMs = 0L
+                    if (playing == null && !player.isPaused) CarrierAction.START else CarrierAction.NONE
+                }
+                SilenceAudioTrack.isCarrier(playing) -> {
+                    val now = System.currentTimeMillis()
+                    if (idleCarrierIdleSinceMs == 0L) idleCarrierIdleSinceMs = now
+                    if (now - idleCarrierIdleSinceMs >= IDLE_CARRIER_GRACE_MS) CarrierAction.STOP else CarrierAction.NONE
+                }
+                else -> {
+                    idleCarrierIdleSinceMs = 0L
+                    CarrierAction.NONE
+                }
+            }
+        }
+        when (action) {
+            CarrierAction.START -> startIdleCarrier()
+            CarrierAction.STOP -> stopIdleCarrier("no announcement left")
+            CarrierAction.NONE -> Unit
+        }
+    }
+
+    private fun startIdleCarrier() {
+        synchronized(playerMutationLock) {
+            val player = synchronized(lock) { main?.audioPlayer } ?: return
+            // noInterrupt: a track the bot started since the check above wins.
+            val started = try {
+                player.startTrack(SilenceAudioTrack(), true)
+            } catch (e: Exception) {
+                log.warn("idle announcement carrier failed to start on guild {}", guildId, e)
+                false
+            }
+            if (started) log.info("idle announcement carrier started on guild {}", guildId)
+        }
+    }
+
+    /**
+     * Ends the carrier with `stopTrack()` so the client sees a `stopped` end.
+     * Lavaplayer has no compare-and-stop, so the identity check below leaves a
+     * microsecond window in which a bot track started right now would be stopped.
+     */
+    private fun stopIdleCarrier(reason: String) {
+        synchronized(playerMutationLock) {
+            val player = synchronized(lock) { main?.audioPlayer } ?: return
+            if (!SilenceAudioTrack.isCarrier(player.playingTrack)) return
+            try {
+                player.stopTrack()
+                log.info("idle announcement carrier stopped on guild {} ({})", guildId, reason)
+            } catch (e: Exception) {
+                log.warn("idle announcement carrier stop failed on guild {}", guildId, e)
+            }
+        }
+    }
 
     fun newFilter(downstream: com.sedmelluq.discord.lavaplayer.filter.FloatPcmAudioFilter? = null): MixerFilter =
         MixerFilter(this, downstream)
@@ -848,7 +941,7 @@ class GuildMixer(
      * computation is needed this chunk (voice-thread fast path).
      */
     fun realtimeTailAmp(): Float? =
-        if (tailWatch && silenceSkipEnabled && !protocol.preserveTransition) SilenceAnalyzer.thresholdAmp(silenceThresholdDb) else null
+        if (tailWatch && silenceSkipEnabled && !SilenceAudioTrack.isCarrier(main?.audioPlayer?.playingTrack) && !protocol.preserveTransition) SilenceAnalyzer.thresholdAmp(silenceThresholdDb) else null
 
     fun noteChunk(peak: Float, samples: Int, thresholdAmp: Float) =
         tailCutter.note(peak, samples, thresholdAmp, chainPos.get())
@@ -1006,11 +1099,11 @@ class GuildMixer(
 
     private data class TransitionFence(val outgoing: AudioTrack?, val incoming: AudioTrack?, val epoch: Long, val seq: Long, val slotRevision: Long)
 
-    private fun transitionFenceLocked() = TransitionFence(main?.audioPlayer?.playingTrack,
+    private fun transitionFenceLocked() = TransitionFence(mainTrack(),
         readyNextTrack ?: pendingNextTrack, protocol.gate.lastKnownEpoch, protocol.advanceSeq.get(), slotRevision)
 
     private fun matchesFenceLocked(fence: TransitionFence): Boolean =
-        main?.audioPlayer?.playingTrack === fence.outgoing && (readyNextTrack ?: pendingNextTrack) === fence.incoming &&
+        mainTrack() === fence.outgoing && (readyNextTrack ?: pendingNextTrack) === fence.incoming &&
             protocol.gate.lastKnownEpoch == fence.epoch && protocol.advanceSeq.get() == fence.seq && slotRevision == fence.slotRevision
 
     private sealed interface PollAction {
@@ -1053,7 +1146,7 @@ class GuildMixer(
         val now = System.currentTimeMillis()
         if (now - xfadeLogMs < 1000) return
         xfadeLogMs = now
-        val track = main?.audioPlayer?.playingTrack ?: return
+        val track = mainTrack() ?: return
         val pos = safePosition(track)
         val chain = chainPos.get() * 1000L / SAMPLE_RATE
         val handoff: Long
@@ -1079,7 +1172,7 @@ class GuildMixer(
     private fun decidePollLocked(): PollAction {
         refreshBeatmatchStatusLocked()
         val audioPlayer = main?.audioPlayer ?: return PollAction.None
-        val track = audioPlayer.playingTrack ?: run {
+        val track = mainTrack() ?: run {
             lastMainTrack = null
             tailWatch = false
             return PollAction.None
@@ -1426,7 +1519,7 @@ class GuildMixer(
     /** Milliseconds until an armed overlap hands off; null when no crossfade is running. */
     fun crossfadeHandoffInMs(): Long? = synchronized(lock) {
         if (!xfadeActive || xfadeHandoffMs < 0) return null
-        val pos = main?.audioPlayer?.playingTrack?.let { safePosition(it) } ?: 0L
+        val pos = mainTrack()?.let { safePosition(it) } ?: 0L
         (xfadeHandoffMs - pos).coerceAtLeast(0)
     }
 
@@ -1583,6 +1676,7 @@ class GuildMixer(
                 log.warn("parallel overlay destroy failed on guild {}", guildId, e)
             }
         }
+        stopIdleCarrier("mixer destroyed")
         protocol.shutdown()
     }
 
@@ -1730,7 +1824,7 @@ class GuildMixer(
                 xfadeTransitionKind = if (nativeFailed) "crossfade" else plan.transitionKind
                 xfadeDecisionReason = if (nativeFailed) "timescale_native_failed" else plan.reason
                 xfadeHandoffMs = plan.handoffMs
-                xfadeMainTrack = main?.audioPlayer?.playingTrack
+                xfadeMainTrack = mainTrack()
                 subOutputSamples.set(0L)
                 subSourceMilliSamples.set(0L)
                 subStartPositionMs = incomingStartPosition
@@ -1810,7 +1904,7 @@ class GuildMixer(
             (started.startSample - plan.startMs * SAMPLE_RATE / 1000) * 1000 / SAMPLE_RATE,
             beatmatchLog, analysisLog,
         )
-        val mainPosMs = main?.audioPlayer?.playingTrack?.let { safePosition(it) } ?: 0L
+        val mainPosMs = mainTrack()?.let { safePosition(it) } ?: 0L
         notifyMixerEvent("overlapStart") {
             put("crossfadeMs", plan.durationMs)
             put("overlapMs", plan.overlapMs)
@@ -1871,7 +1965,7 @@ class GuildMixer(
     private fun doHandoff() {
         val handoffAllowed = synchronized(lock) {
             val armed = xfadeMainTrack ?: return@synchronized true
-            val playing = main?.audioPlayer?.playingTrack
+            val playing = mainTrack()
             // Lavaplayer nulls playingTrack before dispatching FINISHED/LOAD_FAILED,
             // so a handoff driven by onTrackEnd legitimately sees no playing track;
             // lastEndedMain keeps that just-ended instance recognizable for a short
@@ -2059,7 +2153,7 @@ class GuildMixer(
             advanceNext()
         } else {
             synchronized(lock) {
-                if (main?.audioPlayer?.playingTrack == null) {
+                if (mainTrack() == null) {
                     protocol.playbackState = PlaybackState.IDLE
                 }
             }
@@ -2292,7 +2386,7 @@ class GuildMixer(
     /** Identity and estimate are captured together; an unknown estimate still represents a completed scan. */
     fun currentKey(): TrackKey? = synchronized(lock) {
         if (!keyDetectionEnabled) return null
-        val track = main?.audioPlayer?.playingTrack ?: return null
+        val track = mainTrack() ?: return null
         val result = idOf(track)?.let { AnalysisCaches.key[it] } ?: return null
         TrackKey(track.info.identifier, result)
     }
@@ -2306,7 +2400,7 @@ class GuildMixer(
 
     fun currentTempo(): CurrentTempo? = synchronized(lock) {
         if (!bpmDetectionEnabled) return null
-        val track = main?.audioPlayer?.playingTrack ?: return null
+        val track = mainTrack() ?: return null
         val id = idOf(track) ?: return null
         val bpm = AnalysisCaches.bpmHead[id]?.bpm ?: AnalysisCaches.bpmTail[id]?.bpm ?: AnalysisCaches.bpm[id]?.bpm ?: return null
         if (!bpm.isFinite() || bpm <= 0f) return null
@@ -2398,7 +2492,7 @@ class GuildMixer(
         val now = System.currentTimeMillis()
         return synchronized(lock) {
             if (analysisQueued) return null
-            val mainPlaying = main?.audioPlayer?.playingTrack
+            val mainPlaying = mainTrack()
             val candidates = listOfNotNull(
                 pendingNextTrack,
                 readyNextTrack,
@@ -2576,7 +2670,7 @@ class GuildMixer(
                 AnalysisCaches.bpmTail[identifier] = result.bpmTail
             }
             if (doBpm && !result.aborted) {
-                val playing = synchronized(lock) { main?.audioPlayer?.playingTrack }
+                val playing = synchronized(lock) { mainTrack() }
                 val playingId = playing?.let { idOf(it) }
                 if (playing != null && playingId != null && !AnalysisCaches.featuresTail.contains(playingId)) {
                     val tail = analysisService.measureTailAnalysis(playing, bpmScanMs)
@@ -2589,7 +2683,7 @@ class GuildMixer(
             if (doNorm && !result.aborted) {
                 // The playing track's own scan is skipped while this slot is busy;
                 // measure it now so it does not keep an inherited level all track.
-                val playing = synchronized(lock) { main?.audioPlayer?.playingTrack }
+                val playing = synchronized(lock) { mainTrack() }
                 val playingId = playing?.let { idOf(it) }
                 if (playing != null && playingId != null && playingId != identifier &&
                     !AnalysisCaches.norm.contains(playingId) && normGainBaseline == 0f
@@ -2603,7 +2697,7 @@ class GuildMixer(
                 }
             }
             if (doSilence && !result.aborted) {
-                val playing = synchronized(lock) { main?.audioPlayer?.playingTrack }
+                val playing = synchronized(lock) { mainTrack() }
                 val playingId = playing?.let { idOf(it) }
                 if (playing != null && playingId != null && playingId != identifier && !AnalysisCaches.trim.contains(playingId)) {
                     val playingTrim = analysisService.measureTailSilence(
@@ -2653,7 +2747,7 @@ class GuildMixer(
     private fun applyAnalyzedNormGain(identifier: String) {
         synchronized(lock) {
             if (!normalizationEnabled) return
-            val playing = main?.audioPlayer?.playingTrack
+            val playing = mainTrack()
             if (playing != null && idOf(playing) == identifier) {
                 knownNormGainLocked(playing)?.let { mainNorm.rampTo(it, msToSamples(NORM_RAMP_MS)) }
             }
@@ -2721,6 +2815,8 @@ class GuildMixer(
     companion object {
         private val log = LoggerFactory.getLogger(GuildMixer::class.java)
         private const val SAMPLE_RATE = 48000
+        /** The idle carrier outlives the last announcement by this long, bridging back-to-back requests and the audible tail. */
+        internal const val IDLE_CARRIER_GRACE_MS = 1_000L
         /** Normalization gain changes from late loudness results glide over this span. */
         internal const val NORM_RAMP_MS = 1_000L
 

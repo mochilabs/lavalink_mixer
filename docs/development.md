@@ -48,7 +48,7 @@ Use these existing tests as starting points:
 | Transition callback locks and decoder readiness | `PlayerCallbackLockTest`, `OverlapPreparationTest`, `XfadeVoicePathTest` |
 | Musical key estimation and REST metadata | `KeyDetectorTest`, `KeyIntegrationTest`, `TransitionFeaturesTest` |
 | Transition console diagnostics | `TransitionDiagnosticsTest`, `BeatMatchOutputTest`, `BeatMatchIntegrationTest` |
-| Announcements | `AnnounceQueueTest` |
+| Announcements | `AnnounceQueueTest`, `IdleAnnounceTest` |
 | Analysis ownership and retries | `AnalysisIsolatedFromLiveSubTest`, `DeferredAnalysisTest` |
 | Silence and trim | `SilenceAnalyzerTest`, `TailCutDeciderTest`, `TrimTransitionTest` |
 | Loudness | `NormalizationGainTest`, `NormalizationBaselineTest`, `NormalizationIntegrationTest` |

@@ -180,7 +180,7 @@ Content-Type: application/json
 
 `POST /mixer/announce`에 인코딩된 트랙이나 소스 식별자를 보냅니다. 서버에 구성한 TTS 소스의 오디오를 포함해 제공된 음성을 재생하며, 플러그인 자체가 음성을 합성하지는 않습니다.
 
-순차 공지는 크로스페이드와 서브 플레이어를 공유하며 사용 중이면 기다립니다. 병렬 공지는 별도 플레이어를 사용하고 `maxParallelOverlays`의 제한을 받습니다. 두 모드 모두 `channel: "both"`, `"left"`, `"right"`를 지원하며 메인 음악을 덕킹합니다. `/mixer/announce/cancel`은 재생 중인 순차 공지를 중단합니다. 대기 공지는 `DELETE /mixer/announce/queue?guildId=...`로 따로 비웁니다.
+순차 공지는 크로스페이드와 서브 플레이어를 공유하며 사용 중이면 기다립니다. 병렬 공지는 별도 플레이어를 사용하고 `maxParallelOverlays`의 제한을 받습니다. 두 모드 모두 `channel: "both"`, `"left"`, `"right"`를 지원하며 메인 음악을 덕킹합니다. 메인 플레이어에 재생 중인 트랙이 없어도 공지가 재생됩니다. 이때 플러그인이 내부 무음 트랙(식별자 `lavalink-mixer:idle-carrier`, URI `mixer://idle-carrier`, `isStream: true`)을 재생해 필터 체인을 돌리고, 마지막 공지가 끝나고 약 1초 뒤에 멈춥니다. Lavalink는 이 트랙의 `TrackStartEvent`와 `TrackEndEvent`(종료 사유 `stopped`)를 클라이언트에 그대로 보내며 플러그인이 막을 수 없으므로, 봇은 트랙 식별자가 `lavalink-mixer:idle-carrier`인 이벤트를 무시하고 큐 항목으로 취급하지 않아야 합니다. 봇이 재생하는 트랙은 무음 트랙을 즉시 대체합니다. 무음 트랙이 돌 때 `noReplace=true`로 재생을 요청하면 Lavalink가 무시하므로, 공지가 나갈 수 있는 길드에서는 `noReplace`를 쓰지 마세요. 공지에는 음성 채널 연결과 일시정지가 아닌 플레이어가 필요합니다. `/mixer/announce/cancel`은 재생 중인 순차 공지를 중단합니다. 대기 공지는 `DELETE /mixer/announce/queue?guildId=...`로 따로 비웁니다.
 
 ## 큐 프로토콜 v2
 

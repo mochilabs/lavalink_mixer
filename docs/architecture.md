@@ -464,6 +464,18 @@ an item if the secondary player becomes busy. Parallel announcements own
 separate players, queues, and gain ramps. Their count defaults to four and
 is clamped to 1–16 per guild.
 
+### Announcements on an idle main player
+
+Lavaplayer runs the filter chain only while a track plays, and `MixerFilter` is the only place overlay PCM is mixed. With no main track the siphons are never read, so an announcement would stay silent and `overlayActive` would never clear. `GuildMixer.maintainIdleCarrier()` runs on the shared scheduler before `maybeStartAnnouncement` and covers this:
+
+- It starts a `SilenceAudioTrack` with `startTrack(track, noInterrupt = true)` when the main player has no track, is not paused, and an announcement is queued, resolving, or audible. `noInterrupt` means a bot track started in the meantime always wins.
+- The carrier is paced to real time with a 100 ms lead. A free-running decoder would pull the secondary PCM through the filter faster than it is decoded and zero-fill it.
+- It stops with `stopTrack()` once nothing has needed it for `IDLE_CARRIER_GRACE_MS` (1 s). The grace bridges back-to-back announcements and lets the mixed tail play out. A stopped end reports reason `stopped`, never `finished`.
+- A bot track replaces the carrier through Lavaplayer, so yielding is immediate. An overlay that is still audible keeps playing over the new track.
+- `mainTrack()` hides the carrier. Transitions, JIT, analysis, tail watch and recovery use it instead of `playingTrack`, and `mainListener` ignores every carrier callback.
+
+Lavalink emits TrackStart and TrackEnd for the carrier and the plugin API cannot suppress them, so the carrier is made distinguishable instead: identifier `lavalink-mixer:idle-carrier`, URI `mixer://idle-carrier`, stream. `SilenceSourceManager` is registered so Lavalink can encode and decode it. Lavaplayer has no compare-and-stop, so a bot track started in the microseconds between the identity check and `stopTrack()` would be stopped.
+
 ## Version and design references
 
 - `/mixer/info` returns the version resolved from the packaged plugin

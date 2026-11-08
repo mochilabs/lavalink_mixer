@@ -43,6 +43,8 @@ class MixerPlugin(
             MixerVersion.version,
             MixerVersion.PROTOCOL_VERSION,
         )
+        // Lets a client decode the idle carrier track from its TrackStart/TrackEnd events.
+        runCatching { playerManager.registerSourceManager(SilenceSourceManager) }
         scheduler.scheduleAtFixedRate(::loop, 0, 20, TimeUnit.MILLISECONDS)
     }
 
@@ -155,6 +157,12 @@ class MixerPlugin(
                 }
             }
             retryAnalysis(mixer)
+            // Before the announcement starts, so its first PCM already has a filter chain to land in.
+            try {
+                mixer.maintainIdleCarrier()
+            } catch (e: Exception) {
+                log.warn("idle carrier maintenance failed on guild {}", mixer.guildId, e)
+            }
             maybeStartAnnouncement(mixer)
         }
     }

@@ -48,6 +48,10 @@ internal class AnnouncementQueue(
     val size: Int
         get() = queue.size
 
+    /** Items waiting, or one being resolved/started right now. */
+    val hasWork: Boolean
+        get() = queue.isNotEmpty() || resolving
+
     fun nextId(): Long = ++seq
 
     fun enqueue(

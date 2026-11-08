@@ -97,6 +97,18 @@ The TypeScript client example has no repository-level package manifest or
 dedicated type-check task. Validate example changes in a consuming bot project
 and state when that validation is unavailable.
 
+### Idle-main announcements
+
+A local audio test does not prove playback through Discord. After changing the idle carrier (`SilenceAudioTrack`, `maintainIdleCarrier`), check on a real node with no track playing:
+
+1. `/mixer/announce` in sequential and parallel mode with `channel` `both`, `left`, and `right` is heard on the right sides.
+2. `announceStart` follows the request promptly, and the carrier stops about one second after the last `announceEnd` (log lines `idle announcement carrier started/stopped`).
+3. The bot client library ignores `TrackStartEvent` and `TrackEndEvent` (reason `stopped`) for identifier `lavalink-mixer:idle-carrier` and does not queue it or log warnings.
+4. While the carrier runs, `GET player` reports it as `track` and playerUpdate positions advance. Bots that read these must filter the identifier.
+5. A bot `play` request replaces the carrier at once, and an announcement still playing continues over the new track. A request with `noReplace=true` is ignored by Lavalink while the carrier runs.
+6. Back-to-back announcements reuse one carrier (one start, one end in the logs).
+7. A paused player or a guild without a voice connection stays silent.
+
 ## Read transition logs
 
 A started crossfade produces one INFO line. `beatMatched=true` means preparation

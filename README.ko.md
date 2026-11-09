@@ -11,7 +11,7 @@
 
 - 이퀄 파워 크로스페이드와 겹침 없는 서버 주도 곡 전환.
 - 곡 쌍마다 7가지 전략 중 하나를 고르는 적응형 전환 플래너: 프레이즈 정렬·짧은 베이스 스왑, 비트 매칭 블렌드, 다운비트 컷, 에코 아웃, 필터 스윕, 일반 크로스페이드.
-- 2~16박자 비트 매칭, 일시적인 템포 조절, 다음 곡의 원래 속도로 복귀.
+- 2~32박자 비트 매칭, 일시적인 템포 조절, 다음 곡의 원래 속도로 복귀.
 - 매칭된 4차 Linkwitz-Riley 크로스오버 기반 베이스 스왑. 위상 간섭 없이 두 곡의 저음을 교체합니다.
 - 같은 전략이 길드에서 연속으로 반복되지 않게 하는 전환 기억.
 - 곡 앞뒤 무음 제거와 실시간 끝무음 감지.
@@ -109,7 +109,7 @@ mixer:
   keyDetectionEnabled: false
   keyScanMs: 30000
   beatmatchEnabled: false
-  maxTempoChange: 0.06
+  maxTempoChange: 0.08
   beatmatchMinConfidence: 0.30
 
   # 공용 분석 워커 풀
@@ -138,7 +138,7 @@ Content-Type: application/json
 	"enabled": true,
 	"beatmatchEnabled": true,
 	"scanMs": 30000,
-	"maxTempoChange": 0.06,
+	"maxTempoChange": 0.08,
 	"minConfidence": 0.30
 }
 ```
@@ -151,7 +151,7 @@ Content-Type: application/json
 
 | 상황 | 전략 | 전송되는 `transitionKind` |
 | --- | --- | --- |
-| 템포가 맞고 다운비트·프레이즈 신뢰도가 높음 | `PHRASE_MATCHED_BASS_SWAP`: 최대 16박 페이드, 페이드 중간에서 베이스 교체 | `beat_matched` |
+| 템포가 맞고 다운비트·프레이즈 신뢰도가 높음 | `PHRASE_MATCHED_BASS_SWAP`: 최대 32박 페이드, 페이드 중간에서 베이스 교체 | `beat_matched` |
 | 템포가 맞고 다운비트 신뢰도가 높음 | `SHORT_BASS_SWAP`: 최대 8박 페이드와 베이스 교체 | `beat_matched` |
 | 템포가 맞지만 마디 경계가 불확실하거나 4/4가 아님 | `BEATMATCHED_BLEND`: 박에 맞춘 2·4·8박 페이드 | `beat_matched` |
 | 템포 차이가 크고, 두 곡의 다운비트가 확실하며 에너지가 높음 | `DOWNBEAT_CUT`: 마디선에서 10ms 컷 | `crossfade` |
@@ -159,7 +159,7 @@ Content-Type: application/json
 | 사용할 그리드는 없지만 특성은 유효함 | `DEGRADED_FILTER_SWEEP`: 하이패스 스윕, 최대 4초 | `crossfade` |
 | 메타데이터가 없거나 `crossfadeMs`에 맞는 박 수가 없음 | `ABSOLUTE_FALLBACK`: 이퀄 파워 크로스페이드 | `short_crossfade` |
 
-템포 비교는 옥타브를 정규화하므로 반 박자·두 배 템포도 같은 템포로 봅니다. `maxTempoChange` 주변의 불확실 구간에서는 에너지, 리듬, 조성 호환성으로 판단합니다. 페이드 길이는 `crossfadeMs`에서 복구 구간을 뺀 값을 넘지 않습니다. 2·4·8·16박 중 맞는 길이가 없으면 설정한 길이의 이퀄 파워 크로스페이드로 폴백합니다(`fade_window_too_short`). `crossfadeMs`가 0 이하이면 겹침 없이 전환합니다.
+템포 비교는 옥타브를 정규화하므로 반 박자·두 배 템포도 같은 템포로 봅니다. `maxTempoChange` 주변의 불확실 구간에서는 에너지, 리듬, 조성 호환성으로 판단합니다. 페이드 길이는 `crossfadeMs`에서 복구 구간을 뺀 값을 넘지 않습니다. 2·4·8·16·32박 중 맞는 길이가 없으면 설정한 길이의 이퀄 파워 크로스페이드로 폴백합니다(`fade_window_too_short`). `crossfadeMs`가 0 이하이면 겹침 없이 전환합니다.
 
 비트 매칭 중에는 다음 곡을 현재 곡의 템포에 맞춘 뒤 핸드오프 전에 원래 속도로 복귀시킵니다. `overlapMs`는 두 곡의 페이드 구간이며, `recoveryMs`는 전체 전환 시간 안에서 다음 곡만 재생하며 속도를 복구하는 구간입니다.
 

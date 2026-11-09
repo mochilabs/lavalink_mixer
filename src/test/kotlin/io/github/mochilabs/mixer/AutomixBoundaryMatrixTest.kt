@@ -57,7 +57,7 @@ class AutomixBoundaryMatrixTest {
     @Test
     fun `scenario 5 - deadband boundary with compatible energy selects Sync Bass Swap`() {
         val out = ExtendedBeatGrid(120f, 0L, 0.9f, 0L, 0.8f, 0.7f)
-        val inc = ExtendedBeatGrid(127.0f, 0L, 0.9f, 0L, 0.8f, 0.7f) // 5.8% diff in deadband
+        val inc = ExtendedBeatGrid(129.5f, 0L, 0.9f, 0L, 0.8f, 0.7f) // 7.9% diff in the deadband around 8%
         val featOut = features(rms = 0.15f)
         val featIn = features(rms = 0.14f)
         assertEquals(TransitionStrategy.PHRASE_MATCHED_BASS_SWAP, plan(out, inc, featOut, featIn).strategy)
@@ -66,9 +66,9 @@ class AutomixBoundaryMatrixTest {
     @Test
     fun `scenario 6 - deadband boundary with energy mismatch selects Echo Out`() {
         val out = ExtendedBeatGrid(120f, 0L, 0.9f, 0L, 0.8f, 0.7f)
-        val inc = ExtendedBeatGrid(127.0f, 0L, 0.9f, 0L, 0.8f, 0.7f)
+        val inc = ExtendedBeatGrid(129.5f, 0L, 0.9f, 0L, 0.8f, 0.7f)
         val featOut = features(rms = 0.05f)
-        val featIn = features(rms = 0.25f) // ratio = 5.0 > 3.16 (14 dB mismatch)
+        val featIn = features(rms = 0.25f) // ratio = 5.0 > 3.98 (14 dB mismatch)
         assertEquals(TransitionStrategy.ECHO_OUT, plan(out, inc, featOut, featIn).strategy)
     }
 
@@ -84,6 +84,7 @@ class AutomixBoundaryMatrixTest {
         val out = ExtendedBeatGrid(128f, 0L, 0.9f, 0L, 0.8f)
         val recipe = plan(out, null, features(), null)
         assertEquals(TransitionStrategy.ECHO_OUT, recipe.strategy)
+        assertEquals("missing_incoming_grid", recipe.reason)
         // 128 BPM >= 125 BPM -> 0.5-beat delay (234ms = 11250 samples @ 48kHz)
         val echo = recipe.automations.filterIsInstance<ParamAutomation.EchoTrigger>().first()
         assertEquals(11250, echo.delaySamples)
@@ -108,5 +109,14 @@ class AutomixBoundaryMatrixTest {
         )
         assertEquals(TransitionStrategy.ABSOLUTE_FALLBACK, recipe.strategy)
         assertEquals(48000L * 5L, recipe.totalSamples)
+    }
+
+    @Test
+    fun `low-confidence incoming grid is reported separately from a missing one`() {
+        val out = ExtendedBeatGrid(128f, 0L, 0.9f, 0L, 0.8f)
+        val weak = ExtendedBeatGrid(128f, 0L, 0.1f, 0L, 0.8f)
+        val recipe = plan(out, weak)
+        assertEquals(TransitionStrategy.ECHO_OUT, recipe.strategy)
+        assertEquals("low_confidence_incoming_grid", recipe.reason)
     }
 }

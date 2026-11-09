@@ -21,6 +21,21 @@ object AdaptiveTransitionPlanner {
     private val log = LoggerFactory.getLogger(AdaptiveTransitionPlanner::class.java)
     private const val SAMPLE_RATE = 48000
 
+    // Strategy gates. Uncalibrated heuristics (see docs/adaptive-calibration.md),
+    // tuned toward choosing beat-matched and bass-swap transitions more often.
+    /** Minimum downbeat confidence on both grids for bass-swap strategies. */
+    internal const val DOWNBEAT_GATE = 0.40f
+    /** Minimum phrase confidence on both grids for the phrase-matched bass swap. */
+    internal const val PHRASE_GATE = 0.40f
+    /** Minimum downbeat confidence on both grids for a downbeat cut. */
+    internal const val DOWNBEAT_CUT_GATE = 0.50f
+    /** Minimum RMS on both sides for a downbeat cut. */
+    internal const val DOWNBEAT_CUT_MIN_RMS = 0.08f
+    /** Largest energy ratio (about 12 dB) still accepted inside the tempo deadband. */
+    internal const val DEADBAND_MAX_ENERGY_RATIO = 3.98f
+    /** Minimum rhythmic stability on both sides inside the tempo deadband. */
+    internal const val DEADBAND_MIN_RHYTHM = 0.35f
+
     fun plan(
         outgoingGridTail: ExtendedBeatGrid?,
         incomingGridHead: ExtendedBeatGrid?,
@@ -30,7 +45,7 @@ object AdaptiveTransitionPlanner {
         contentEndMs: Long,
         incomingLeadMs: Long = 0L,
         incomingDurationMs: Long = -1L,
-        maxTempoChange: Float = 0.06f,
+        maxTempoChange: Float = 0.08f,
         minConfidence: Float = 0.30f,
         preserveContext: Boolean = false,
         guildId: Long? = null,
@@ -80,8 +95,8 @@ object AdaptiveTransitionPlanner {
                     // Inside deadband: verify energy & rhythm compatibility
                     val rmsOut = outgoingFeaturesTail?.rms ?: 0f
                     val rmsIn = incomingFeaturesHead?.rms ?: 0f
-                    val safeEnergy = if (min(rmsOut, rmsIn) > 0f) (max(rmsOut, rmsIn) / min(rmsOut, rmsIn)) <= 3.16f else true
-                    val safeRhythm = min(outgoingFeaturesTail?.rhythmicStability ?: 1f, incomingFeaturesHead?.rhythmicStability ?: 1f) >= 0.45f
+                    val safeEnergy = if (min(rmsOut, rmsIn) > 0f) (max(rmsOut, rmsIn) / min(rmsOut, rmsIn)) <= DEADBAND_MAX_ENERGY_RATIO else true
+                    val safeRhythm = min(outgoingFeaturesTail?.rhythmicStability ?: 1f, incomingFeaturesHead?.rhythmicStability ?: 1f) >= DEADBAND_MIN_RHYTHM
                     val safeKey = !keyClash(outgoingFeaturesTail?.key, incomingFeaturesHead?.key)
                     safeEnergy && safeRhythm && safeKey
                 }
@@ -93,7 +108,7 @@ object AdaptiveTransitionPlanner {
 
                 if (isSync) {
                     val rateRatio = ((outGrid.bpm * octaveMultiplier) / inGrid.bpm).toFloat()
-                    val hasDownbeats = outGrid.downbeatConfidence >= 0.5f && inGrid.downbeatConfidence >= 0.5f &&
+                    val hasDownbeats = outGrid.downbeatConfidence >= DOWNBEAT_GATE && inGrid.downbeatConfidence >= DOWNBEAT_GATE &&
                         !outGrid.isNon44Meter && !inGrid.isNon44Meter
                     val periodMs = 60_000.0 / outGrid.bpm.toDouble()
                     val periodSamples = (SAMPLE_RATE * 60.0 / outGrid.bpm.toDouble())
@@ -104,7 +119,7 @@ object AdaptiveTransitionPlanner {
                     val recoverySamples = recoveryMs * SAMPLE_RATE / 1000L
 
                     val chosen = if (hasDownbeats) {
-                        val hasPhrases = outGrid.phraseConfidence >= 0.5f && inGrid.phraseConfidence >= 0.5f
+                        val hasPhrases = outGrid.phraseConfidence >= PHRASE_GATE && inGrid.phraseConfidence >= PHRASE_GATE
                         val candidates = if (hasPhrases) {
                             listOf(
                                 TransitionStrategy.PHRASE_MATCHED_BASS_SWAP to 1.0f,
@@ -139,8 +154,8 @@ object AdaptiveTransitionPlanner {
                 }
 
                 // Async domain: Downbeat Cut check (weighted against Echo Out via TransitionMemory)
-                if (outGrid.downbeatConfidence >= 0.6f && inGrid.downbeatConfidence >= 0.6f) {
-                    val highEnergy = (outgoingFeaturesTail?.rms ?: 0f) > 0.1f && (incomingFeaturesHead?.rms ?: 0f) > 0.1f
+                if (outGrid.downbeatConfidence >= DOWNBEAT_CUT_GATE && inGrid.downbeatConfidence >= DOWNBEAT_CUT_GATE) {
+                    val highEnergy = (outgoingFeaturesTail?.rms ?: 0f) > DOWNBEAT_CUT_MIN_RMS && (incomingFeaturesHead?.rms ?: 0f) > DOWNBEAT_CUT_MIN_RMS
                     if (highEnergy) {
                         val chosenAsync = selectWithMemory(
                             listOf(
@@ -206,7 +221,11 @@ object AdaptiveTransitionPlanner {
                         terminationRampSamples = (totalSamples * 9 / 10).toInt().coerceAtLeast(1), // 1.8s at full length
                     ),
                 ),
-                reason = if (inGrid != null) "tempo_diff_exceeded" else "missing_incoming_grid",
+                reason = when {
+                    inGrid != null -> "tempo_diff_exceeded"
+                    incomingGridHead != null -> "low_confidence_incoming_grid"
+                    else -> "missing_incoming_grid"
+                },
             )
         }
 
@@ -268,7 +287,12 @@ object AdaptiveTransitionPlanner {
     ): TransitionRecipe {
         val isBassSwap = strategy == TransitionStrategy.PHRASE_MATCHED_BASS_SWAP || strategy == TransitionStrategy.SHORT_BASS_SWAP
         val maxFadeMs = (requestedCrossfadeMs - recoveryMs).coerceAtLeast(0L)
-        val beatOptions = if (strategy == TransitionStrategy.PHRASE_MATCHED_BASS_SWAP) listOf(16, 8, 4, 2) else listOf(8, 4, 2)
+        // Longest bar-multiple fade that fits the requested window.
+        val beatOptions = when (strategy) {
+            TransitionStrategy.PHRASE_MATCHED_BASS_SWAP -> listOf(32, 16, 8, 4, 2)
+            TransitionStrategy.SHORT_BASS_SWAP -> listOf(8, 4, 2)
+            else -> listOf(16, 8, 4, 2)
+        }
         val fadeBeats = beatOptions.firstOrNull { b -> round(b * periodMs).toLong() <= maxFadeMs }
             ?: return nonSyncWindowRecipe(
                 TransitionStrategy.ABSOLUTE_FALLBACK,

@@ -100,7 +100,7 @@ POST /mixer/bpm
 Authorization: <Lavalink password>
 Content-Type: application/json
 
-{"guildId":"123456789012345678","enabled":true,"beatmatchEnabled":true,"scanMs":30000,"maxTempoChange":0.06,"minConfidence":0.30}
+{"guildId":"123456789012345678","enabled":true,"beatmatchEnabled":true,"scanMs":30000,"maxTempoChange":0.08,"minConfidence":0.30}
 ```
 
 두 요청으로 크로스페이드·BPM 검출·비트 매칭을 함께 켭니다. `/mixer/beatmatch`만 호출하면 BPM 검출은 켜지지 않습니다. 무음 제거와 음량 정규화는 별도로 켭니다.

@@ -11,7 +11,7 @@ A Kotlin plugin for [Lavalink v4](https://github.com/lavalink-devs/Lavalink) tha
 
 - Equal-power crossfades and server-managed advancement without overlap.
 - An adaptive transition planner that picks one of seven strategies per track pair: phrase-matched or short bass swap, beat-matched blend, downbeat cut, echo out, filter sweep, or a plain crossfade.
-- Beat matching with 2- to 16-beat fades, temporary tempo adjustment, and recovery to the incoming track's original speed.
+- Beat matching with 2- to 32-beat fades, temporary tempo adjustment, and recovery to the incoming track's original speed.
 - Bass swaps on a matched 4th-order Linkwitz-Riley crossover, so the two low ends trade places without comb filtering.
 - Transition memory that avoids repeating the same strategy back to back in a guild.
 - Leading and trailing silence trimming, plus realtime tail-silence detection.
@@ -109,7 +109,7 @@ mixer:
   keyDetectionEnabled: false
   keyScanMs: 30000
   beatmatchEnabled: false
-  maxTempoChange: 0.06
+  maxTempoChange: 0.08
   beatmatchMinConfidence: 0.30
 
   # Shared analysis worker pool
@@ -138,7 +138,7 @@ Content-Type: application/json
 	"enabled": true,
 	"beatmatchEnabled": true,
 	"scanMs": 30000,
-	"maxTempoChange": 0.06,
+	"maxTempoChange": 0.08,
 	"minConfidence": 0.30
 }
 ```
@@ -151,7 +151,7 @@ Analysis extracts head and tail beat grids (tempo, beat phase, downbeat and phra
 
 | Situation | Strategy | Wire `transitionKind` |
 | --- | --- | --- |
-| Tempos compatible, downbeats and phrases confident | `PHRASE_MATCHED_BASS_SWAP`: up to a 16-beat fade, bass swapped at the fade midpoint | `beat_matched` |
+| Tempos compatible, downbeats and phrases confident | `PHRASE_MATCHED_BASS_SWAP`: up to a 32-beat fade, bass swapped at the fade midpoint | `beat_matched` |
 | Tempos compatible, downbeats confident | `SHORT_BASS_SWAP`: up to an 8-beat fade with a bass swap | `beat_matched` |
 | Tempos compatible, bar boundaries uncertain or non-4/4 | `BEATMATCHED_BLEND`: 2-, 4-, or 8-beat phase-snapped fade | `beat_matched` |
 | Tempos too far apart, both downbeats confident, high energy | `DOWNBEAT_CUT`: 10 ms cut on a bar line | `crossfade` |
@@ -159,7 +159,7 @@ Analysis extracts head and tail beat grids (tempo, beat phase, downbeat and phra
 | No usable grid, but valid features | `DEGRADED_FILTER_SWEEP`: high-pass sweep, up to 4 s | `crossfade` |
 | No usable metadata, or no beat count fits `crossfadeMs` | `ABSOLUTE_FALLBACK`: equal-power crossfade | `short_crossfade` |
 
-Tempo comparison is octave-normalized (half and double time count as a match) and uses a deadband around `maxTempoChange`; inside the deadband, energy, rhythm, and key compatibility decide. Fade length never exceeds `crossfadeMs` minus the recovery period. When no 2-, 4-, 8-, or 16-beat fade fits, the planner uses a plain equal-power crossfade of the configured length (`fade_window_too_short`). A `crossfadeMs` of zero or less produces no overlap.
+Tempo comparison is octave-normalized (half and double time count as a match) and uses a deadband around `maxTempoChange`; inside the deadband, energy, rhythm, and key compatibility decide. Fade length never exceeds `crossfadeMs` minus the recovery period. When no 2-, 4-, 8-, 16-, or 32-beat fade fits, the planner uses a plain equal-power crossfade of the configured length (`fade_window_too_short`). A `crossfadeMs` of zero or less produces no overlap.
 
 During a matched transition the incoming track follows the outgoing tempo, then recovers to its original speed before handoff. `overlapMs` is the two-track fade duration, and `recoveryMs` is the incoming-only recovery period within the total transition window.
 

@@ -81,8 +81,8 @@ the wire label in `transition_kind`:
 - **ECHO_OUT** (`crossfade`): tempos too far apart otherwise. A delayed echo of the
   outgoing track, up to two seconds.
 - **DEGRADED_FILTER_SWEEP** (`crossfade`): no usable grid, but valid features.
-- **ABSOLUTE_FALLBACK** (`short_crossfade`): no usable metadata, or no 2-, 4-, 8-, or
-  16-beat fade fits the requested length (`fade_window_too_short`). It keeps the
+- **ABSOLUTE_FALLBACK** (`short_crossfade`): no usable metadata, or no 2-, 4-, 8-, 16-,
+  or 32-beat fade fits the requested length (`fade_window_too_short`). It keeps the
   requested length, bounded by the outgoing content.
 
 A pair marked `preserve_context=true` reports `reason=preserve_context` and
@@ -104,8 +104,8 @@ The feature analyzer uses 20 ms energy bins and at most 48 Hann-windowed Goertze
 chroma measurements over C3–B5. It has no vocal, verse, or chorus recognition.
 Downbeat and phrase detection are heuristics over the same local windows.
 
-Current conservative gates include RMS below 0.008, energy ratios above 3.16,
-rhythmic stability below 0.45, and key confidence at least 0.6 before rejecting a
+Current gates include RMS below 0.008, energy ratios above 3.98 (about 12 dB),
+rhythmic stability below 0.35, and key confidence at least 0.6 before rejecting a
 key clash. The tempo deadband is derived from `maxTempoChange` and the grids'
 confidence. Unknown keys do not establish compatibility and do not alone prevent
 rhythm matching. These values have not been fitted or validated on a real corpus.

@@ -464,7 +464,7 @@ components:
         maxTempoChange:
           type: [number, 'null']
           format: float
-          description: Maximum absolute deviation of the tempo ratio from 1.0. Default 0.06, clamped to [0, 0.12].
+          description: Maximum absolute deviation of the tempo ratio from 1.0. Default 0.08, clamped to [0, 0.12].
         minConfidence:
           type: [number, 'null']
           format: float
@@ -480,7 +480,7 @@ components:
         maxTempoChange:
           type: [number, 'null']
           format: float
-          description: Maximum absolute deviation of the tempo ratio from 1.0. Default 0.06, clamped to [0, 0.12].
+          description: Maximum absolute deviation of the tempo ratio from 1.0. Default 0.08, clamped to [0, 0.12].
         minConfidence:
           type: [number, 'null']
           format: float
@@ -516,6 +516,7 @@ components:
         - incoming_unseekable
         - missing_outgoing_grid
         - missing_incoming_grid
+        - low_confidence_incoming_grid
         - invalid_bpm
         - low_confidence
         - tempo_diff_exceeded
@@ -994,7 +995,7 @@ paths:
               enabled: true
               beatmatchEnabled: true
               scanMs: 30000
-              maxTempoChange: 0.06
+              maxTempoChange: 0.08
               minConfidence: 0.30
       responses:
         '200':

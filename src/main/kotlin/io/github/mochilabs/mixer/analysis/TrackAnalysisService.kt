@@ -19,6 +19,12 @@ internal data class TrackAnalysisSettings(
     val bpmScanMs: Long,
     val key: Boolean = false,
     val keyScanMs: Long = 30000,
+    /**
+     * Grids below this confidence are rejected by the planner. A head or tail
+     * grid under it is treated like a missing one: the scan retries further
+     * into the track and fills from the other end, keeping the stronger grid.
+     */
+    val bpmMinConfidence: Float = 0.30f,
 )
 
 internal data class TrackAnalysisResult(
@@ -175,8 +181,10 @@ internal class TrackAnalysisService(
                     featuresHead = TransitionFeatureAnalyzer.analyze(headFrames, grid = bpmHead)
                     bpmHead = mergePhraseConfidence(bpmHead, featuresHead)
                 }
-                if (bpmHead == null && seekable && duration > settings.bpmScanMs * 1.5) {
-                    // Head had no discernible rhythm (e.g. ambient or acoustic intro).
+                val headBeforeRetry = bpmHead
+                val weakHead = headBeforeRetry == null || headBeforeRetry.bpmConfidence < settings.bpmMinConfidence
+                if (weakHead && seekable && duration > settings.bpmScanMs * 1.5) {
+                    // Head had no discernible (or only a weak) rhythm, e.g. an ambient or acoustic intro.
                     // Smart retry: seek forward to ~25% of the track (up to 60s) where the chorus / drop / main beat is active.
                     val candidateStartMs = minOf(duration / 4, 60_000L).coerceAtLeast(settings.bpmScanMs)
                     val retryStartMs = maxOf(candidateStartMs, lead).coerceAtLeast(0L)
@@ -184,7 +192,9 @@ internal class TrackAnalysisService(
                         val retryFrames = collectFrom(track, factory, retryStartMs, msToSamples(settings.bpmScanMs + 2000))
                         if (retryFrames.isNotEmpty()) {
                             val retryGrid = BpmDetector.analyzeExtendedGrid(retryFrames, sampleRate = SAMPLE_RATE, windowStartMs = retryStartMs)
-                            if (retryGrid != null && retryGrid.periodMs.isFinite() && retryGrid.periodMs > 0) {
+                            if (retryGrid != null && retryGrid.periodMs.isFinite() && retryGrid.periodMs > 0 &&
+                                (headBeforeRetry == null || retryGrid.bpmConfidence > headBeforeRetry.bpmConfidence)
+                            ) {
                                 val periodMs = retryGrid.periodMs
                                 val headPhaseMs = Math.round(((retryGrid.phaseMs % periodMs) + periodMs) % periodMs).toLong()
                                 val periodSamples = retryGrid.periodSamples
@@ -195,7 +205,10 @@ internal class TrackAnalysisService(
                                     phaseSample = projectedPhaseSample,
                                     downbeatSample = projectedDownbeatSample,
                                 )
-                                if (bpm == null) bpm = BpmDetector.BpmResult(bpmHead.bpm, headPhaseMs, bpmHead.bpmConfidence)
+                                val headBpm = bpm
+                                if (headBpm == null || headBpm.confidence < bpmHead.bpmConfidence) {
+                                    bpm = BpmDetector.BpmResult(bpmHead.bpm, headPhaseMs, bpmHead.bpmConfidence)
+                                }
                                 if (featuresHead != null && headFrames.isNotEmpty()) {
                                     featuresHead = TransitionFeatureAnalyzer.analyze(headFrames, grid = bpmHead)
                                     bpmHead = mergePhraseConfidence(bpmHead, featuresHead)
@@ -224,8 +237,30 @@ internal class TrackAnalysisService(
                 }
                 val measuredTail = bpmTail
                 val measuredHead = bpmHead
-                if (measuredHead == null && measuredTail != null && measuredTail.periodMs.isFinite() && measuredTail.periodMs > 0) {
-                    val (grid, features) = fillMissingEnd(headFrames, 0L, measuredTail)
+                val minConfidence = settings.bpmMinConfidence
+                fun usable(grid: ExtendedBeatGrid?) = grid != null && grid.periodMs.isFinite() && grid.periodMs > 0
+                fun weak(grid: ExtendedBeatGrid?) = grid == null || grid.bpmConfidence < minConfidence
+                if (measuredHead !== measuredTail && weak(measuredHead) && usable(measuredTail) && !weak(measuredTail)) {
+                    // A weak head is as unusable to the planner as a missing one:
+                    // re-measure it around the tail's confident tempo.
+                    val (grid, features) = fillMissingEnd(headFrames, 0L, measuredTail!!)
+                    if (measuredHead == null || grid.bpmConfidence > measuredHead.bpmConfidence) {
+                        bpmHead = grid
+                        val headBpm = bpm
+                        if (headBpm == null || headBpm.confidence < grid.bpmConfidence) {
+                            bpm = BpmDetector.BpmResult(grid.bpm, grid.phaseMs, grid.bpmConfidence)
+                        }
+                        if (features != null) featuresHead = features
+                    }
+                } else if (measuredHead !== measuredTail && weak(measuredTail) && usable(measuredHead) && !weak(measuredHead)) {
+                    val (grid, features) = fillMissingEnd(tailFrames, tailStartMs, measuredHead!!)
+                    if (measuredTail == null || grid.bpmConfidence > measuredTail.bpmConfidence) {
+                        bpmTail = grid
+                        if (features != null) featuresTail = features
+                    }
+                } else if (measuredHead == null && usable(measuredTail)) {
+                    // Both ends weak: still fill a missing head so the planner sees a tempo.
+                    val (grid, features) = fillMissingEnd(headFrames, 0L, measuredTail!!)
                     bpmHead = grid
                     if (bpm == null) bpm = BpmDetector.BpmResult(grid.bpm, grid.phaseMs, grid.bpmConfidence)
                     if (features != null) featuresHead = features

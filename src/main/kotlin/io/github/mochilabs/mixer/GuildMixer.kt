@@ -2766,6 +2766,7 @@ class GuildMixer(
                     bpmScanMs = bpmScanMs,
                     key = needKey,
                     keyScanMs = keyScanMs,
+                    bpmMinConfidence = beatmatchMinConfidence,
                 ),
             )
             if (result.aborted || result.featuresHead?.unknownReason == "incomplete_window" ||

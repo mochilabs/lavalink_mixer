@@ -49,7 +49,7 @@ class MixerConfig {
 
     // Beat-matched crossfading (aligns beat grids of outgoing and incoming tracks)
     var beatmatchEnabled: Boolean = false
-    var maxTempoChange: Float = 0.06f
+    var maxTempoChange: Float = 0.08f
     var beatmatchMinConfidence: Float = 0.30f
 
     /** Parallel silence analyses (per-guild decoders are independent). Read at startup. */

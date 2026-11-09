@@ -35,7 +35,7 @@ mixer:
   keyDetectionEnabled: false
   keyScanMs: 30000
   beatmatchEnabled: false
-  maxTempoChange: 0.06
+  maxTempoChange: 0.08
   beatmatchMinConfidence: 0.30
 ```
 
@@ -90,7 +90,7 @@ POST /mixer/key
 {"guildId":"123456789012345678","enabled":true,"scanMs":30000}
 
 POST /mixer/bpm
-{"guildId":"123456789012345678","enabled":true,"beatmatchEnabled":true,"scanMs":30000,"maxTempoChange":0.06,"minConfidence":0.30}
+{"guildId":"123456789012345678","enabled":true,"beatmatchEnabled":true,"scanMs":30000,"maxTempoChange":0.08,"minConfidence":0.30}
 ```
 
 Beat-matched transitions require crossfade, BPM detection, and beat matching all

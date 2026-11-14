@@ -50,10 +50,10 @@ Use these existing tests as starting points:
 | Musical key estimation and REST metadata | `KeyDetectorTest`, `KeyIntegrationTest`, `TransitionFeaturesTest` |
 | Transition console diagnostics | `TransitionDiagnosticsTest`, `BeatMatchOutputTest`, `BeatMatchIntegrationTest` |
 | Announcements | `AnnounceQueueTest`, `IdleAnnounceTest` |
-| Analysis ownership and retries | `AnalysisIsolatedFromLiveSubTest`, `DeferredAnalysisTest` |
+| Analysis ownership, single-pass, and retries | `SinglePassAnalysisTest`, `AnalysisIsolatedFromLiveSubTest`, `DeferredAnalysisTest` |
 | Silence and trim | `SilenceAnalyzerTest`, `TailCutDeciderTest`, `TrimTransitionTest` |
 | Loudness | `NormalizationGainTest`, `NormalizationBaselineTest`, `NormalizationIntegrationTest` |
-| BPM and beat matching | `RealFftTest`, `BpmDetectorTest`, `BpmPrecisionTest`, `BpmGridTest`, `BpmIntegrationTest`, `BpmOctaveTest`, `DownbeatDetectorTest`, `PhraseDetectionTest`, `BeatMatchIntegrationTest`, `BeatMatchOutputTest`, `TempoStretcherTest`, `TempoEnvelopeTest`, `AdaptiveRecoveryIntegrationTest`, `AdaptiveRuntimeTest`, `AdaptiveTransitionRaceTest`, `TransitionFeaturesTest`, `AdaptiveTransitionPlannerTest`, `AutomixBoundaryMatrixTest`, `TransitionRecipeTest`, `TransitionMemoryTest`, `BassSwapIntegrationTest`, `EchoOutIntegrationTest`, `CrossoverLR4Test` |
+| BPM and beat matching | `RealFftTest`, `BpmDetectorTest`, `BpmPrecisionTest`, `BpmGridTest`, `BpmIntegrationTest`, `BpmOctaveTest`, `DownbeatDetectorTest`, `PhraseDetectionTest`, `BeatMatchIntegrationTest`, `BeatMatchOutputTest`, `TempoStretcherTest`, `LinkedTimescaleFilterTest`, `TempoEnvelopeTest`, `AdaptiveRecoveryIntegrationTest`, `AdaptiveRuntimeTest`, `AdaptiveTransitionRaceTest`, `TransitionFeaturesTest`, `AdaptiveTransitionPlannerTest`, `AutomixBoundaryMatrixTest`, `TransitionRecipeTest`, `TransitionMemoryTest`, `BassSwapIntegrationTest`, `CrossoverLR4Test` |
 
 Integration tests generate local WAV files and exercise Lavaplayer players.
 They do not require a running Discord bot. Some tests exercise native audio
@@ -62,10 +62,13 @@ Use unique track identifiers in new analysis tests because caches are shared.
 Release players and executors in test cleanup.
 
 For protocol timing and re-requests after an empty arm, also run
-`ProtocolPrefetchTest`. For the detector's stages and interpretation of results,
-see the [BPM extraction explanation](bpm-extraction.ko.md). The
-[detailed bot integration guide](../examples/lavalink-client/README.ko.md) describes
-queue reservations, uncertain request outcomes, and reconnect reconciliation.
+`ProtocolPrefetchTest`. For how the hybrid single-pass analyzer avoids
+duplicate track opens, see the [single-pass analysis pipeline](analysis-pipeline.md)
+([Korean](analysis-pipeline.ko.md)). For the detector's stages and
+interpretation of results, see the [BPM extraction explanation](bpm-extraction.ko.md).
+The [detailed bot integration guide](../examples/lavalink-client/README.ko.md)
+describes queue reservations, uncertain request outcomes, and reconnect reconciliation.
+See [development.ko.md](development.ko.md) for the Korean translation of this guide.
 
 After code changes, run `./gradlew build` to cover interactions beyond the
 selected tests. For documentation-only changes, check referenced symbols,
@@ -115,9 +118,9 @@ A local audio test does not prove playback through Discord. After changing the i
 A started crossfade produces one INFO line. `beatMatched=true` means preparation
 committed with beat matching active. `strategy` reports the selected `TransitionStrategy`
 (`phrase_matched_bass_swap`, `short_bass_swap`, `beatmatched_blend`, `downbeat_cut`,
-`echo_out`, `degraded_filter_sweep`, `absolute_fallback`, or `crossfade`). `targetBpm`,
-`rateRatio`, `fadeBeats`, and `echoDelayMs` report its target tempo, source speed ratio,
-number of fade beats, and Echo Out delay length. A fallback reports `beatMatched=false`,
+`degraded_filter_sweep`, `absolute_fallback`, or `crossfade`). `targetBpm`,
+`rateRatio`, and `fadeBeats` report its target tempo, source speed ratio, and
+number of fade beats. A fallback reports `beatMatched=false`,
 `rateRatio=1.0`, and its reason. `durationMs` is the remaining overlap window; `lateMs`
 records preparation delay beyond the planned start.
 

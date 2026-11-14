@@ -10,7 +10,7 @@
 서버에서 Opus 인코딩 전에 오디오를 합성하는 Kotlin 기반 [Lavalink v4](https://github.com/lavalink-devs/Lavalink) 플러그인입니다.
 
 - 이퀄 파워 크로스페이드와 겹침 없는 서버 주도 곡 전환.
-- 곡 쌍마다 7가지 전략 중 하나를 고르는 적응형 전환 플래너: 프레이즈 정렬·짧은 베이스 스왑, 비트 매칭 블렌드, 다운비트 컷, 에코 아웃, 필터 스윕, 일반 크로스페이드.
+- 곡 쌍마다 6가지 전략 중 하나를 고르는 적응형 전환 플래너: 프레이즈 정렬·짧은 베이스 스왑, 비트 매칭 블렌드, 다운비트 컷, 필터 스윕, 일반 크로스페이드.
 - 2~32박자 비트 매칭, 일시적인 템포 조절, 다음 곡의 원래 속도로 복귀.
 - 매칭된 4차 Linkwitz-Riley 크로스오버 기반 베이스 스왑. 위상 간섭 없이 두 곡의 저음을 교체합니다.
 - 같은 전략이 길드에서 연속으로 반복되지 않게 하는 전환 기억.
@@ -23,14 +23,15 @@ Lavalink 소스를 수정할 필요가 없습니다. 분석은 별도 디코더�
 
 ## 관련 문서
 
-- [REST 및 WebSocket 명세](api/openapi.yaml)
-- [봇 연동 가이드](examples/lavalink-client/README.md)
-- [한국어 상세 봇 연동 가이드](examples/lavalink-client/README.ko.md)
-- [아키텍처 및 스레딩](docs/architecture.md)
-- [빌드 및 테스트 가이드](docs/development.md)
-- [BPM 검출기 설계](docs/bpm-detector-design.md)와 [BPM 캘리브레이션](docs/bpm-calibration.md)
-- [BPM 추출 알고리즘 해설](docs/bpm-extraction.ko.md)
-- [적응형 전환 캘리브레이션](docs/adaptive-calibration.md)
+| 주제 | 한국어 | English |
+| --- | --- | --- |
+| REST 및 WebSocket OpenAPI 명세 | — | [openapi.yaml](api/openapi.yaml) |
+| Protocol v2 봇 연동 가이드 | [examples/lavalink-client/README.ko.md](examples/lavalink-client/README.ko.md) | [examples/lavalink-client/README.md](examples/lavalink-client/README.md) |
+| 아키텍처, 락 순서, 믹싱 구조 | [docs/architecture.ko.md](docs/architecture.ko.md) | [docs/architecture.md](docs/architecture.md) |
+| 단일 패스 분석 파이프라인 | [docs/analysis-pipeline.ko.md](docs/analysis-pipeline.ko.md) | [docs/analysis-pipeline.md](docs/analysis-pipeline.md) |
+| 빌드, 테스트 매트릭스, 배포 절차 | [docs/development.ko.md](docs/development.ko.md) | [docs/development.md](docs/development.md) |
+| BPM 추출 원리 및 캘리브레이션 | [docs/bpm-extraction.ko.md](docs/bpm-extraction.ko.md) | [docs/bpm-detector-design.md](docs/bpm-detector-design.md) · [docs/bpm-calibration.md](docs/bpm-calibration.md) |
+| 적응형 전환 캘리브레이션 | — | [docs/adaptive-calibration.md](docs/adaptive-calibration.md) |
 
 ## 빠른 시작
 
@@ -151,17 +152,17 @@ Content-Type: application/json
 
 | 상황 | 전략 | 전송되는 `transitionKind` |
 | --- | --- | --- |
+| 템포 조정이 필요한데 한쪽이라도 리듬 안정성이 0.35 미만(잔잔한 인트로, 루바토) | 원래 템포의 `ABSOLUTE_FALLBACK`, reason `unstable_rhythm` | `short_crossfade` |
 | 템포가 맞고 다운비트·프레이즈 신뢰도가 높음 | `PHRASE_MATCHED_BASS_SWAP`: 최대 32박 페이드, 페이드 중간에서 베이스 교체 | `beat_matched` |
 | 템포가 맞고 다운비트 신뢰도가 높음 | `SHORT_BASS_SWAP`: 최대 8박 페이드와 베이스 교체 | `beat_matched` |
 | 템포가 맞지만 마디 경계가 불확실하거나 4/4가 아님 | `BEATMATCHED_BLEND`: 박에 맞춘 2·4·8박 페이드 | `beat_matched` |
 | 템포 차이가 크고, 두 곡의 다운비트가 확실하며 에너지가 높음 | `DOWNBEAT_CUT`: 마디선에서 10ms 컷 | `crossfade` |
-| 템포 차이가 큰 그 밖의 경우 | `ECHO_OUT`: 나가는 곡의 지연 에코, 최대 2초 | `crossfade` |
 | 사용할 그리드는 없지만 특성은 유효함 | `DEGRADED_FILTER_SWEEP`: 하이패스 스윕, 최대 4초 | `crossfade` |
-| 메타데이터가 없거나 `crossfadeMs`에 맞는 박 수가 없음 | `ABSOLUTE_FALLBACK`: 이퀄 파워 크로스페이드 | `short_crossfade` |
+| 템포 차이가 큰 그 밖의 경우, 다음 곡 그리드가 없음, 메타데이터가 없음, `crossfadeMs`에 맞는 박 수가 없음 | `ABSOLUTE_FALLBACK`: 원래 템포의 이퀄 파워 크로스페이드 | `short_crossfade` |
 
 템포 비교는 옥타브를 정규화하므로 반 박자·두 배 템포도 같은 템포로 봅니다. `maxTempoChange` 주변의 불확실 구간에서는 에너지, 리듬, 조성 호환성으로 판단합니다. 페이드 길이는 `crossfadeMs`에서 복구 구간을 뺀 값을 넘지 않습니다. 2·4·8·16·32박 중 맞는 길이가 없으면 설정한 길이의 이퀄 파워 크로스페이드로 폴백합니다(`fade_window_too_short`). `crossfadeMs`가 0 이하이면 겹침 없이 전환합니다.
 
-비트 매칭 중에는 다음 곡을 현재 곡의 템포에 맞춘 뒤 핸드오프 전에 원래 속도로 복귀시킵니다. `overlapMs`는 두 곡의 페이드 구간이며, `recoveryMs`는 전체 전환 시간 안에서 다음 곡만 재생하며 속도를 복구하는 구간입니다.
+비트 매칭 중에는 다음 곡을 현재 곡의 템포에 맞춘 뒤 핸드오프 전에 원래 속도로 복귀시킵니다. `overlapMs`는 두 곡의 페이드 구간이며, `recoveryMs`는 전체 전환 시간 안에서 다음 곡만 재생하며 속도를 복구하는 구간입니다. 복구는 최소 현재 곡 기준 4박, 템포 변화 1%당 약 300ms이므로 원래 속도로 서서히 돌아갑니다. `crossfadeMs`가 짧으면 2박 페이드가 들어갈 만큼 줄어들며, 최소 500ms 또는 1%당 200ms를 유지합니다. 스트레칭은 두 채널을 하나의 스테레오 SoundTouch 인스턴스로 처리하므로 좌우가 같은 지점에서 이어 붙여져 스테레오 이미지가 유지됩니다.
 
 두 전략이 비슷하면 전환 기억이 해당 길드에서 최근에 쓴 전략에 불이익을 주어 연속 전환이 달라지게 합니다. 플래너의 선호가 뚜렷하면 항상 그 전략이 선택됩니다.
 
@@ -295,7 +296,7 @@ Content-Type: application/json
 - 최근 전환 결정과 진행 중인 핸드오프 시간은 `transitionKind`, `decisionReason`, `crossfadeHandoffInMs`로 확인합니다. `beat_matched`는 선택한 계획이므로 완료 이벤트에서도 폴백 여부를 확인합니다.
 - `currentTrackBpm`을 표시하기 전에 `currentTrackBpmIdentifier`가 현재 곡과 일치하는지 확인합니다. 분석이 진행 중이거나 비활성화된 경우 BPM·게인 값이 아직 없을 수 있습니다.
 
-`POST /mixer/analyze`는 탐색 가능한 후보곡의 활성화된 무음·BPM·전환 특성 캐시를 미리 채웁니다. HTTP 202는 분석 완료를 뜻하지 않습니다. 정규화 분석은 일반 장전 경로에서 수행합니다. 분석은 실제 서브 재생과 별도 디코더에서 진행합니다.
+`POST /mixer/analyze`는 탐색 가능한 후보곡의 활성화된 무음·BPM·조성·전환 특성 캐시를 단일 트랙 오픈으로 미리 채웁니다. HTTP `202`는 비동기 접수를 뜻하며 분석 완료를 의미하지 않습니다. 무음이나 BPM 분석이 활성화된 10분 이하의 탐색 가능한 곡은 순차 단일 패스 과정에서 정규화 음량도 함께 계산하므로, 이후 장전 시 추가 오픈이 발생하지 않습니다. 모든 분석은 실제 메인·서브 재생과 격리된 전용 디코더에서 수행됩니다.
 
 ## 조성 추정
 
@@ -367,7 +368,7 @@ flowchart LR
 	analysis["분석 PCM"] --> measurements["무음, 음량, BPM, 전환 특성"]
 ```
 
-Discord로 출력하는 플레이어는 메인 하나입니다. 서브 캡처 큐는 PCM과 소스 진행량을 함께 보관합니다. 분석용 PCM은 별도 플레이어·큐에 머물고 측정 결과만 전환과 게인에 반영합니다. 순차 공지는 겹침 재생과 서브 플레이어를 공유하지만 병렬 공지는 각각 별도 큐를 사용합니다.
+Discord로 출력하는 플레이어는 메인 하나뿐입니다. 서브 캡처 큐는 PCM과 소스 진행량을 함께 보관합니다. 분석용 PCM은 실시간 재생과 격리된 전용 플레이어·`SiphonQueue`에서 처리되며, 캐시된 측정 결과만 전환 계획과 게인에 반영됩니다. `TrackAnalysisService.analyze`는 분석당 소스 트랙을 **최대 1회만** 오픈하며(10분 이하 또는 음량 정규화 활성화 시 `0 -> EOF` 순차 스트리밍 단일 패스, 10분 초과+정규화 OFF 시 `SiphonQueue.markSeekPerformed()` 기반 세션 내 seek 단일 오픈), `GuildMixer`는 메인 트랙 시작·프리분석 예열·백필을 단일 스캔으로 통합하고 실패 재시도를 5초 쿨다운 후 1회로 제한합니다. 자세한 내용은 [docs/analysis-pipeline.ko.md](docs/analysis-pipeline.ko.md)를 참고하세요. 순차 공지는 겹침 재생과 서브 플레이어를 공유하고, 병렬 공지는 각각 별도 큐를 사용합니다.
 
 ### 핸드오프와 봇 큐 동기화
 

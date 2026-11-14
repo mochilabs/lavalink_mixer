@@ -145,6 +145,18 @@ class SiphonQueue(
         }
     }
 
+    private val seekEpoch = java.util.concurrent.atomic.AtomicLong(0L)
+
+    fun currentSeekEpoch(): Long = seekEpoch.get()
+
+    /** Clears buffered pre-seek audio and bumps the epoch seen by in-flight seek waiters. */
+    fun markSeekPerformed() {
+        synchronized(lock) {
+            clear()
+            seekEpoch.incrementAndGet()
+        }
+    }
+
     fun clear() {
         synchronized(lock) {
             deque.clear()
@@ -191,7 +203,7 @@ class SiphonFilter(
     }
 
     override fun seekPerformed(requestedTime: Long, providedTime: Long) {
-        for (queue in taps) queue.clear()
+        for (queue in taps) queue.markSeekPerformed()
     }
 
     override fun flush() = Unit

@@ -266,9 +266,14 @@ class GuildMixer(
 
     private var pendingNextTrack: AudioTrack? = null
     private var slotRevision: Long = 0L
+    private data class DeferredWarmup(
+        val track: AudioTrack,
+        val includeNormalization: Boolean,
+    )
+
     private var analysisQueued: Boolean = false
     /** Latest cache-only request waiting for the guild's single analysis player. */
-    private var deferredWarmup: AudioTrack? = null
+    private var deferredWarmup: DeferredWarmup? = null
     private var preservedStartTrack: AudioTrack? = null
     data class TransitionStatus(val kind: String, val reason: String?)
     @Volatile var transitionStatus = TransitionStatus("none", null)
@@ -482,11 +487,16 @@ class GuildMixer(
                         (id == null || !AnalysisCaches.norm.contains(id))
                 }
             } else false
-            if (needsBaselineAnalysis) {
+            // Unify main-track loudness baseline and head/tail preanalysis into a single
+            // open when BPM, key, or silence detection is also enabled.
+            val scheduledPreanalysis = if (bpmDetectionEnabled || keyDetectionEnabled || silenceSkipEnabled) {
+                val clone = runCatching { track.makeClone() }.getOrNull()
+                if (clone != null) {
+                    requestPreanalysis(clone, includeNormalization = needsBaselineAnalysis)
+                } else false
+            } else false
+            if (needsBaselineAnalysis && !scheduledPreanalysis) {
                 scheduleBaselineAnalysis(track)
-            }
-            if (bpmDetectionEnabled || keyDetectionEnabled || silenceSkipEnabled) {
-                runCatching { track.makeClone() }.getOrNull()?.let { requestPreanalysis(it) }
             }
             if (snap.xfade) {
                 // The overlap's own handoff start is masked above, so an
@@ -1923,10 +1933,9 @@ class GuildMixer(
             return
         }
         val recipeStrategy = activeRecipe?.strategy?.name?.lowercase() ?: "crossfade"
-        val echoDelayMs = activeRecipe?.echoTrigger?.let { it.delaySamples * 1000L / SAMPLE_RATE } ?: 0L
         val beatmatchLog = if (started.beatMatched) {
-            "strategy=$recipeStrategy targetBpm=${plan.targetBpm} rateRatio=${plan.rateRatio} fadeBeats=${plan.fadeBeats} echoDelayMs=$echoDelayMs"
-        } else "strategy=$recipeStrategy rateRatio=1.0 echoDelayMs=$echoDelayMs"
+            "strategy=$recipeStrategy targetBpm=${plan.targetBpm} rateRatio=${plan.rateRatio} fadeBeats=${plan.fadeBeats}"
+        } else "strategy=$recipeStrategy rateRatio=1.0"
         log.info(
             "crossfade guild={} from='{}' to='{}' beatMatched={} reason={} durationMs={} lateMs={} {} {}",
             guildId, expected.outgoing?.let { titleOf(it) }?.replace('\n', ' ')?.replace('\r', ' '),
@@ -2647,29 +2656,56 @@ class GuildMixer(
         }
     }
 
+    private fun shouldWarmNormFor(track: AudioTrack): Boolean {
+        if (!normalizationEnabled || (!silenceSkipEnabled && !bpmDetectionEnabled)) return false
+        val duration = try {
+            track.duration
+        } catch (_: Exception) {
+            -1L
+        }
+        val seekable = try {
+            track.isSeekable
+        } catch (_: Exception) {
+            false
+        }
+        return seekable && duration in 1..TrackAnalysisService.SEQUENTIAL_MAX_MS
+    }
+
     /** Bounded, cache-only warmup; it never arms a queue slot or mutates playback. */
-    fun requestPreanalysis(track: AudioTrack): Boolean {
+    fun requestPreanalysis(
+        track: AudioTrack,
+        includeNormalization: Boolean = shouldWarmNormFor(track),
+    ): Boolean {
         val id = idOf(track) ?: return false
         val includeSilence = silenceSkipEnabled
+        val warmNorm = includeNormalization && normalizationEnabled && normGainBaseline == 0f
         synchronized(lock) {
             val needSilence = includeSilence && !AnalysisCaches.trim.contains(id)
+            val needNorm = warmNorm && !AnalysisCaches.norm.contains(id)
             val needBpm = bpmDetectionEnabled && needsBpmAnalysisLocked(id)
             val needKey = keyDetectionEnabled && !AnalysisCaches.key.contains(id)
-            if ((!needSilence && !needBpm && !needKey) || !track.isSeekable || track.duration <= 0) return false
+            if ((!needSilence && !needNorm && !needBpm && !needKey) || !track.isSeekable || track.duration <= 0) return false
             if (analysisQueued || analysisState.active) {
-                deferredWarmup = track
+                deferredWarmup = DeferredWarmup(track, warmNorm)
                 return true
             }
             analysisQueued = true
             deferredWarmup = null
         }
-        return scheduleWarmup(track)
+        return scheduleWarmup(track, warmNorm)
     }
 
-    private fun scheduleWarmup(track: AudioTrack): Boolean {
+    private fun scheduleWarmup(track: AudioTrack, includeNormalization: Boolean): Boolean {
         return try {
             analysisExecutor.execute {
-                try { analyzeBlocking(track, cacheOnly = true, includeSilence = silenceSkipEnabled) }
+                try {
+                    analyzeBlocking(
+                        track,
+                        cacheOnly = true,
+                        includeSilence = silenceSkipEnabled,
+                        includeNormalization = includeNormalization,
+                    )
+                }
                 catch (e: Exception) { log.warn("preanalysis failed on guild {}", guildId, e) }
                 finally {
                     synchronized(lock) { analysisQueued = false }
@@ -2691,7 +2727,7 @@ class GuildMixer(
                 analysisQueued = true
             }
         }
-        if (next != null) scheduleWarmup(next)
+        if (next != null) scheduleWarmup(next.track, next.includeNormalization)
     }
 
     private fun needsBpmAnalysisLocked(identifier: String): Boolean =
@@ -2712,9 +2748,14 @@ class GuildMixer(
     }
 
     /** Scans a clone on the isolated analysis player. A concurrent scan defers this work. */
-    fun analyzeBlocking(track: AudioTrack, cacheOnly: Boolean = false, includeSilence: Boolean = !cacheOnly) {
+    fun analyzeBlocking(
+        track: AudioTrack,
+        cacheOnly: Boolean = false,
+        includeSilence: Boolean = !cacheOnly,
+        includeNormalization: Boolean = !cacheOnly,
+    ) {
         val doSilence = silenceSkipEnabled && includeSilence
-        val doNorm = normalizationEnabled && !cacheOnly
+        val doNorm = normalizationEnabled && includeNormalization
         val doBpm = bpmDetectionEnabled
         val doKey = keyDetectionEnabled && track.isSeekable && track.duration in 1 until Long.MAX_VALUE / 2
         if (!doSilence && !doNorm && !doBpm && !doKey) {
@@ -2737,7 +2778,9 @@ class GuildMixer(
             if (analysisState.active) {
                 // A queued cache-only warmup may reach this gate after a normal scan starts.
                 // Retain it; the scan owner or warmup worker will drain it when idle.
-                if (cacheOnly && deferredWarmup == null) deferredWarmup = track
+                if (cacheOnly && deferredWarmup == null) {
+                    deferredWarmup = DeferredWarmup(track, includeNormalization)
+                }
                 log.debug(
                     "analysis deferred on guild {}: another scan is running; will retry",
                     guildId,
@@ -2800,55 +2843,9 @@ class GuildMixer(
             if (needBpm && result.bpmTail != null) {
                 AnalysisCaches.bpmTail[identifier] = result.bpmTail
             }
-            if (doBpm && !result.aborted) {
-                val playing = synchronized(lock) { mainTrack() }
-                val playingId = playing?.let { idOf(it) }
-                if (playing != null && playingId != null && !AnalysisCaches.featuresTail.contains(playingId)) {
-                    val tail = analysisService.measureTailAnalysis(playing, bpmScanMs)
-                    if (tail?.features?.unknownReason != "incomplete_window") {
-                        tail?.grid?.let { AnalysisCaches.bpmTail[playingId] = it }
-                        tail?.features?.let { AnalysisCaches.featuresTail[playingId] = it }
-                    }
-                }
-            }
-            if (doNorm && !result.aborted) {
-                // The playing track's own scan is skipped while this slot is busy;
-                // measure it now so it does not keep an inherited level all track.
-                val playing = synchronized(lock) { mainTrack() }
-                val playingId = playing?.let { idOf(it) }
-                if (playing != null && playingId != null && playingId != identifier &&
-                    !AnalysisCaches.norm.contains(playingId) && normGainBaseline == 0f
-                ) {
-                    val loudness = analysisService.measureBaseline(playing) { noteProvisionalLoudness(playingId, it) }
-                    if (loudness != null) {
-                        AnalysisCaches.norm[playingId] = loudness
-                        applyAnalyzedNormGain(playingId)
-                        log.info("normalization guild {} (playing track): lufs={}", guildId, loudness)
-                    }
-                }
-            }
-            if (doSilence && !result.aborted) {
-                val playing = synchronized(lock) { mainTrack() }
-                val playingId = playing?.let { idOf(it) }
-                if (playing != null && playingId != null && playingId != identifier && !AnalysisCaches.trim.contains(playingId)) {
-                    val playingTrim = analysisService.measureTailSilence(
-                        playing,
-                        TrackAnalysisSettings(
-                            silence = true,
-                            normalization = false,
-                            bpm = false,
-                            silenceThresholdDb = silenceThresholdDb,
-                            silenceMinSoundMs = silenceMinSoundMs,
-                            silenceHeadScanMs = silenceHeadScanMs,
-                            silenceTailScanMs = silenceTailScanMs,
-                            bpmScanMs = bpmScanMs,
-                        ),
-                    )
-                    if (playingTrim != null) {
-                        AnalysisCaches.trim[playingId] = playingTrim
-                    }
-                }
-            }
+            // The playing track's loudness is backfilled even by cache-only warmups: a busy
+            // slot can drop its own deferred baseline scan when a later warmup replaces it.
+            backfillPlayingTrack(identifier, doSilence, normalizationEnabled, doBpm, doKey)
             synchronized(lock) {
                 if (needBpm) analysisState.completedBpmIdentifier = identifier
                 if (hasSilence) {
@@ -2871,6 +2868,68 @@ class GuildMixer(
         } finally {
             synchronized(lock) { analysisState.active = false }
             drainDeferredWarmup()
+        }
+    }
+
+    /**
+     * Fills any missing measurements on the currently playing main track using
+     * at most one analysis pass, rather than separate tail/norm/silence opens.
+     */
+    private fun backfillPlayingTrack(
+        analyzedIdentifier: String,
+        doSilence: Boolean,
+        doNorm: Boolean,
+        doBpm: Boolean,
+        doKey: Boolean,
+    ) {
+        val playing = synchronized(lock) { mainTrack() } ?: return
+        val playingId = idOf(playing) ?: return
+        val needPlayingBpm = doBpm && playingId != analyzedIdentifier &&
+            !AnalysisCaches.featuresTail.contains(playingId)
+        val needPlayingNorm = doNorm && playingId != analyzedIdentifier &&
+            !AnalysisCaches.norm.contains(playingId) && normGainBaseline == 0f
+        val needPlayingSilence = doSilence && playingId != analyzedIdentifier &&
+            !AnalysisCaches.trim.contains(playingId)
+        val needPlayingKey = doKey && playingId != analyzedIdentifier &&
+            !AnalysisCaches.key.contains(playingId)
+        if (!needPlayingBpm && !needPlayingNorm && !needPlayingSilence && !needPlayingKey) return
+
+        val playingResult = analysisService.analyze(
+            playing,
+            settings = TrackAnalysisSettings(
+                silence = needPlayingSilence,
+                normalization = needPlayingNorm,
+                bpm = needPlayingBpm,
+                silenceThresholdDb = silenceThresholdDb,
+                silenceMinSoundMs = silenceMinSoundMs,
+                silenceHeadScanMs = silenceHeadScanMs,
+                silenceTailScanMs = silenceTailScanMs,
+                bpmScanMs = bpmScanMs,
+                key = needPlayingKey,
+                keyScanMs = keyScanMs,
+                bpmMinConfidence = beatmatchMinConfidence,
+            ),
+            onLoudnessEstimate = if (needPlayingNorm) { lufs -> noteProvisionalLoudness(playingId, lufs) } else null,
+        )
+        if (playingResult.aborted) return
+
+        if (needPlayingNorm && playingResult.loudnessRms != null) {
+            AnalysisCaches.norm[playingId] = playingResult.loudnessRms
+            applyAnalyzedNormGain(playingId)
+            log.info("normalization guild {} (playing track): lufs={}", guildId, playingResult.loudnessRms)
+        }
+        if (needPlayingSilence && playingResult.trim != null) {
+            AnalysisCaches.trim[playingId] = playingResult.trim
+        }
+        if (needPlayingKey && playingResult.key != null) {
+            AnalysisCaches.key[playingId] = playingResult.key
+        }
+        if (needPlayingBpm && playingResult.featuresTail?.unknownReason != "incomplete_window") {
+            playingResult.bpm?.let { if (!AnalysisCaches.bpm.contains(playingId)) AnalysisCaches.bpm[playingId] = it }
+            playingResult.bpmHead?.let { if (!AnalysisCaches.bpmHead.contains(playingId)) AnalysisCaches.bpmHead[playingId] = it }
+            playingResult.featuresHead?.let { if (!AnalysisCaches.featuresHead.contains(playingId)) AnalysisCaches.featuresHead[playingId] = it }
+            playingResult.bpmTail?.let { AnalysisCaches.bpmTail[playingId] = it }
+            playingResult.featuresTail?.let { AnalysisCaches.featuresTail[playingId] = it }
         }
     }
 
@@ -2953,7 +3012,7 @@ class GuildMixer(
         internal fun sanitizeAnnounceGain(gain: Float): Float =
             if (gain.isNaN()) 1f else gain.coerceIn(0f, MAX_ANNOUNCE_GAIN)
         /** Normalization gain changes from late loudness results glide over this span. */
-        internal const val NORM_RAMP_MS = 1_000L
+        internal const val NORM_RAMP_MS = 3_000L
 
         /** Max time past the window opening to wait for incoming-track analysis before overlapping anyway. */
         private const val FEATURE_WAIT_MS = 2000L

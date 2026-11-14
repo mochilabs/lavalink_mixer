@@ -392,32 +392,39 @@ guide requires `autoSkip: false`. Crossfade advances include a `handoffId`.
 
 ## Analysis and overlays
 
+See [Single-Pass Analysis Pipeline](analysis-pipeline.md) ([한국어](analysis-pipeline.ko.md)) for the full design of single-open extraction, and [architecture.ko.md](architecture.ko.md) for the Korean translation of this document.
+
 Silence detection, normalization, BPM detection, and key detection default to disabled.
 Analysis decodes through `TrackAnalysisService`, separate from live secondary
-playback. `AnalysisState` serializes scans per guild and limits repeated failures.
-Pending tracks can advance without completed analysis when content ends.
-BPM-only work can retry while the next track is already ready for playback.
-A tail scan validates coverage against trimmed content end, including explicit tail
-reanalysis. Comparing a trimmed scan with full file duration would discard valid
-results as incomplete and prevent cache publication and next-track promotion.
-A successful scan with no beat grid completes that scan rather than triggering
-repeated decodes. The per-guild analysis state remembers the last such completion.
+playback (`Live` sub playback and analysis never share a decoder instance). `AnalysisState`
+serializes scans per guild, deduplicates retries (at most `MAX_FAILURE_RETRIES = 1` retry
+after a `FAILURE_RETRY_COOLDOWN_MS = 5_000L` cooldown on hard errors, with a `250L` ms throttle
+for busy-slot deferral), and tracks clean completions cleanly:
+Pending tracks can advance without completed analysis when content ends, and
+a successful scan with no usable beat grid marks completion rather than triggering
+repeated decodes.
+
+Every call to `TrackAnalysisService.analyze` opens `sub.playTrack(clone)` **at most once** per track:
+- **Sequential single pass (`runSequentialSinglePass`):** used whenever loudness normalization is enabled, the track is non-seekable or unbounded/infinite, or a finite seekable track needing tail metrics is at most `SEQUENTIAL_MAX_MS` (10 minutes). One linear `0 -> EOF` decode feeds `NormalizationGain`, `SilenceAnalyzer`, head/tail BPM detectors (via a bounded `TailRingBuffer`), `KeyDetector`, and `TransitionFeatureAnalyzer` simultaneously.
+- **In-flight seeked single open (`runSeekedSingleOpen`):** used for finite seekable tracks longer than 10 minutes when normalization is off (or finite key-only scans). A single active `sub` decoder jumps cleanly via `seekAndCollect` (`clone.position = ...` synchronized with `SiphonQueue.markSeekPerformed()` epoch counters) to collect head and tail windows without opening a second HTTP/source stream.
+
+Clean EOF within `METADATA_EOF_DRIFT_MS` (2,000 ms) of container `duration` is accepted without tripping `incomplete_window`. A tail scan validates coverage against trimmed content end, including explicit tail reanalysis, so container metadata rounding or trimmed endings do not discard valid caches.
 
 `AnalysisCaches` stores trim points, loudness, BPM, head/tail beat grids, and key estimates.
-Each cache has a coarse size bound of 1000 and uses the track identifier as its
-key. The key does not include guild settings. Concurrent callers can repeat
-analysis; the cache does not guarantee one decode per identifier.
+Each cache uses `BoundedCache(1000)` keyed by track identifier. The key does not include
+guild settings; concurrent callers do not lock globally on cache keys, while `GuildMixer`
+deduplicates per-guild queued work and merges missing fields via combined entrypoints:
+- `onMainTrackStart` triggers at most one combined warmup (`requestPreanalysis(clone, includeNormalization = needsBaselineAnalysis)`).
+- `backfillPlayingTrack` backfills any missing loudness, trim, head/tail BPM, features, or key on the currently playing main track in a single `analysisService.analyze(...)` call instead of sequential dedicated passes.
 
 `NormalizationGain` measures K-weighted loudness and calculates linear gain.
 Measurement filtering does not replace output PCM. Normalization defaults to
 attenuation only. The gains are `GainRamp`s advanced only by the elected feeder.
 A provisional opening estimate (`AnalysisCaches.normProvisional`, first 8s of
-decoded audio) applies before the full-track value in `AnalysisCaches.norm`;
+decoded audio) emits early before the full-track value in `AnalysisCaches.norm`;
 only the full value marks normalization analysis complete. Late results ramp
-over `NORM_RAMP_MS`. An unmeasured track inherits the current level. When the
-playing track's own scan could not start because the analysis slot was busy,
-the next-track scan backfills it, as it already does for tail BPM and trim.
-The analysis pump pulls frames with a timed `provide` and no pacing sleep, so a
+over `NORM_RAMP_MS`. An unmeasured track inherits the current level.
+The analysis pump pulls frames via `SiphonQueue` with no playback pacing sleep, so a
 scan runs at decoder or network speed (about 600x realtime for local WAV in tests)
 and occupies one analysis thread plus its decoder thread while it runs. Silence detection combines offline trim points with a realtime
 tail detector on raw main PCM before gain application.
@@ -433,9 +440,17 @@ major/minor estimates with heuristic confidence, not calibrated whole-song label
 `ExtendedBeatGrid` (with downbeat and merged phrase confidence) and `TransitionFeatures`,
 generating a declarative `TransitionRecipe` and deriving the phase-snapped `CrossfadePlan`
 from that recipe. `CrossfadePlan.overlapMs` controls gain fading; `recoveryMs` reserves
-an incoming-only speed recovery inside the total window. `TempoEnvelope` runs on projected
+an incoming-only speed recovery inside the total window: at least four outgoing beats,
+plus about 300 ms per 1% of tempo change (`recoveryMsFor`). A tight window shrinks it to fit a
+2-beat fade, but not below 500 ms or 200 ms per 1%. `TempoEnvelope` runs on projected
 output sample coordinates in the secondary producer, so decoding ahead does not shift
 its schedule. Keeping the native delegate alive at unity avoids discarding its tail.
+The default delegate is `LinkedTimescaleFilter`: one SoundTouch instance created with
+the real channel count through lavadsp's `TimescaleConverter`, fed interleaved PCM.
+lavadsp's own `TimescalePcmAudioFilter` runs one mono SoundTouch per channel, so each
+channel picks its own WSOLA splice offset and the stereo image smears while stretching.
+`TimescaleConverter` extends `native-loader`'s `NativeResourceHolder`, so the build
+declares `native-loader` `compileOnly`; Lavalink ships it with lavadsp.
 Exact native per-output input positions are unavailable: FIFO source integration
 is tested to a tolerance, not claimed sample-exact WSOLA correspondence. The wire
 labels (`beat_matched`, `short_crossfade`, `crossfade`, `preserve`) remain for
@@ -448,21 +463,25 @@ protocol-v2 compatibility while the one-line `crossfade` log reports the active
 across an uncertainty-margin multi-level decision waterfall:
 - **Level 0 (Grid-Based):** When `ExtendedBeatGrid` confidence is sufficient (`bpmConfidence >= minConfidence`).
   - **Sync Domain ($\Delta_{\log} \le \text{margin}$):** Executes `PHRASE_MATCHED_BASS_SWAP` (up to a 32-beat fade, bass swapped at the fade midpoint) when both downbeats and phrases are confident (`downbeatConfidence >= 0.4`, `phraseConfidence >= 0.4`), degrading to `SHORT_BASS_SWAP` (up to 8 beats) or `BEATMATCHED_BLEND` (2/4/8/16-beat, phase-snapped) when metric boundaries are uncertain or for non-4/4 meters.
-  - **Async Domain ($\Delta_{\log} > \text{margin}$):** Executes `DOWNBEAT_CUT` when both downbeats are confident and energetic, or `ECHO_OUT` (1/2-beat if BPM $\ge$ 125, 1-beat if BPM < 125) using a 96,000-sample circular delay buffer with an explicit linear termination ramp.
+  - **Async Domain ($\Delta_{\log} > \text{margin}$):** Executes `DOWNBEAT_CUT` when both downbeats are confident and energetic, otherwise an `ABSOLUTE_FALLBACK` equal-power crossfade at native tempo (`tempo_diff_exceeded`). A missing or weak incoming grid takes the same crossfade with `missing_incoming_grid` or `low_confidence_incoming_grid`. Echo Out was removed: listeners heard its level rise suddenly and then drop.
+- **Rhythm gate:** When a sync would stretch the incoming track, a rhythm stability below `SYNC_MIN_RHYTHM` (0.35) on either side yields an `ABSOLUTE_FALLBACK` crossfade at native tempo with reason `unstable_rhythm`. Such grids usually fit a soft intro, and stretching to them drags the track without locking beats.
 - **Grid confidence:** `TrackAnalysisService` treats a head or tail grid below `minConfidence` like a missing one. It retries further into the track and re-measures the end around the other end's tempo, keeping the more confident grid. A weak incoming grid that reaches the planner reports `low_confidence_incoming_grid` instead of `missing_incoming_grid`.
 - **Level 1 (Degraded):** When beat grids are absent but envelope features are valid, executes a time-based high-pass `DEGRADED_FILTER_SWEEP` ($20\text{Hz} \to 3000\text{Hz}$).
 - **Level 2 (Absolute Fallback):** When all metadata is missing or on buffer underrun, converges to an `ABSOLUTE_FALLBACK` Equal-Power crossfade that keeps the configured `crossfadeMs`, bounded by the outgoing content. The same fallback applies when no 2/4/8/16/32-beat fade fits `crossfadeMs` (reason `fade_window_too_short`); a non-positive `crossfadeMs` yields no overlap.
 
 In `MixerFilter`, real-time DSP automation runs with zero heap allocations during playback:
-- **Dual LR4 Crossover (`CrossoverLR4`):** Both outgoing and incoming stereo audio streams pass through matched 4th-order Linkwitz-Riley filters (16 biquads total) at 200Hz. This guarantees identical group delay across both tracks, eliminating comb filtering while allowing low-frequency bass swap with 15ms smoothing ramps. When a recipe activates, the outgoing crossover is reset and pre-rolled with the last 100ms of main PCM from the delay buffer, so the first transition chunk starts from settled filter state without per-chunk work during normal playback.
+- **Dual LR4 Crossover (`CrossoverLR4`):** Both outgoing and incoming stereo audio streams pass through matched 4th-order Linkwitz-Riley filters (16 biquads total) at 200Hz. This guarantees identical group delay across both tracks, eliminating comb filtering while allowing low-frequency bass swap with 15ms smoothing ramps. When a recipe activates, the outgoing crossover is reset and pre-rolled with the last 100ms of main PCM from `RecentPcmBuffer`, so the first transition chunk starts from settled filter state without per-chunk work during normal playback.
 - **High-Pass Filter Sweep (`PcmBiquadFilter`):** Executes `FilterCutoff` sweeps in place on the outgoing stream during degraded transitions.
-- **Circular Delay Buffer (`CircularDelayBuffer`):** Pre-allocated 96,000-sample stereo buffer (2.0s @ 48kHz, accommodating BPM 40) continuously banks incoming main audio and provides feedback delay with decay and linear fade-out termination on Echo Out triggers.
+- **Recent PCM ring (`RecentPcmBuffer`):** Pre-allocated 100 ms stereo ring that continuously banks main audio (reset on seek) for the crossover pre-roll.
 - **Transition Memory (`TransitionMemory`):** Tracks the recent history of applied transition strategies per guild and applies multiplicative penalties to shift between viable candidates and prevent consecutive mechanical repetition. `rank` adds a deterministic track-pair bonus below 0.10, so penalized near-ties resolve differently per track pair while a clear planner preference (score gap ≥ 0.15) always wins.
 
 When BPM analysis finds a grid at only one end of a track, `TrackAnalysisService` re-measures the other end on its already decoded frames within ±4% of the measured tempo. If that still fails, it projects tempo and beat phase only; downbeat and phrase confidence stay 0 because a downbeat extrapolated across the track can drift off the bar.
 
 `requestPreanalysis` retains the latest warmup while another scan is queued or
-active, and writes enabled silence, BPM, feature, and key caches. It never arms, promotes or changes
+active, and writes enabled silence, BPM, feature, and key caches — and for
+seekable tracks up to `SEQUENTIAL_MAX_MS` (10 minutes) with silence or BPM enabled,
+it also warms `AnalysisCaches.norm` in the same sequential single pass (`shouldWarmNormFor`)
+so subsequent arming needs zero additional opens. It never arms, promotes, or changes
 live gain. Current-track BPM and key analysis can run without a queued next track. Results are track-keyed; normal JIT
 arming and epoch checks remain the authority for playback. Explicit preservation
 is an optional arm field included in the idempotency fingerprint, never a global

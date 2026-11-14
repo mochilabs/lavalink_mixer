@@ -10,7 +10,7 @@
 A Kotlin plugin for [Lavalink v4](https://github.com/lavalink-devs/Lavalink) that mixes audio on the server before Opus encoding.
 
 - Equal-power crossfades and server-managed advancement without overlap.
-- An adaptive transition planner that picks one of seven strategies per track pair: phrase-matched or short bass swap, beat-matched blend, downbeat cut, echo out, filter sweep, or a plain crossfade.
+- An adaptive transition planner that picks one of six strategies per track pair: phrase-matched or short bass swap, beat-matched blend, downbeat cut, filter sweep, or a plain crossfade.
 - Beat matching with 2- to 32-beat fades, temporary tempo adjustment, and recovery to the incoming track's original speed.
 - Bass swaps on a matched 4th-order Linkwitz-Riley crossover, so the two low ends trade places without comb filtering.
 - Transition memory that avoids repeating the same strategy back to back in a guild.
@@ -23,14 +23,15 @@ The plugin requires no Lavalink source changes. Analysis runs in Kotlin/JVM on a
 
 ## Documentation
 
-- [REST and WebSocket reference](api/openapi.yaml)
-- [Bot integration guide](examples/lavalink-client/README.md)
-- [Detailed bot integration guide in Korean](examples/lavalink-client/README.ko.md)
-- [Architecture and threading](docs/architecture.md)
-- [Build and testing guide](docs/development.md)
-- [BPM detector design](docs/bpm-detector-design.md) and [BPM calibration](docs/bpm-calibration.md)
-- [BPM extraction algorithm explained in Korean](docs/bpm-extraction.ko.md)
-- [Adaptive transition calibration](docs/adaptive-calibration.md)
+| Topic | English | 한국어 |
+| --- | --- | --- |
+| REST & WebSocket OpenAPI schema | [openapi.yaml](api/openapi.yaml) | — |
+| Bot integration guide (Protocol v2) | [examples/lavalink-client/README.md](examples/lavalink-client/README.md) | [examples/lavalink-client/README.ko.md](examples/lavalink-client/README.ko.md) |
+| Architecture, locks, and mixing graph | [docs/architecture.md](docs/architecture.md) | [docs/architecture.ko.md](docs/architecture.ko.md) |
+| Single-pass analysis pipeline | [docs/analysis-pipeline.md](docs/analysis-pipeline.md) | [docs/analysis-pipeline.ko.md](docs/analysis-pipeline.ko.md) |
+| Build, test matrix, and release workflow | [docs/development.md](docs/development.md) | [docs/development.ko.md](docs/development.ko.md) |
+| BPM extraction & calibration | [docs/bpm-detector-design.md](docs/bpm-detector-design.md) · [docs/bpm-calibration.md](docs/bpm-calibration.md) | [docs/bpm-extraction.ko.md](docs/bpm-extraction.ko.md) |
+| Adaptive transition calibration | [docs/adaptive-calibration.md](docs/adaptive-calibration.md) | — |
 
 ## Quickstart
 
@@ -151,17 +152,17 @@ Analysis extracts head and tail beat grids (tempo, beat phase, downbeat and phra
 
 | Situation | Strategy | Wire `transitionKind` |
 | --- | --- | --- |
+| Tempo stretch needed, but either side's rhythm stability is below 0.35 (soft intro, rubato) | `ABSOLUTE_FALLBACK` at native tempo, reason `unstable_rhythm` | `short_crossfade` |
 | Tempos compatible, downbeats and phrases confident | `PHRASE_MATCHED_BASS_SWAP`: up to a 32-beat fade, bass swapped at the fade midpoint | `beat_matched` |
 | Tempos compatible, downbeats confident | `SHORT_BASS_SWAP`: up to an 8-beat fade with a bass swap | `beat_matched` |
 | Tempos compatible, bar boundaries uncertain or non-4/4 | `BEATMATCHED_BLEND`: 2-, 4-, or 8-beat phase-snapped fade | `beat_matched` |
 | Tempos too far apart, both downbeats confident, high energy | `DOWNBEAT_CUT`: 10 ms cut on a bar line | `crossfade` |
-| Tempos too far apart otherwise | `ECHO_OUT`: delayed echo of the outgoing track, up to 2 s | `crossfade` |
 | No usable grid, but valid features | `DEGRADED_FILTER_SWEEP`: high-pass sweep, up to 4 s | `crossfade` |
-| No usable metadata, or no beat count fits `crossfadeMs` | `ABSOLUTE_FALLBACK`: equal-power crossfade | `short_crossfade` |
+| Tempos too far apart otherwise, no usable incoming grid, no usable metadata, or no beat count fits `crossfadeMs` | `ABSOLUTE_FALLBACK`: equal-power crossfade at native tempo | `short_crossfade` |
 
 Tempo comparison is octave-normalized (half and double time count as a match) and uses a deadband around `maxTempoChange`; inside the deadband, energy, rhythm, and key compatibility decide. Fade length never exceeds `crossfadeMs` minus the recovery period. When no 2-, 4-, 8-, 16-, or 32-beat fade fits, the planner uses a plain equal-power crossfade of the configured length (`fade_window_too_short`). A `crossfadeMs` of zero or less produces no overlap.
 
-During a matched transition the incoming track follows the outgoing tempo, then recovers to its original speed before handoff. `overlapMs` is the two-track fade duration, and `recoveryMs` is the incoming-only recovery period within the total transition window.
+During a matched transition the incoming track follows the outgoing tempo, then recovers to its original speed before handoff. `overlapMs` is the two-track fade duration, and `recoveryMs` is the incoming-only recovery period within the total transition window. Recovery lasts at least four outgoing beats and about 300 ms per 1% of tempo change, so the return to native speed is gradual. A short `crossfadeMs` shrinks it to keep room for a 2-beat fade, down to 500 ms or 200 ms per 1%. Stretching runs both channels through one stereo SoundTouch instance, so left and right are spliced together and the stereo image stays intact.
 
 When two strategies are close, transition memory penalizes the ones used most recently in that guild, so consecutive transitions vary. A clear planner preference always wins.
 
@@ -297,7 +298,7 @@ Use `GET /mixer/state?guildId=...` while testing:
 - Check `transitionKind`, `decisionReason`, and `crossfadeHandoffInMs` for the latest transition decision and active handoff timing. `beat_matched` describes a selected plan, so also inspect completion events for fallback.
 - Check `currentTrackBpmIdentifier` against the confirmed current track before displaying `currentTrackBpm`. BPM and gain values can be unknown while analysis is pending or disabled.
 
-`POST /mixer/analyze` optionally warms enabled silence and BPM/feature caches for a seekable candidate. HTTP 202 does not mean analysis is complete. Normalization analysis still occurs through normal arming. Analysis remains separate from live secondary playback.
+`POST /mixer/analyze` optionally pre-warms enabled silence, BPM, key, and transition feature caches for a seekable candidate in a single track open. HTTP `202` means the request was accepted, not finished. For seekable tracks up to 10 minutes with silence or BPM enabled, that sequential single pass computes normalization loudness as well (`shouldWarmNormFor`), so later arming requires zero additional track opens. Analysis remains completely isolated from live main and secondary playback.
 
 ## Musical key estimation
 
@@ -373,9 +374,16 @@ flowchart LR
 ```
 
 Only the main player feeds Discord. The secondary capture queue carries both PCM
-and source-progress accounting. Analysis PCM stays on a separate player and queue;
-only its measurements influence planning and gain. Sequential announcements share
-the secondary player with overlap, while parallel announcements have their own queues.
+and source-progress accounting. Analysis PCM stays on an isolated secondary player
+and `SiphonQueue`, and only its cached measurements influence planning and gain.
+`TrackAnalysisService.analyze` opens each source track **at most once** per analysis—via
+a streaming `0 -> EOF` sequential pass (`<= 10 min` or loudness enabled) or in-flight
+`SiphonQueue.markSeekPerformed()` seeks on long tracks—while `GuildMixer` consolidates
+main-track startup, warmup (`requestPreanalysis`), and `backfillPlayingTrack` into single
+opens and caps failure retries at one attempt after a 5s cooldown.
+See [docs/analysis-pipeline.md](docs/analysis-pipeline.md) for details. Sequential
+announcements share the secondary player with overlap, while parallel announcements have
+their own queues.
 
 ### Handoff and queue synchronization
 

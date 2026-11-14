@@ -54,6 +54,10 @@ class AdaptiveTransitionPlannerTest {
         val recipe = plan(outGrid, inGrid)
         assertEquals(TransitionStrategy.ECHO_OUT, recipe.strategy)
         assertTrue(recipe.automations.any { it is ParamAutomation.EchoTrigger })
+        assertTrue(recipe.gainAt(TrackTarget.INCOMING, 0L, 0.0f) < 0.05f, "echo_out must fade incoming smoothly from 0")
+        assertEquals(1.0f, recipe.gainAt(TrackTarget.INCOMING, recipe.totalSamples, 0.0f), 1e-4f)
+        assertTrue(recipe.gainAt(TrackTarget.OUTGOING, 0L, 1.0f) > 0.9f, "echo_out must smooth outgoing release")
+        assertEquals(0.0f, recipe.gainAt(TrackTarget.OUTGOING, recipe.totalSamples, 1.0f), 1e-4f)
     }
 
     @Test

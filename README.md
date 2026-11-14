@@ -23,14 +23,15 @@ The plugin requires no Lavalink source changes. Analysis runs in Kotlin/JVM on a
 
 ## Documentation
 
-- [REST and WebSocket reference](api/openapi.yaml)
-- [Bot integration guide](examples/lavalink-client/README.md)
-- [Detailed bot integration guide in Korean](examples/lavalink-client/README.ko.md)
-- [Architecture and threading](docs/architecture.md)
-- [Build and testing guide](docs/development.md)
-- [BPM detector design](docs/bpm-detector-design.md) and [BPM calibration](docs/bpm-calibration.md)
-- [BPM extraction algorithm explained in Korean](docs/bpm-extraction.ko.md)
-- [Adaptive transition calibration](docs/adaptive-calibration.md)
+| Topic | English | 한국어 |
+| --- | --- | --- |
+| REST & WebSocket OpenAPI schema | [openapi.yaml](api/openapi.yaml) | — |
+| Bot integration guide (Protocol v2) | [examples/lavalink-client/README.md](examples/lavalink-client/README.md) | [examples/lavalink-client/README.ko.md](examples/lavalink-client/README.ko.md) |
+| Architecture, locks, and mixing graph | [docs/architecture.md](docs/architecture.md) | [docs/architecture.ko.md](docs/architecture.ko.md) |
+| Single-pass analysis pipeline | [docs/analysis-pipeline.md](docs/analysis-pipeline.md) | [docs/analysis-pipeline.ko.md](docs/analysis-pipeline.ko.md) |
+| Build, test matrix, and release workflow | [docs/development.md](docs/development.md) | [docs/development.ko.md](docs/development.ko.md) |
+| BPM extraction & calibration | [docs/bpm-detector-design.md](docs/bpm-detector-design.md) · [docs/bpm-calibration.md](docs/bpm-calibration.md) | [docs/bpm-extraction.ko.md](docs/bpm-extraction.ko.md) |
+| Adaptive transition calibration | [docs/adaptive-calibration.md](docs/adaptive-calibration.md) | — |
 
 ## Quickstart
 
@@ -297,7 +298,7 @@ Use `GET /mixer/state?guildId=...` while testing:
 - Check `transitionKind`, `decisionReason`, and `crossfadeHandoffInMs` for the latest transition decision and active handoff timing. `beat_matched` describes a selected plan, so also inspect completion events for fallback.
 - Check `currentTrackBpmIdentifier` against the confirmed current track before displaying `currentTrackBpm`. BPM and gain values can be unknown while analysis is pending or disabled.
 
-`POST /mixer/analyze` optionally warms enabled silence and BPM/feature caches for a seekable candidate. HTTP 202 does not mean analysis is complete. Normalization analysis still occurs through normal arming. Analysis remains separate from live secondary playback.
+`POST /mixer/analyze` optionally pre-warms enabled silence, BPM, key, and transition feature caches for a seekable candidate in a single track open. HTTP `202` means the request was accepted, not finished. For seekable tracks up to 10 minutes with silence or BPM enabled, that sequential single pass computes normalization loudness as well (`shouldWarmNormFor`), so later arming requires zero additional track opens. Analysis remains completely isolated from live main and secondary playback.
 
 ## Musical key estimation
 
@@ -373,9 +374,16 @@ flowchart LR
 ```
 
 Only the main player feeds Discord. The secondary capture queue carries both PCM
-and source-progress accounting. Analysis PCM stays on a separate player and queue;
-only its measurements influence planning and gain. Sequential announcements share
-the secondary player with overlap, while parallel announcements have their own queues.
+and source-progress accounting. Analysis PCM stays on an isolated secondary player
+and `SiphonQueue`, and only its cached measurements influence planning and gain.
+`TrackAnalysisService.analyze` opens each source track **at most once** per analysis—via
+a streaming `0 -> EOF` sequential pass (`<= 10 min` or loudness enabled) or in-flight
+`SiphonQueue.markSeekPerformed()` seeks on long tracks—while `GuildMixer` consolidates
+main-track startup, warmup (`requestPreanalysis`), and `backfillPlayingTrack` into single
+opens and caps failure retries at one attempt after a 5s cooldown.
+See [docs/analysis-pipeline.md](docs/analysis-pipeline.md) for details. Sequential
+announcements share the secondary player with overlap, while parallel announcements have
+their own queues.
 
 ### Handoff and queue synchronization
 

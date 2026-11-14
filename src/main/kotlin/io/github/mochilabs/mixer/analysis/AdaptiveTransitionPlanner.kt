@@ -202,6 +202,8 @@ object AdaptiveTransitionPlanner {
                 "planner async echo_out guild={} bpmOut={} delaySamples={}",
                 guildId, outGrid.bpm, delaySamples,
             )
+            val outFadeSamples = minOf(totalSamples / 16, 2400L).coerceAtLeast(1L)
+            val inFadeSamples = (totalSamples * 3 / 4).coerceAtLeast(1L)
             return TransitionRecipe(
                 strategy = TransitionStrategy.ECHO_OUT,
                 totalSamples = totalSamples,
@@ -212,8 +214,8 @@ object AdaptiveTransitionPlanner {
                     handoffSample = contentEndMs * SAMPLE_RATE / 1000L,
                 ),
                 automations = listOf(
-                    ParamAutomation.VolumeRamp(TrackTarget.OUTGOING, 0L, 0L, 0.0f, 0.0f),
-                    ParamAutomation.VolumeRamp(TrackTarget.INCOMING, 0L, 0L, 1.0f, 1.0f),
+                    ParamAutomation.VolumeRamp(TrackTarget.OUTGOING, 0L, outFadeSamples, 1.0f, 0.0f, RampCurve.EQUAL_POWER),
+                    ParamAutomation.VolumeRamp(TrackTarget.INCOMING, 0L, inFadeSamples, 0.0f, 1.0f, RampCurve.EQUAL_POWER),
                     ParamAutomation.EchoTrigger(
                         atSample = 0L,
                         delaySamples = delaySamples,

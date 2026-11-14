@@ -23,14 +23,15 @@ Lavalink 소스를 수정할 필요가 없습니다. 분석은 별도 디코더�
 
 ## 관련 문서
 
-- [REST 및 WebSocket 명세](api/openapi.yaml)
-- [봇 연동 가이드](examples/lavalink-client/README.md)
-- [한국어 상세 봇 연동 가이드](examples/lavalink-client/README.ko.md)
-- [아키텍처 및 스레딩](docs/architecture.md)
-- [빌드 및 테스트 가이드](docs/development.md)
-- [BPM 검출기 설계](docs/bpm-detector-design.md)와 [BPM 캘리브레이션](docs/bpm-calibration.md)
-- [BPM 추출 알고리즘 해설](docs/bpm-extraction.ko.md)
-- [적응형 전환 캘리브레이션](docs/adaptive-calibration.md)
+| 주제 | 한국어 | English |
+| --- | --- | --- |
+| REST 및 WebSocket OpenAPI 명세 | — | [openapi.yaml](api/openapi.yaml) |
+| Protocol v2 봇 연동 가이드 | [examples/lavalink-client/README.ko.md](examples/lavalink-client/README.ko.md) | [examples/lavalink-client/README.md](examples/lavalink-client/README.md) |
+| 아키텍처, 락 순서, 믹싱 구조 | [docs/architecture.ko.md](docs/architecture.ko.md) | [docs/architecture.md](docs/architecture.md) |
+| 단일 패스 분석 파이프라인 | [docs/analysis-pipeline.ko.md](docs/analysis-pipeline.ko.md) | [docs/analysis-pipeline.md](docs/analysis-pipeline.md) |
+| 빌드, 테스트 매트릭스, 배포 절차 | [docs/development.ko.md](docs/development.ko.md) | [docs/development.md](docs/development.md) |
+| BPM 추출 원리 및 캘리브레이션 | [docs/bpm-extraction.ko.md](docs/bpm-extraction.ko.md) | [docs/bpm-detector-design.md](docs/bpm-detector-design.md) · [docs/bpm-calibration.md](docs/bpm-calibration.md) |
+| 적응형 전환 캘리브레이션 | — | [docs/adaptive-calibration.md](docs/adaptive-calibration.md) |
 
 ## 빠른 시작
 
@@ -295,7 +296,7 @@ Content-Type: application/json
 - 최근 전환 결정과 진행 중인 핸드오프 시간은 `transitionKind`, `decisionReason`, `crossfadeHandoffInMs`로 확인합니다. `beat_matched`는 선택한 계획이므로 완료 이벤트에서도 폴백 여부를 확인합니다.
 - `currentTrackBpm`을 표시하기 전에 `currentTrackBpmIdentifier`가 현재 곡과 일치하는지 확인합니다. 분석이 진행 중이거나 비활성화된 경우 BPM·게인 값이 아직 없을 수 있습니다.
 
-`POST /mixer/analyze`는 탐색 가능한 후보곡의 활성화된 무음·BPM·전환 특성 캐시를 미리 채웁니다. HTTP 202는 분석 완료를 뜻하지 않습니다. 정규화 분석은 일반 장전 경로에서 수행합니다. 분석은 실제 서브 재생과 별도 디코더에서 진행합니다.
+`POST /mixer/analyze`는 탐색 가능한 후보곡의 활성화된 무음·BPM·조성·전환 특성 캐시를 단일 트랙 오픈으로 미리 채웁니다. HTTP `202`는 비동기 접수를 뜻하며 분석 완료를 의미하지 않습니다. 무음이나 BPM 분석이 활성화된 10분 이하의 탐색 가능한 곡은 순차 단일 패스 과정에서 정규화 음량도 함께 계산하므로, 이후 장전 시 추가 오픈이 발생하지 않습니다. 모든 분석은 실제 메인·서브 재생과 격리된 전용 디코더에서 수행됩니다.
 
 ## 조성 추정
 
@@ -367,7 +368,7 @@ flowchart LR
 	analysis["분석 PCM"] --> measurements["무음, 음량, BPM, 전환 특성"]
 ```
 
-Discord로 출력하는 플레이어는 메인 하나입니다. 서브 캡처 큐는 PCM과 소스 진행량을 함께 보관합니다. 분석용 PCM은 별도 플레이어·큐에 머물고 측정 결과만 전환과 게인에 반영합니다. 순차 공지는 겹침 재생과 서브 플레이어를 공유하지만 병렬 공지는 각각 별도 큐를 사용합니다.
+Discord로 출력하는 플레이어는 메인 하나뿐입니다. 서브 캡처 큐는 PCM과 소스 진행량을 함께 보관합니다. 분석용 PCM은 실시간 재생과 격리된 전용 플레이어·`SiphonQueue`에서 처리되며, 캐시된 측정 결과만 전환 계획과 게인에 반영됩니다. `TrackAnalysisService.analyze`는 분석당 소스 트랙을 **최대 1회만** 오픈하며(10분 이하 또는 음량 정규화 활성화 시 `0 -> EOF` 순차 스트리밍 단일 패스, 10분 초과+정규화 OFF 시 `SiphonQueue.markSeekPerformed()` 기반 세션 내 seek 단일 오픈), `GuildMixer`는 메인 트랙 시작·프리분석 예열·백필을 단일 스캔으로 통합하고 실패 재시도를 5초 쿨다운 후 1회로 제한합니다. 자세한 내용은 [docs/analysis-pipeline.ko.md](docs/analysis-pipeline.ko.md)를 참고하세요. 순차 공지는 겹침 재생과 서브 플레이어를 공유하고, 병렬 공지는 각각 별도 큐를 사용합니다.
 
 ### 핸드오프와 봇 큐 동기화
 

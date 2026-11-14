@@ -50,6 +50,7 @@ class CircularDelayBuffer(val capacity: Int = 96000) {
         offset: Int = 0,
         length: Int = outputL.size,
         terminationGain: Float = 1.0f,
+        terminationGainEnd: Float = terminationGain,
     ) {
         if (length <= 0) return
         val cap = capacity
@@ -59,6 +60,7 @@ class CircularDelayBuffer(val capacity: Int = 96000) {
 
         var writePos = writeHead
         val end = offset + length
+        val gainDelta = terminationGainEnd - terminationGain
 
         for (i in offset until end) {
             val delayedL = bufferL[readPos]
@@ -68,9 +70,12 @@ class CircularDelayBuffer(val capacity: Int = 96000) {
             bufferL[writePos] = delayedL * feedback
             bufferR[writePos] = delayedR * feedback
 
+            val t = (i - offset + 1).toFloat() / length
+            val sampleTermGain = terminationGain + gainDelta * t
+
             // Mix delayed signal into output
-            outputL[i] += delayedL * terminationGain
-            outputR[i] += delayedR * terminationGain
+            outputL[i] += delayedL * sampleTermGain
+            outputR[i] += delayedR * sampleTermGain
 
             readPos++
             if (readPos >= cap) readPos = 0

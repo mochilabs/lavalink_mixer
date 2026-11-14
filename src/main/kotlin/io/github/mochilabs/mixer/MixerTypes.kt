@@ -3,7 +3,7 @@ package io.github.mochilabs.mixer
 import com.sedmelluq.discord.lavaplayer.player.AudioPlayer
 import com.sedmelluq.discord.lavaplayer.track.AudioTrack
 
-data class Gains(val main: Float, val sub: Float)
+data class Gains(val main: Float, val sub: Float, val mainNorm: Float = 1f)
 
 enum class PlaybackState { IDLE, PLAYING, ARMED, NO_NEXT }
 

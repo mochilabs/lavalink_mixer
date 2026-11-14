@@ -239,10 +239,21 @@ class MixerFilter(
 
         if (hasEcho) {
             ensureEchoScratch(length)
-            val termGain = recipe.echoTerminationGainAt(currentSample)
+            val chunkStartSample = mixer.xfadeRecipeSampleAt((endChainSample - length).coerceAtLeast(0L))
+            val termGainStart = recipe.echoTerminationGainAt(chunkStartSample)
+            val termGainEnd = recipe.echoTerminationGainAt(currentSample)
             echoScratchL.fill(0f, 0, length)
             echoScratchR.fill(0f, 0, length)
-            echoBuffer.readAndMix(echoTrigger.delaySamples, echoTrigger.feedback, echoScratchL, echoScratchR, 0, length, termGain)
+            echoBuffer.readAndMix(
+                echoTrigger.delaySamples,
+                echoTrigger.feedback,
+                echoScratchL,
+                echoScratchR,
+                0,
+                length,
+                termGainStart,
+                termGainEnd,
+            )
         }
         val doBassProcessing = isRecipeActive && (
             recipe.strategy == TransitionStrategy.PHRASE_MATCHED_BASS_SWAP ||
@@ -303,6 +314,7 @@ class MixerFilter(
                     val mainAudio = mLow[idx] * mainBassGain + mHigh[idx]
                     val subAudio = sLow[idx] * subBassGain + sHigh[idx]
                     var sum = mainAudio * gains.main + subAudio * gains.sub
+                    if (hasEcho) sum += (if (c == 0) echoScratchL[idx] else echoScratchR[idx]) * gains.mainNorm
                     if (parallel != null) sum += parallel[c][idx]
                     channel[i] = softLimit(sum)
                 }
@@ -317,7 +329,7 @@ class MixerFilter(
             val echoArr = if (c == 0) echoScratchL else echoScratchR
             for (i in offset until end) {
                 var sum = channel[i] * gains.main + subChannel[i - offset] * gains.sub
-                if (hasEcho) sum += echoArr[i - offset]
+                if (hasEcho) sum += echoArr[i - offset] * gains.mainNorm
                 if (parallel != null) sum += parallel[c][i - offset]
                 channel[i] = softLimit(sum)
             }
@@ -348,6 +360,7 @@ class MixerFilter(
     // Lifecycle events are delivered to every filter in the pipeline by
     // Lavaplayer itself; forwarding them here would double-call downstream.
     override fun seekPerformed(requestedTime: Long, providedTime: Long) {
+        echoBuffer.reset()
         if (providedTime >= 0) mixerProvider()?.syncChainPos(providedTime)
     }
 

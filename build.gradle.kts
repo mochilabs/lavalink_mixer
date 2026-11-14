@@ -38,6 +38,9 @@ dependencies {
     // Must match the Lavaplayer version the server runs.
     compileOnly("dev.arbjerg:lavaplayer:2.2.6")
     compileOnly("dev.arbjerg:lavadsp:0.7.8")
+    // lavadsp declares this runtime-only, but TimescaleConverter extends its
+    // NativeResourceHolder; Lavalink ships it alongside lavadsp.
+    compileOnly("dev.arbjerg:native-loader:0.0.1")
     // compileOnly is not inherited by tests in Gradle; tests also execute code
     // touching these APIs, so they need runtime presence too.
     testImplementation("dev.arbjerg.lavalink:plugin-api:4.2.2")

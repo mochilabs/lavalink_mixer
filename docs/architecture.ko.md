@@ -76,6 +76,8 @@ flowchart LR
   - `startTrack`로 클론 트랙을 시작하면 원격 소스 재오픈·seek 동안 프레임 공백이 생길 수 있으므로, `HandoffBridge`가 `AudioFrameBufferFactory`를 래핑해 스레드 로컬 `PrefixBuilder`로 이미 믹싱된 프레임을 클론 버퍼 앞단에 주입하고 클론 시작 오프셋을 그 뒤로 맞춥니다.
 - **템포 스트레칭 (`TempoStretcher`, `TempoEnvelope`)**:
   - `lavadsp` 기반 producer-side 타임 스트레칭을 사용하며, 디코드 선행(decode-ahead)에 의해 스케줄이 밀리지 않도록 출력 샘플 좌표계에서 `TempoEnvelope`을 진행합니다.
+  - 기본 델리게이트는 `LinkedTimescaleFilter`입니다. lavadsp의 `TimescaleConverter`로 실제 채널 수의 SoundTouch 인스턴스 하나를 만들고 인터리브 PCM을 넣습니다. lavadsp의 `TimescalePcmAudioFilter`는 채널마다 모노 SoundTouch를 따로 돌려 WSOLA 접합 지점이 좌우로 달라지고, 스트레칭 중 스테레오 이미지가 흐트러집니다. `TimescaleConverter`의 부모 `NativeResourceHolder` 때문에 `native-loader`를 `compileOnly`로 선언합니다(런타임은 Lavalink가 제공).
+  - 복구 구간은 최소 현재 곡 기준 4박, 템포 변화 1%당 약 300ms입니다(`recoveryMsFor`). 전환 창이 좁으면 2박 페이드가 들어가도록 줄이되 500ms 또는 1%당 200ms 아래로는 줄이지 않습니다.
 
 ---
 
@@ -126,8 +128,9 @@ flowchart LR
 ```mermaid
 flowchart TD
     In["Outgoing Tail Grid + Incoming Head Grid + Features"] --> L0{"Both grids >= minConfidence?"}
+    L0 -->|"Stretch needed + rhythm stability < 0.35"| Plain["ABSOLUTE_FALLBACK (unstable_rhythm)"]
     L0 -->|"Sync domain (log2 diff <= margin)"| Sync["PHRASE_MATCHED_BASS_SWAP -> SHORT_BASS_SWAP -> BEATMATCHED_BLEND"]
-    L0 -->|"Async domain (log2 diff > margin)"| Async["DOWNBEAT_CUT (confident + energetic) or ECHO_OUT"]
+    L0 -->|"Async domain (log2 diff > margin)"| Async["DOWNBEAT_CUT (confident + energetic) or ABSOLUTE_FALLBACK"]
     L0 -->|"Missing / weak grid"| L1{"Valid envelope features?"}
     L1 -->|"Yes"| Sweep["Level 1: DEGRADED_FILTER_SWEEP (20Hz -> 3000Hz HPF)"]
     L1 -->|"No"| Fallback["Level 2: ABSOLUTE_FALLBACK (Equal-Power Crossfade)"]
@@ -136,6 +139,7 @@ flowchart TD
 - **실시간 무할당 DSP (`MixerFilter`)**:
   - `CrossoverLR4`: 200Hz 4차 Linkwitz-Riley 크로스오버(총 16 biquad)를 송출·수신 양쪽에 동일 적용해 그룹 딜레이 불일치를 없애고 15ms 스무딩 램프로 베이스 스왑을 수행합니다. 전환 활성 시 직전 100ms 메인 PCM으로 프리롤하여 시작 틱을 안정화합니다.
   - `PcmBiquadFilter`: 열화 전환 시 송출 스트림에 20Hz → 3000Hz 하이패스 스윕을 적용합니다.
-  - `CircularDelayBuffer`: 96,000샘플 스테레오 링 버퍼(48kHz 기준 2.0초, 최소 40 BPM 대응, 탐색 시 초기화)로 Echo Out 피드백 딜레이와 샘플 단위 선형 종료 램프를 처리하며, 송출 `mainNorm` 정규화 게인을 유지한 채 송출 드라이 감쇠와 수신 EQ 페이드인을 함께 적용합니다.
+  - `RecentPcmBuffer`: 크로스오버 프리롤용으로 최근 메인 PCM 100ms를 담는 스테레오 링 버퍼입니다(탐색 시 초기화).
+  - Echo Out은 음량이 갑자기 커졌다 줄어드는 문제로 제거했으며, 템포 차이가 큰 전환은 원래 템포의 이퀄 파워 크로스페이드(`tempo_diff_exceeded`)로 처리합니다.
 - **전환 다양성 (`TransitionMemory`)**: 최근 길드 내 전환 전략 이력에 곱셈 페널티를 적용하고, 점수 차가 근소(`rank` 보너스 `< 0.10`, 명확한 우위 `>= 0.15` 미달)할 때 트랙 쌍 시드로 기계적 반복을 줄입니다.
 - **오버레이 (`OverlaySlot`)**: `sequential` 또는 최대 `maxParallelOverlays`개까지 `parallel` 공존 TTS/효과음 재생을 지원하며 좌/우/양쪽 채널 라우팅과 메인 음악 덕킹(`duckLevel`)을 적용합니다.

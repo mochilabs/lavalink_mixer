@@ -29,7 +29,7 @@ class TransitionMemoryTest {
 
         // Record 2nd and 3rd transitions
         memory.record(guildId, TransitionStrategy.SHORT_BASS_SWAP)
-        memory.record(guildId, TransitionStrategy.ECHO_OUT)
+        memory.record(guildId, TransitionStrategy.BEATMATCHED_BLEND)
 
         // After 2 intervening transitions, the first strategy's penalty diminishes
         val agedWeight = memory.repetitionWeight(guildId, TransitionStrategy.PHRASE_MATCHED_BASS_SWAP)
@@ -70,7 +70,7 @@ class TransitionMemoryTest {
         val guildId = 4004L
         // PHRASE used three transitions ago: 1.0 * 0.75 = 0.75 vs SHORT 0.78, a near tie.
         memory.record(guildId, TransitionStrategy.PHRASE_MATCHED_BASS_SWAP)
-        memory.record(guildId, TransitionStrategy.ECHO_OUT)
+        memory.record(guildId, TransitionStrategy.BEATMATCHED_BLEND)
         memory.record(guildId, TransitionStrategy.DOWNBEAT_CUT)
         val candidates = listOf(
             TransitionStrategy.PHRASE_MATCHED_BASS_SWAP to 1.0f,

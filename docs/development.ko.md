@@ -42,7 +42,7 @@
 | 공지 / TTS 오버레이 큐 | `AnnounceQueueTest`, `IdleAnnounceTest` |
 | 무음 검출 및 트림 경계 | `SilenceAnalyzerTest`, `TailCutDeciderTest`, `TrimTransitionTest` |
 | 음량 정규화 | `NormalizationGainTest`, `NormalizationBaselineTest`, `NormalizationIntegrationTest` |
-| BPM, 비트 매칭, Adaptive Automix, DSP | `RealFftTest`, `BpmDetectorTest`, `BpmPrecisionTest`, `BpmGridTest`, `BpmIntegrationTest`, `BpmOctaveTest`, `DownbeatDetectorTest`, `PhraseDetectionTest`, `BeatMatchIntegrationTest`, `BeatMatchOutputTest`, `TempoStretcherTest`, `TempoEnvelopeTest`, `AdaptiveRecoveryIntegrationTest`, `AdaptiveRuntimeTest`, `AdaptiveTransitionRaceTest`, `TransitionFeaturesTest`, `AdaptiveTransitionPlannerTest`, `AutomixBoundaryMatrixTest`, `TransitionRecipeTest`, `TransitionMemoryTest`, `BassSwapIntegrationTest`, `EchoOutIntegrationTest`, `CrossoverLR4Test` |
+| BPM, 비트 매칭, Adaptive Automix, DSP | `RealFftTest`, `BpmDetectorTest`, `BpmPrecisionTest`, `BpmGridTest`, `BpmIntegrationTest`, `BpmOctaveTest`, `DownbeatDetectorTest`, `PhraseDetectionTest`, `BeatMatchIntegrationTest`, `BeatMatchOutputTest`, `TempoStretcherTest`, `LinkedTimescaleFilterTest`, `TempoEnvelopeTest`, `AdaptiveRecoveryIntegrationTest`, `AdaptiveRuntimeTest`, `AdaptiveTransitionRaceTest`, `TransitionFeaturesTest`, `AdaptiveTransitionPlannerTest`, `AutomixBoundaryMatrixTest`, `TransitionRecipeTest`, `TransitionMemoryTest`, `BassSwapIntegrationTest`, `CrossoverLR4Test` |
 
 ### 테스트 작성 시 주의사항
 

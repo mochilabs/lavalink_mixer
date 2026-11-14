@@ -2,6 +2,7 @@ package io.github.mochilabs.mixer
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 class AutomixBoundaryMatrixTest {
     private fun features(rms: Float = 0.2f, stability: Float = 0.9f) = TransitionFeatures(
@@ -64,12 +65,14 @@ class AutomixBoundaryMatrixTest {
     }
 
     @Test
-    fun `scenario 6 - deadband boundary with energy mismatch selects Echo Out`() {
+    fun `scenario 6 - deadband boundary with energy mismatch selects a plain crossfade`() {
         val out = ExtendedBeatGrid(120f, 0L, 0.9f, 0L, 0.8f, 0.7f)
         val inc = ExtendedBeatGrid(129.5f, 0L, 0.9f, 0L, 0.8f, 0.7f)
         val featOut = features(rms = 0.05f)
         val featIn = features(rms = 0.25f) // ratio = 5.0 > 3.98 (14 dB mismatch)
-        assertEquals(TransitionStrategy.ECHO_OUT, plan(out, inc, featOut, featIn).strategy)
+        val recipe = plan(out, inc, featOut, featIn)
+        assertEquals(TransitionStrategy.ABSOLUTE_FALLBACK, recipe.strategy)
+        assertEquals("tempo_diff_exceeded", recipe.reason)
     }
 
     @Test
@@ -80,14 +83,12 @@ class AutomixBoundaryMatrixTest {
     }
 
     @Test
-    fun `scenario 8 - missing incoming metadata selects Echo Out using outgoing tempo`() {
+    fun `scenario 8 - missing incoming metadata selects a plain crossfade`() {
         val out = ExtendedBeatGrid(128f, 0L, 0.9f, 0L, 0.8f)
         val recipe = plan(out, null, features(), null)
-        assertEquals(TransitionStrategy.ECHO_OUT, recipe.strategy)
+        assertEquals(TransitionStrategy.ABSOLUTE_FALLBACK, recipe.strategy)
         assertEquals("missing_incoming_grid", recipe.reason)
-        // 128 BPM >= 125 BPM -> 0.5-beat delay (234ms = 11250 samples @ 48kHz)
-        val echo = recipe.automations.filterIsInstance<ParamAutomation.EchoTrigger>().first()
-        assertEquals(11250, echo.delaySamples)
+        assertTrue(!recipe.sync.enabled)
     }
 
     @Test
@@ -116,7 +117,7 @@ class AutomixBoundaryMatrixTest {
         val out = ExtendedBeatGrid(128f, 0L, 0.9f, 0L, 0.8f)
         val weak = ExtendedBeatGrid(128f, 0L, 0.1f, 0L, 0.8f)
         val recipe = plan(out, weak)
-        assertEquals(TransitionStrategy.ECHO_OUT, recipe.strategy)
+        assertEquals(TransitionStrategy.ABSOLUTE_FALLBACK, recipe.strategy)
         assertEquals("low_confidence_incoming_grid", recipe.reason)
     }
 }

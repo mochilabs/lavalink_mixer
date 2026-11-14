@@ -783,7 +783,7 @@ class GuildMixer(
         if (!claimFeeder(feederId)) {
             // Rival chain: snapshot only — mutating ramps/chainPos here would
             // double every fade and run the chain counter at 2x.
-            return Gains(mainGain.current * mainNorm.current, subGain.current * subNorm.current, mainNorm.current)
+            return Gains(mainGain.current * mainNorm.current, subGain.current * subNorm.current)
         }
         val endOfChunk = chainPos.addAndGet(samples.toLong())
         // Lock-free on purpose: this runs on the voice thread for every ~20ms
@@ -822,7 +822,7 @@ class GuildMixer(
         }
         mainNorm.advance(samples)
         subNorm.advance(samples)
-        return Gains(mainGain.current * mainNorm.current, subGain.current * subNorm.current, mainNorm.current)
+        return Gains(mainGain.current * mainNorm.current, subGain.current * subNorm.current)
     }
 
     fun takeSub(samples: Int, channels: Int, out: Array<FloatArray>): Int {
@@ -1933,10 +1933,9 @@ class GuildMixer(
             return
         }
         val recipeStrategy = activeRecipe?.strategy?.name?.lowercase() ?: "crossfade"
-        val echoDelayMs = activeRecipe?.echoTrigger?.let { it.delaySamples * 1000L / SAMPLE_RATE } ?: 0L
         val beatmatchLog = if (started.beatMatched) {
-            "strategy=$recipeStrategy targetBpm=${plan.targetBpm} rateRatio=${plan.rateRatio} fadeBeats=${plan.fadeBeats} echoDelayMs=$echoDelayMs"
-        } else "strategy=$recipeStrategy rateRatio=1.0 echoDelayMs=$echoDelayMs"
+            "strategy=$recipeStrategy targetBpm=${plan.targetBpm} rateRatio=${plan.rateRatio} fadeBeats=${plan.fadeBeats}"
+        } else "strategy=$recipeStrategy rateRatio=1.0"
         log.info(
             "crossfade guild={} from='{}' to='{}' beatMatched={} reason={} durationMs={} lateMs={} {} {}",
             guildId, expected.outgoing?.let { titleOf(it) }?.replace('\n', ' ')?.replace('\r', ' '),
@@ -2844,7 +2843,9 @@ class GuildMixer(
             if (needBpm && result.bpmTail != null) {
                 AnalysisCaches.bpmTail[identifier] = result.bpmTail
             }
-            backfillPlayingTrack(identifier, doSilence, doNorm, doBpm, doKey)
+            // The playing track's loudness is backfilled even by cache-only warmups: a busy
+            // slot can drop its own deferred baseline scan when a later warmup replaces it.
+            backfillPlayingTrack(identifier, doSilence, normalizationEnabled, doBpm, doKey)
             synchronized(lock) {
                 if (needBpm) analysisState.completedBpmIdentifier = identifier
                 if (hasSilence) {
@@ -2883,7 +2884,8 @@ class GuildMixer(
     ) {
         val playing = synchronized(lock) { mainTrack() } ?: return
         val playingId = idOf(playing) ?: return
-        val needPlayingBpm = doBpm && !AnalysisCaches.featuresTail.contains(playingId)
+        val needPlayingBpm = doBpm && playingId != analyzedIdentifier &&
+            !AnalysisCaches.featuresTail.contains(playingId)
         val needPlayingNorm = doNorm && playingId != analyzedIdentifier &&
             !AnalysisCaches.norm.contains(playingId) && normGainBaseline == 0f
         val needPlayingSilence = doSilence && playingId != analyzedIdentifier &&

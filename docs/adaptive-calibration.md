@@ -68,7 +68,7 @@ command exits nonzero after processing the other pairs. Unknown rhythm or key
 on a successfully decoded track is a valid measurement, not a decoder failure.
 Text report cells escape backslashes, tabs, carriage returns, and newlines.
 
-The report's `strategy` column is one of the planner's seven strategies, with
+The report's `strategy` column is one of the planner's six strategies, with
 the wire label in `transition_kind`:
 
 - **PHRASE_MATCHED_BASS_SWAP** and **SHORT_BASS_SWAP** (`beat_matched`): compatible
@@ -78,11 +78,11 @@ the wire label in `transition_kind`:
   uncertain or the meter is not 4/4. A 2-, 4-, or 8-beat phase-snapped fade.
 - **DOWNBEAT_CUT** (`crossfade`): tempos too far apart, both downbeats confident,
   both sides energetic. A 10 ms cut on a bar line.
-- **ECHO_OUT** (`crossfade`): tempos too far apart otherwise. A delayed echo of the
-  outgoing track, up to two seconds.
 - **DEGRADED_FILTER_SWEEP** (`crossfade`): no usable grid, but valid features.
-- **ABSOLUTE_FALLBACK** (`short_crossfade`): no usable metadata, or no 2-, 4-, 8-, 16-,
-  or 32-beat fade fits the requested length (`fade_window_too_short`). It keeps the
+- **ABSOLUTE_FALLBACK** (`short_crossfade`): tempos too far apart otherwise
+  (`tempo_diff_exceeded`), a missing or weak incoming grid, unstable rhythm
+  (`unstable_rhythm`), no usable metadata, or no 2-, 4-, 8-, 16-, or 32-beat fade
+  fits the requested length (`fade_window_too_short`). It keeps the
   requested length, bounded by the outgoing content.
 
 A pair marked `preserve_context=true` reports `reason=preserve_context` and

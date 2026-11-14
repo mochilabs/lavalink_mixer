@@ -15,7 +15,7 @@
 | 필터 확장 | `MixerFilterExtension`, `MixerFilter` | 길드 메인 플레이어의 PCM 필터 체인에 믹싱 포인트 삽입 (`pluginFilters.mixer`) |
 | 플러그인 코어 & 스케줄러 | `MixerPlugin`, `GuildMixer` | 길드별 믹서 수명주기 관리, ~50Hz 2차 디코더 펌프 및 ~10Hz 크로스페이드 폴링 |
 | HTTP / WebSocket 제어 평면 | `MixerRestHandler`, `MixerEvents`, `ProtocolController` | `/mixer/*` REST API 처리 및 `{op: "mixer"}` WebSocket 이벤트 송신 |
-| 오프라인 분석 | `TrackAnalysisService`, `AnalysisCaches`, `SiphonQueue` | 실시간 재생과 격리된 전용 디코더로 무음·음량·BPM·조성·전환 특성 추출 |
+| 오프라인 분석 | `AnalysisCoordinator`, `TrackAnalysisService`, `AnalysisCaches`, `SiphonQueue` | 실시간 재생과 격리된 전용 디코더로 무음·음량·BPM·조성·전환 특성 추출 |
 
 ---
 

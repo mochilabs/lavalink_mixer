@@ -77,7 +77,7 @@ class GuildMixer(
                 knownNormGainLocked(playing)?.let { mainNorm.rampTo(it, msToSamples(NORM_RAMP_MS)) }
                 val id = idOf(playing)
                 if (normGainBaseline == 0f &&
-                    !analysisState.active &&
+                    !analysis.activeLocked &&
                     (id == null || !AnalysisCaches.norm.contains(id))
                 ) {
                     needsBaselineTrack = playing
@@ -266,14 +266,6 @@ class GuildMixer(
 
     private var pendingNextTrack: AudioTrack? = null
     private var slotRevision: Long = 0L
-    private data class DeferredWarmup(
-        val track: AudioTrack,
-        val includeNormalization: Boolean,
-    )
-
-    private var analysisQueued: Boolean = false
-    /** Latest cache-only request waiting for the guild's single analysis player. */
-    private var deferredWarmup: DeferredWarmup? = null
     private var preservedStartTrack: AudioTrack? = null
     data class TransitionStatus(val kind: String, val reason: String?)
     @Volatile var transitionStatus = TransitionStatus("none", null)
@@ -283,8 +275,32 @@ class GuildMixer(
 
     private var subPlayer: AudioPlayer? = null
     private var siphonFactory: SiphonFactory? = null
-    private val analysisService = TrackAnalysisService(playerManager, guildId)
-    private val analysisState = AnalysisState()
+    private val analysis = AnalysisCoordinator(object : AnalysisHost {
+        override val guildId: Long get() = this@GuildMixer.guildId
+        override val lock: Any get() = this@GuildMixer.lock
+        override val normalizationEnabled: Boolean get() = this@GuildMixer.normalizationEnabled
+        override val normGainBaseline: Float get() = this@GuildMixer.normGainBaseline
+        override val silenceSkipEnabled: Boolean get() = this@GuildMixer.silenceSkipEnabled
+        override val silenceThresholdDb: Float get() = this@GuildMixer.silenceThresholdDb
+        override val silenceMinSoundMs: Long get() = this@GuildMixer.silenceMinSoundMs
+        override val silenceHeadScanMs: Long get() = this@GuildMixer.silenceHeadScanMs
+        override val silenceTailScanMs: Long get() = this@GuildMixer.silenceTailScanMs
+        override val bpmDetectionEnabled: Boolean get() = this@GuildMixer.bpmDetectionEnabled
+        override val bpmScanMs: Long get() = this@GuildMixer.bpmScanMs
+        override val beatmatchEnabled: Boolean get() = this@GuildMixer.beatmatchEnabled
+        override val beatmatchMinConfidence: Float get() = this@GuildMixer.beatmatchMinConfidence
+        override val keyDetectionEnabled: Boolean get() = this@GuildMixer.keyDetectionEnabled
+        override val keyScanMs: Long get() = this@GuildMixer.keyScanMs
+        override val playingTrack: AudioTrack? get() = mainTrack()
+
+        override fun queuedTracksLocked(): List<AudioTrack> = listOfNotNull(pendingNextTrack, readyNextTrack)
+
+        override fun promoteIfPendingLocked(expectedId: String?) =
+            this@GuildMixer.promoteIfPendingLocked(expectedId)
+
+        override fun applyAnalyzedNormGain(identifier: String) =
+            this@GuildMixer.applyAnalyzedNormGain(identifier)
+    }, playerManager, analysisExecutor)
     private var subTrack: AudioTrack? = null
     private var subStartMs: Long = 0L
     /** Active parallel (`mode=parallel`) overlays: each owns its decoder + siphon + fade ramp. */
@@ -483,7 +499,7 @@ class GuildMixer(
                 synchronized(lock) {
                     val id = idOf(track)
                     normGainBaseline == 0f &&
-                        !analysisState.active &&
+                        !analysis.activeLocked &&
                         (id == null || !AnalysisCaches.norm.contains(id))
                 }
             } else false
@@ -981,7 +997,7 @@ class GuildMixer(
     /** Test seam: deliver a loudness result as the analysis thread would. */
     internal fun loudnessForTest(identifier: String, lufs: Float, provisional: Boolean = false) {
         if (provisional) {
-            noteProvisionalLoudness(identifier, lufs)
+            analysis.noteProvisionalLoudness(identifier, lufs)
         } else {
             AnalysisCaches.norm[identifier] = lufs
             applyAnalyzedNormGain(identifier)
@@ -1247,7 +1263,7 @@ class GuildMixer(
                     // Chain, not track.position: the mix lands on frames as they
                     // are decoded, which runs a frame buffer ahead of playback.
                     val incoming = readyNextTrack!!
-                    if (!incomingFeaturesReadyLocked(incoming)) {
+                    if (!analysis.incomingFeaturesReadyLocked(incoming)) {
                         // A late arm left the incoming track's beatmatching scan
                         // still running when the fade window opened. Wait for the
                         // scan to land instead of firing a plain fade with
@@ -1463,7 +1479,7 @@ class GuildMixer(
     fun isOverlayActive(): Boolean = overlayActive
     fun currentOverlayChannel(): AnnounceChannel = sequentialOverlayChannel
     fun isXfadeActive(): Boolean = synchronized(lock) { xfadeActive }
-    fun isSubBusy(): Boolean = synchronized(lock) { overlayActive || xfadeActive || overlapPreparation != null || analysisState.active || parallelOverlays.isNotEmpty() }
+    fun isSubBusy(): Boolean = synchronized(lock) { overlayActive || xfadeActive || overlapPreparation != null || analysis.activeLocked || parallelOverlays.isNotEmpty() }
 
     // ---- announcement queue ----
     //
@@ -1544,7 +1560,7 @@ class GuildMixer(
 
     fun analysisState(): String = synchronized(lock) {
         when {
-            analysisState.active -> "analyzing"
+            analysis.activeLocked -> "analyzing"
             readyNextTrack != null -> "ready"
             pendingNextTrack != null -> "pending"
             else -> "idle"
@@ -1689,14 +1705,13 @@ class GuildMixer(
         val (sub, parallels) = synchronized(lock) {
             pendingNextTrack = null
             readyNextTrack = null
-            deferredWarmup = null
             overlapPreparation = null
             protocol.clearArmedLocked()
             subTrack = null
             xfadeActive = false
             activeRecipe = null
             overlayActive = false
-            analysisState.active = false
+            analysis.resetLocked()
             siphonFactory?.resetSpeed()
             val p = parallelOverlays.values.toList()
             parallelOverlays.clear()
@@ -1708,7 +1723,7 @@ class GuildMixer(
         } catch (e: Exception) {
             log.warn("sub destroy failed on guild {}", guildId, e)
         }
-        analysisService.destroy()
+        analysis.destroy()
         TransitionMemory.global.clear(guildId)
         for (slot in parallels) {
             try {
@@ -2590,162 +2605,16 @@ class GuildMixer(
     }
 
 
-    /**
-     * Schedules a background loudness scan of the currently playing track so
-     * its measured LUFS lands in the shared cache (and, if it is still the
-     * playing track, its normalization gain ramps to it). Runs on the
-     * dedicated analysis decoder, never the live sub player.
-     */
-    internal fun scheduleBaselineAnalysis(track: AudioTrack) {
-        synchronized(lock) {
-            if (normGainBaseline != 0f || analysisState.active) return
-            analysisState.active = true
-            analysisService.beginScan()
-        }
-        analysisExecutor.execute {
-            val clone = try {
-                track.makeClone()
-            } catch (e: Exception) {
-                synchronized(lock) { analysisState.active = false }
-                drainDeferredWarmup()
-                return@execute
-            }
-            try {
-                val trackId = idOf(track) ?: track.identifier
-                val loudness = analysisService.measureBaseline(clone) { noteProvisionalLoudness(trackId, it) }
-                if (loudness != null) {
-                    AnalysisCaches.norm[trackId] = loudness
-                    applyAnalyzedNormGain(trackId)
-                    log.info("normalization baseline guild {}: lufs={}", guildId, loudness)
-                }
-            } catch (e: Exception) {
-                log.warn("baseline loudness scan failed on guild {}", guildId, e)
-            } finally {
-                synchronized(lock) { analysisState.active = false }
-                drainDeferredWarmup()
-            }
-        }
-    }
 
-    fun maybeRetryAnalysis(): AudioTrack? {
-        val now = System.currentTimeMillis()
-        return synchronized(lock) {
-            if (analysisQueued) return null
-            val mainPlaying = mainTrack()
-            val candidates = listOfNotNull(
-                pendingNextTrack,
-                readyNextTrack,
-                if (bpmDetectionEnabled || keyDetectionEnabled || silenceSkipEnabled) mainPlaying else null,
-            )
-            val pending = candidates.firstOrNull { candidate ->
-                if (!candidate.isSeekable || candidate.duration <= 0) return@firstOrNull false
-                val id = idOf(candidate) ?: return@firstOrNull false
-                val needSilence = silenceSkipEnabled && !AnalysisCaches.trim.contains(id)
-                val needNorm = candidate !== mainPlaying && normalizationEnabled && !AnalysisCaches.norm.contains(id)
-                val needBpm = bpmDetectionEnabled && needsBpmAnalysisLocked(id)
-                val needKey = keyDetectionEnabled && !AnalysisCaches.key.contains(id)
-                (needSilence || needNorm || needBpm || needKey) && analysisState.canRetryLocked(id, now)
-            } ?: return null
-            log.debug("retrying deferred analysis for '{}' on guild {}", titleOf(pending), guildId)
-            try {
-                pending.makeClone()
-            } catch (e: Exception) {
-                log.debug("analysis retry clone failed on guild {}: {}", guildId, e.toString())
-                null
-            }
-        }
-    }
+    internal fun scheduleBaselineAnalysis(track: AudioTrack) = analysis.scheduleBaselineAnalysis(track)
 
-    private fun shouldWarmNormFor(track: AudioTrack): Boolean {
-        if (!normalizationEnabled || (!silenceSkipEnabled && !bpmDetectionEnabled)) return false
-        val duration = try {
-            track.duration
-        } catch (_: Exception) {
-            -1L
-        }
-        val seekable = try {
-            track.isSeekable
-        } catch (_: Exception) {
-            false
-        }
-        return seekable && duration in 1..TrackAnalysisService.SEQUENTIAL_MAX_MS
-    }
+    fun maybeRetryAnalysis(): AudioTrack? = analysis.maybeRetryAnalysis()
 
     /** Bounded, cache-only warmup; it never arms a queue slot or mutates playback. */
     fun requestPreanalysis(
         track: AudioTrack,
-        includeNormalization: Boolean = shouldWarmNormFor(track),
-    ): Boolean {
-        val id = idOf(track) ?: return false
-        val includeSilence = silenceSkipEnabled
-        val warmNorm = includeNormalization && normalizationEnabled && normGainBaseline == 0f
-        synchronized(lock) {
-            val needSilence = includeSilence && !AnalysisCaches.trim.contains(id)
-            val needNorm = warmNorm && !AnalysisCaches.norm.contains(id)
-            val needBpm = bpmDetectionEnabled && needsBpmAnalysisLocked(id)
-            val needKey = keyDetectionEnabled && !AnalysisCaches.key.contains(id)
-            if ((!needSilence && !needNorm && !needBpm && !needKey) || !track.isSeekable || track.duration <= 0) return false
-            if (analysisQueued || analysisState.active) {
-                deferredWarmup = DeferredWarmup(track, warmNorm)
-                return true
-            }
-            analysisQueued = true
-            deferredWarmup = null
-        }
-        return scheduleWarmup(track, warmNorm)
-    }
-
-    private fun scheduleWarmup(track: AudioTrack, includeNormalization: Boolean): Boolean {
-        return try {
-            analysisExecutor.execute {
-                try {
-                    analyzeBlocking(
-                        track,
-                        cacheOnly = true,
-                        includeSilence = silenceSkipEnabled,
-                        includeNormalization = includeNormalization,
-                    )
-                }
-                catch (e: Exception) { log.warn("preanalysis failed on guild {}", guildId, e) }
-                finally {
-                    synchronized(lock) { analysisQueued = false }
-                    drainDeferredWarmup()
-                }
-            }
-            true
-        } catch (e: java.util.concurrent.RejectedExecutionException) {
-            synchronized(lock) { analysisQueued = false }
-            false
-        }
-    }
-
-    private fun drainDeferredWarmup() {
-        val next = synchronized(lock) {
-            if (analysisQueued || analysisState.active) return
-            deferredWarmup?.also {
-                deferredWarmup = null
-                analysisQueued = true
-            }
-        }
-        if (next != null) scheduleWarmup(next.track, next.includeNormalization)
-    }
-
-    private fun needsBpmAnalysisLocked(identifier: String): Boolean =
-        analysisState.completedBpmIdentifier != identifier &&
-            !(AnalysisCaches.bpm.contains(identifier) && AnalysisCaches.bpmHead.contains(identifier) && AnalysisCaches.bpmTail.contains(identifier) && AnalysisCaches.featuresHead.contains(identifier) && AnalysisCaches.featuresTail.contains(identifier))
-
-    /**
-     * True once the incoming track's beatmatching inputs (BPM grid + transition
-     * features) are cached, or when beatmatching never needs them. A late arm
-     * can leave analysis running while the fade window opens; the poll loop
-     * uses this to wait for the scan instead of firing a plain fade with
-     * `missing_features`.
-     */
-    private fun incomingFeaturesReadyLocked(track: AudioTrack): Boolean {
-        if (!beatmatchEnabled || !bpmDetectionEnabled) return true
-        val id = idOf(track) ?: return true
-        return !needsBpmAnalysisLocked(id)
-    }
+        includeNormalization: Boolean = analysis.shouldWarmNormFor(track),
+    ): Boolean = analysis.requestPreanalysis(track, includeNormalization)
 
     /** Scans a clone on the isolated analysis player. A concurrent scan defers this work. */
     fun analyzeBlocking(
@@ -2753,185 +2622,7 @@ class GuildMixer(
         cacheOnly: Boolean = false,
         includeSilence: Boolean = !cacheOnly,
         includeNormalization: Boolean = !cacheOnly,
-    ) {
-        val doSilence = silenceSkipEnabled && includeSilence
-        val doNorm = normalizationEnabled && includeNormalization
-        val doBpm = bpmDetectionEnabled
-        val doKey = keyDetectionEnabled && track.isSeekable && track.duration in 1 until Long.MAX_VALUE / 2
-        if (!doSilence && !doNorm && !doBpm && !doKey) {
-            if (!cacheOnly) synchronized(lock) { promoteIfPendingLocked() }
-            return
-        }
-        val identifier = idOf(track) ?: run {
-            if (!cacheOnly) synchronized(lock) { promoteIfPendingLocked() }
-            return
-        }
-        synchronized(lock) {
-            val hasSilence = !doSilence || AnalysisCaches.trim.contains(identifier)
-            val hasNorm = !doNorm || AnalysisCaches.norm.contains(identifier)
-            val hasBpm = !doBpm || !needsBpmAnalysisLocked(identifier)
-            val hasKey = !doKey || AnalysisCaches.key.contains(identifier)
-            if (hasSilence && hasNorm && hasBpm && hasKey) {
-                if (!cacheOnly) promoteIfPendingLocked(identifier)
-                return
-            }
-            if (analysisState.active) {
-                // A queued cache-only warmup may reach this gate after a normal scan starts.
-                // Retain it; the scan owner or warmup worker will drain it when idle.
-                if (cacheOnly && deferredWarmup == null) {
-                    deferredWarmup = DeferredWarmup(track, includeNormalization)
-                }
-                log.debug(
-                    "analysis deferred on guild {}: another scan is running; will retry",
-                    guildId,
-                )
-                return
-            }
-            analysisState.active = true
-            analysisService.beginScan()
-        }
-        try {
-            val hasSilence = doSilence && !AnalysisCaches.trim.contains(identifier)
-            val hasNorm = doNorm && !AnalysisCaches.norm.contains(identifier)
-            val needBpm = doBpm && synchronized(lock) { needsBpmAnalysisLocked(identifier) }
-            val needKey = doKey && !AnalysisCaches.key.contains(identifier)
-            val result = analysisService.analyze(
-                track,
-                onLoudnessEstimate = if (hasNorm) { lufs -> noteProvisionalLoudness(identifier, lufs) } else null,
-                settings = TrackAnalysisSettings(
-                    silence = hasSilence,
-                    normalization = hasNorm,
-                    bpm = needBpm,
-                    silenceThresholdDb = silenceThresholdDb,
-                    silenceMinSoundMs = silenceMinSoundMs,
-                    silenceHeadScanMs = silenceHeadScanMs,
-                    silenceTailScanMs = silenceTailScanMs,
-                    bpmScanMs = bpmScanMs,
-                    key = needKey,
-                    keyScanMs = keyScanMs,
-                    bpmMinConfidence = beatmatchMinConfidence,
-                ),
-            )
-            if (result.aborted || result.featuresHead?.unknownReason == "incomplete_window" ||
-                result.featuresTail?.unknownReason == "incomplete_window") {
-                synchronized(lock) { analysisState.noteFailureLocked(identifier) }
-                return
-            }
-            if (hasNorm && result.loudnessRms != null) {
-                AnalysisCaches.norm[identifier] = result.loudnessRms
-                applyAnalyzedNormGain(identifier)
-                log.info("normalization guild {}: lufs={}", guildId, result.loudnessRms)
-            }
-            if (needKey && result.key != null) AnalysisCaches.key[identifier] = result.key
-            if (needBpm && result.bpm != null) {
-                AnalysisCaches.bpm[identifier] = result.bpm
-                log.info(
-                    "bpm analysis guild {}: bpm={} firstBeat={}ms confidence={}",
-                    guildId,
-                    result.bpm.bpm,
-                    result.bpm.firstBeatMs,
-                    result.bpm.confidence,
-                )
-            }
-            if (needBpm) {
-                result.featuresHead?.let { AnalysisCaches.featuresHead[identifier] = it }
-                result.featuresTail?.let { AnalysisCaches.featuresTail[identifier] = it }
-            }
-            if (needBpm && result.bpmHead != null) {
-                AnalysisCaches.bpmHead[identifier] = result.bpmHead
-            }
-            if (needBpm && result.bpmTail != null) {
-                AnalysisCaches.bpmTail[identifier] = result.bpmTail
-            }
-            // The playing track's loudness is backfilled even by cache-only warmups: a busy
-            // slot can drop its own deferred baseline scan when a later warmup replaces it.
-            backfillPlayingTrack(identifier, doSilence, normalizationEnabled, doBpm, doKey)
-            synchronized(lock) {
-                if (needBpm) analysisState.completedBpmIdentifier = identifier
-                if (hasSilence) {
-                    AnalysisCaches.trim[identifier] = result.trim ?: TrimPoints.NONE
-                }
-                analysisState.clearFailureIfMatchingLocked(identifier)
-                if (!cacheOnly) promoteIfPendingLocked(identifier)
-            }
-            if (hasSilence) {
-                log.info(
-                    "silence analysis guild {}: lead={}ms trail={}ms",
-                    guildId,
-                    result.trim?.leadMs ?: 0,
-                    result.trim?.trailMs ?: 0,
-                )
-            }
-        } catch (e: Exception) {
-            log.warn("silence analysis failed on guild {}", guildId, e)
-            synchronized(lock) { analysisState.noteFailureLocked(identifier) }
-        } finally {
-            synchronized(lock) { analysisState.active = false }
-            drainDeferredWarmup()
-        }
-    }
-
-    /**
-     * Fills any missing measurements on the currently playing main track using
-     * at most one analysis pass, rather than separate tail/norm/silence opens.
-     */
-    private fun backfillPlayingTrack(
-        analyzedIdentifier: String,
-        doSilence: Boolean,
-        doNorm: Boolean,
-        doBpm: Boolean,
-        doKey: Boolean,
-    ) {
-        val playing = synchronized(lock) { mainTrack() } ?: return
-        val playingId = idOf(playing) ?: return
-        val needPlayingBpm = doBpm && playingId != analyzedIdentifier &&
-            !AnalysisCaches.featuresTail.contains(playingId)
-        val needPlayingNorm = doNorm && playingId != analyzedIdentifier &&
-            !AnalysisCaches.norm.contains(playingId) && normGainBaseline == 0f
-        val needPlayingSilence = doSilence && playingId != analyzedIdentifier &&
-            !AnalysisCaches.trim.contains(playingId)
-        val needPlayingKey = doKey && playingId != analyzedIdentifier &&
-            !AnalysisCaches.key.contains(playingId)
-        if (!needPlayingBpm && !needPlayingNorm && !needPlayingSilence && !needPlayingKey) return
-
-        val playingResult = analysisService.analyze(
-            playing,
-            settings = TrackAnalysisSettings(
-                silence = needPlayingSilence,
-                normalization = needPlayingNorm,
-                bpm = needPlayingBpm,
-                silenceThresholdDb = silenceThresholdDb,
-                silenceMinSoundMs = silenceMinSoundMs,
-                silenceHeadScanMs = silenceHeadScanMs,
-                silenceTailScanMs = silenceTailScanMs,
-                bpmScanMs = bpmScanMs,
-                key = needPlayingKey,
-                keyScanMs = keyScanMs,
-                bpmMinConfidence = beatmatchMinConfidence,
-            ),
-            onLoudnessEstimate = if (needPlayingNorm) { lufs -> noteProvisionalLoudness(playingId, lufs) } else null,
-        )
-        if (playingResult.aborted) return
-
-        if (needPlayingNorm && playingResult.loudnessRms != null) {
-            AnalysisCaches.norm[playingId] = playingResult.loudnessRms
-            applyAnalyzedNormGain(playingId)
-            log.info("normalization guild {} (playing track): lufs={}", guildId, playingResult.loudnessRms)
-        }
-        if (needPlayingSilence && playingResult.trim != null) {
-            AnalysisCaches.trim[playingId] = playingResult.trim
-        }
-        if (needPlayingKey && playingResult.key != null) {
-            AnalysisCaches.key[playingId] = playingResult.key
-        }
-        if (needPlayingBpm && playingResult.featuresTail?.unknownReason != "incomplete_window") {
-            playingResult.bpm?.let { if (!AnalysisCaches.bpm.contains(playingId)) AnalysisCaches.bpm[playingId] = it }
-            playingResult.bpmHead?.let { if (!AnalysisCaches.bpmHead.contains(playingId)) AnalysisCaches.bpmHead[playingId] = it }
-            playingResult.featuresHead?.let { if (!AnalysisCaches.featuresHead.contains(playingId)) AnalysisCaches.featuresHead[playingId] = it }
-            playingResult.bpmTail?.let { AnalysisCaches.bpmTail[playingId] = it }
-            playingResult.featuresTail?.let { AnalysisCaches.featuresTail[playingId] = it }
-        }
-    }
+    ) = analysis.analyzeBlocking(track, cacheOnly, includeSilence, includeNormalization)
 
     /** Ramps the playing and overlapping track toward a newly known loudness. */
     private fun applyAnalyzedNormGain(identifier: String) {
@@ -2946,14 +2637,6 @@ class GuildMixer(
                 knownNormGainLocked(activeSub)?.let { subNorm.rampTo(it, msToSamples(NORM_RAMP_MS)) }
             }
         }
-    }
-
-    /** Provisional loudness from a scan's opening seconds; ignored once the full value exists. */
-    private fun noteProvisionalLoudness(identifier: String, lufs: Float) {
-        if (AnalysisCaches.norm.contains(identifier)) return
-        AnalysisCaches.normProvisional[identifier] = lufs
-        applyAnalyzedNormGain(identifier)
-        log.debug("provisional normalization guild {}: lufs={}", guildId, lufs)
     }
 
 

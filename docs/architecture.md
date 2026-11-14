@@ -66,6 +66,7 @@ from an old session does not remove a mixer attached to a newer player.
 | `GuildMixer` | Owns main-player binding, secondary playback, next-track slots, gains, transitions, and overlay slots. |
 | `ProtocolController` | Owns protocol state, armed-track metadata, JIT requests, and the ordered action executor. |
 | `EpochGate` | Tracks the current epoch, reset grace window, and recent request fingerprints. |
+| `AnalysisCoordinator` | Schedules each guild's analysis scans one at a time, defers warmups and retries, and writes results to `AnalysisCaches`. It shares `GuildMixer.lock` through `AnalysisHost`. |
 | `TrackAnalysisService` | Owns a separate analysis player and capture filter for each guild. |
 | `AnalysisCaches` | Shares identifier-keyed measurements across guilds. |
 

@@ -43,7 +43,8 @@ class AdaptiveRecoveryIntegrationTest {
             configuration.outputFormat = format
         }
         val config = MixerConfig().apply {
-            crossfadeMs = 6500L
+            // 8-beat fade (4 s) plus a 7-beat recovery for the 11% tempo change.
+            crossfadeMs = 7500L
             crossfadeEnabled = true
             fadeInMs = 0
             maskMs = 0
@@ -124,7 +125,8 @@ class AdaptiveRecoveryIntegrationTest {
 
             val incomingOnsets = onsets(right)
             val held = incomingOnsets.filter {
-                it >= (plan.startMs * sampleRate / 1000).toInt() + sampleRate / 2 && it < recoveryStart
+                // Skip the first second: at low fade-in gain a pulse crosses the onset threshold late.
+                it >= (plan.startMs * sampleRate / 1000).toInt() + sampleRate && it < recoveryStart
             }
             assertTrue(held.size >= 3, "not enough overlap pulses")
             held.zipWithNext().forEach { (first, next) ->

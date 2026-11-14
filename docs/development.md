@@ -53,7 +53,7 @@ Use these existing tests as starting points:
 | Analysis ownership, single-pass, and retries | `SinglePassAnalysisTest`, `AnalysisIsolatedFromLiveSubTest`, `DeferredAnalysisTest` |
 | Silence and trim | `SilenceAnalyzerTest`, `TailCutDeciderTest`, `TrimTransitionTest` |
 | Loudness | `NormalizationGainTest`, `NormalizationBaselineTest`, `NormalizationIntegrationTest` |
-| BPM and beat matching | `RealFftTest`, `BpmDetectorTest`, `BpmPrecisionTest`, `BpmGridTest`, `BpmIntegrationTest`, `BpmOctaveTest`, `DownbeatDetectorTest`, `PhraseDetectionTest`, `BeatMatchIntegrationTest`, `BeatMatchOutputTest`, `TempoStretcherTest`, `TempoEnvelopeTest`, `AdaptiveRecoveryIntegrationTest`, `AdaptiveRuntimeTest`, `AdaptiveTransitionRaceTest`, `TransitionFeaturesTest`, `AdaptiveTransitionPlannerTest`, `AutomixBoundaryMatrixTest`, `TransitionRecipeTest`, `TransitionMemoryTest`, `BassSwapIntegrationTest`, `EchoOutIntegrationTest`, `CrossoverLR4Test` |
+| BPM and beat matching | `RealFftTest`, `BpmDetectorTest`, `BpmPrecisionTest`, `BpmGridTest`, `BpmIntegrationTest`, `BpmOctaveTest`, `DownbeatDetectorTest`, `PhraseDetectionTest`, `BeatMatchIntegrationTest`, `BeatMatchOutputTest`, `TempoStretcherTest`, `LinkedTimescaleFilterTest`, `TempoEnvelopeTest`, `AdaptiveRecoveryIntegrationTest`, `AdaptiveRuntimeTest`, `AdaptiveTransitionRaceTest`, `TransitionFeaturesTest`, `AdaptiveTransitionPlannerTest`, `AutomixBoundaryMatrixTest`, `TransitionRecipeTest`, `TransitionMemoryTest`, `BassSwapIntegrationTest`, `CrossoverLR4Test` |
 
 Integration tests generate local WAV files and exercise Lavaplayer players.
 They do not require a running Discord bot. Some tests exercise native audio
@@ -118,9 +118,9 @@ A local audio test does not prove playback through Discord. After changing the i
 A started crossfade produces one INFO line. `beatMatched=true` means preparation
 committed with beat matching active. `strategy` reports the selected `TransitionStrategy`
 (`phrase_matched_bass_swap`, `short_bass_swap`, `beatmatched_blend`, `downbeat_cut`,
-`echo_out`, `degraded_filter_sweep`, `absolute_fallback`, or `crossfade`). `targetBpm`,
-`rateRatio`, `fadeBeats`, and `echoDelayMs` report its target tempo, source speed ratio,
-number of fade beats, and Echo Out delay length. A fallback reports `beatMatched=false`,
+`degraded_filter_sweep`, `absolute_fallback`, or `crossfade`). `targetBpm`,
+`rateRatio`, and `fadeBeats` report its target tempo, source speed ratio, and
+number of fade beats. A fallback reports `beatMatched=false`,
 `rateRatio=1.0`, and its reason. `durationMs` is the remaining overlap window; `lateMs`
 records preparation delay beyond the planned start.
 

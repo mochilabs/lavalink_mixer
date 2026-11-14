@@ -49,7 +49,8 @@ class BeatMatchOutputTest {
             configuration.outputFormat = format
         }
         val config = MixerConfig().apply {
-            crossfadeMs = fadeBeats * 500L + if (incomingBpm == outgoingBpm) 0L else 1000L
+            // Unity needs no recovery; otherwise reserve the 4-beat minimum recovery.
+            crossfadeMs = fadeBeats * 500L + if (incomingBpm == outgoingBpm) 0L else 2000L
             crossfadeEnabled = true
             fadeInMs = 0
             maskMs = 0

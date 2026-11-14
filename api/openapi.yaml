@@ -520,6 +520,7 @@ components:
         - invalid_bpm
         - low_confidence
         - tempo_diff_exceeded
+        - unstable_rhythm
         - fade_window_too_short
         - incoming_track_too_short
         - incoming_start_outside_analysis

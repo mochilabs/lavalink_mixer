@@ -440,9 +440,17 @@ major/minor estimates with heuristic confidence, not calibrated whole-song label
 `ExtendedBeatGrid` (with downbeat and merged phrase confidence) and `TransitionFeatures`,
 generating a declarative `TransitionRecipe` and deriving the phase-snapped `CrossfadePlan`
 from that recipe. `CrossfadePlan.overlapMs` controls gain fading; `recoveryMs` reserves
-an incoming-only speed recovery inside the total window. `TempoEnvelope` runs on projected
+an incoming-only speed recovery inside the total window: at least four outgoing beats,
+plus about 300 ms per 1% of tempo change (`recoveryMsFor`). A tight window shrinks it to fit a
+2-beat fade, but not below 500 ms or 200 ms per 1%. `TempoEnvelope` runs on projected
 output sample coordinates in the secondary producer, so decoding ahead does not shift
 its schedule. Keeping the native delegate alive at unity avoids discarding its tail.
+The default delegate is `LinkedTimescaleFilter`: one SoundTouch instance created with
+the real channel count through lavadsp's `TimescaleConverter`, fed interleaved PCM.
+lavadsp's own `TimescalePcmAudioFilter` runs one mono SoundTouch per channel, so each
+channel picks its own WSOLA splice offset and the stereo image smears while stretching.
+`TimescaleConverter` extends `native-loader`'s `NativeResourceHolder`, so the build
+declares `native-loader` `compileOnly`; Lavalink ships it with lavadsp.
 Exact native per-output input positions are unavailable: FIFO source integration
 is tested to a tolerance, not claimed sample-exact WSOLA correspondence. The wire
 labels (`beat_matched`, `short_crossfade`, `crossfade`, `preserve`) remain for
@@ -455,15 +463,16 @@ protocol-v2 compatibility while the one-line `crossfade` log reports the active
 across an uncertainty-margin multi-level decision waterfall:
 - **Level 0 (Grid-Based):** When `ExtendedBeatGrid` confidence is sufficient (`bpmConfidence >= minConfidence`).
   - **Sync Domain ($\Delta_{\log} \le \text{margin}$):** Executes `PHRASE_MATCHED_BASS_SWAP` (up to a 32-beat fade, bass swapped at the fade midpoint) when both downbeats and phrases are confident (`downbeatConfidence >= 0.4`, `phraseConfidence >= 0.4`), degrading to `SHORT_BASS_SWAP` (up to 8 beats) or `BEATMATCHED_BLEND` (2/4/8/16-beat, phase-snapped) when metric boundaries are uncertain or for non-4/4 meters.
-  - **Async Domain ($\Delta_{\log} > \text{margin}$):** Executes `DOWNBEAT_CUT` when both downbeats are confident and energetic, or `ECHO_OUT` (1/2-beat if BPM $\ge$ 125, 1-beat if BPM < 125) using a 96,000-sample circular delay buffer with an explicit linear termination ramp.
+  - **Async Domain ($\Delta_{\log} > \text{margin}$):** Executes `DOWNBEAT_CUT` when both downbeats are confident and energetic, otherwise an `ABSOLUTE_FALLBACK` equal-power crossfade at native tempo (`tempo_diff_exceeded`). A missing or weak incoming grid takes the same crossfade with `missing_incoming_grid` or `low_confidence_incoming_grid`. Echo Out was removed: listeners heard its level rise suddenly and then drop.
+- **Rhythm gate:** When a sync would stretch the incoming track, a rhythm stability below `SYNC_MIN_RHYTHM` (0.35) on either side yields an `ABSOLUTE_FALLBACK` crossfade at native tempo with reason `unstable_rhythm`. Such grids usually fit a soft intro, and stretching to them drags the track without locking beats.
 - **Grid confidence:** `TrackAnalysisService` treats a head or tail grid below `minConfidence` like a missing one. It retries further into the track and re-measures the end around the other end's tempo, keeping the more confident grid. A weak incoming grid that reaches the planner reports `low_confidence_incoming_grid` instead of `missing_incoming_grid`.
 - **Level 1 (Degraded):** When beat grids are absent but envelope features are valid, executes a time-based high-pass `DEGRADED_FILTER_SWEEP` ($20\text{Hz} \to 3000\text{Hz}$).
 - **Level 2 (Absolute Fallback):** When all metadata is missing or on buffer underrun, converges to an `ABSOLUTE_FALLBACK` Equal-Power crossfade that keeps the configured `crossfadeMs`, bounded by the outgoing content. The same fallback applies when no 2/4/8/16/32-beat fade fits `crossfadeMs` (reason `fade_window_too_short`); a non-positive `crossfadeMs` yields no overlap.
 
 In `MixerFilter`, real-time DSP automation runs with zero heap allocations during playback:
-- **Dual LR4 Crossover (`CrossoverLR4`):** Both outgoing and incoming stereo audio streams pass through matched 4th-order Linkwitz-Riley filters (16 biquads total) at 200Hz. This guarantees identical group delay across both tracks, eliminating comb filtering while allowing low-frequency bass swap with 15ms smoothing ramps. When a recipe activates, the outgoing crossover is reset and pre-rolled with the last 100ms of main PCM from the delay buffer, so the first transition chunk starts from settled filter state without per-chunk work during normal playback.
+- **Dual LR4 Crossover (`CrossoverLR4`):** Both outgoing and incoming stereo audio streams pass through matched 4th-order Linkwitz-Riley filters (16 biquads total) at 200Hz. This guarantees identical group delay across both tracks, eliminating comb filtering while allowing low-frequency bass swap with 15ms smoothing ramps. When a recipe activates, the outgoing crossover is reset and pre-rolled with the last 100ms of main PCM from `RecentPcmBuffer`, so the first transition chunk starts from settled filter state without per-chunk work during normal playback.
 - **High-Pass Filter Sweep (`PcmBiquadFilter`):** Executes `FilterCutoff` sweeps in place on the outgoing stream during degraded transitions.
-- **Circular Delay Buffer (`CircularDelayBuffer`):** Pre-allocated 96,000-sample stereo buffer (2.0s @ 48kHz, accommodating BPM 40) continuously banks incoming main audio (reset on seek) and provides feedback delay with decay, per-sample linear fade-out termination, and `mainNorm` normalization scaling on Echo Out triggers alongside a smooth outgoing release and equal-power incoming fade-in.
+- **Recent PCM ring (`RecentPcmBuffer`):** Pre-allocated 100 ms stereo ring that continuously banks main audio (reset on seek) for the crossover pre-roll.
 - **Transition Memory (`TransitionMemory`):** Tracks the recent history of applied transition strategies per guild and applies multiplicative penalties to shift between viable candidates and prevent consecutive mechanical repetition. `rank` adds a deterministic track-pair bonus below 0.10, so penalized near-ties resolve differently per track pair while a clear planner preference (score gap ≥ 0.15) always wins.
 
 When BPM analysis finds a grid at only one end of a track, `TrackAnalysisService` re-measures the other end on its already decoded frames within ±4% of the measured tempo. If that still fails, it projects tempo and beat phase only; downbeat and phrase confidence stay 0 because a downbeat extrapolated across the track can drift off the bar.

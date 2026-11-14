@@ -152,10 +152,7 @@ class SiphonQueue(
     /** Clears buffered pre-seek audio and bumps the epoch seen by in-flight seek waiters. */
     fun markSeekPerformed() {
         synchronized(lock) {
-            deque.clear()
-            queuedSamples = 0
-            outputCursor = 0L
-            sourceCursorMilliSamples = 0L
+            clear()
             seekEpoch.incrementAndGet()
         }
     }

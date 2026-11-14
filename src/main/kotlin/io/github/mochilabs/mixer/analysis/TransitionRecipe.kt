@@ -21,7 +21,6 @@ enum class TransitionStrategy {
     PHRASE_MATCHED_BASS_SWAP,
     SHORT_BASS_SWAP,
     BEATMATCHED_BLEND,
-    ECHO_OUT,
     DOWNBEAT_CUT,
     DEGRADED_FILTER_SWEEP,
     ABSOLUTE_FALLBACK,
@@ -52,13 +51,6 @@ sealed interface ParamAutomation {
         val muteLow: Boolean,
         val rampSamples: Int = 720, // 15ms @ 48kHz
     ) : ParamAutomation
-
-    data class EchoTrigger(
-        val atSample: Long,
-        val delaySamples: Int,
-        val feedback: Float = 0.65f,
-        val terminationRampSamples: Int = 86400, // 1.8s @ 48kHz
-    ) : ParamAutomation
 }
 
 data class BeatSyncConfig(
@@ -81,7 +73,6 @@ data class TransitionRecipe(
     val volumeRamps: List<ParamAutomation.VolumeRamp> = automations.filterIsInstance<ParamAutomation.VolumeRamp>()
     val bassCuts: List<ParamAutomation.BassCut> = automations.filterIsInstance<ParamAutomation.BassCut>()
     val filterSweeps: List<ParamAutomation.FilterCutoff> = automations.filterIsInstance<ParamAutomation.FilterCutoff>()
-    val echoTrigger: ParamAutomation.EchoTrigger? = automations.filterIsInstance<ParamAutomation.EchoTrigger>().firstOrNull()
     val hasBassCuts: Boolean get() = bassCuts.isNotEmpty()
 
     fun gainAt(target: TrackTarget, currentSample: Long, defaultGain: Float): Float {
@@ -154,13 +145,5 @@ data class TransitionRecipe(
         val span = (sweep.endSample - sweep.startSample).coerceAtLeast(1L)
         val progress = ((currentSample - sweep.startSample).toDouble() / span.toDouble()).coerceIn(0.0, 1.0).toFloat()
         return sweep.startHz + (sweep.endHz - sweep.startHz) * progress
-    }
-
-    fun echoTerminationGainAt(currentSample: Long): Float {
-        val trigger = echoTrigger ?: return 0f
-        if (currentSample < trigger.atSample) return 0f
-        val elapsed = currentSample - trigger.atSample
-        val termDuration = trigger.terminationRampSamples.coerceAtLeast(1)
-        return (1.0f - (elapsed.toFloat() / termDuration)).coerceIn(0f, 1f)
     }
 }

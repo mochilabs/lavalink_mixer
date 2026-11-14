@@ -21,7 +21,7 @@ class TempoStretcher(
     private val sampleRate: Int,
     initialSpeed: Double = 1.0,
     private val timescaleFactory: (FloatPcmAudioFilter, Int, Int) -> FloatPcmAudioFilter = { ds, ch, sr ->
-        TimescalePcmAudioFilter(ds, ch, sr)
+        LinkedTimescaleFilter(ds, ch, sr)
     },
 ) : FloatPcmAudioFilter {
 
@@ -149,7 +149,10 @@ class TempoStretcher(
                     delegate = current
                 }
                 if (appliedRate != targetSpeed) {
-                    (current as? TimescalePcmAudioFilter)?.setSpeed(targetSpeed)
+                    when (current) {
+                        is LinkedTimescaleFilter -> current.setSpeed(targetSpeed)
+                        is TimescalePcmAudioFilter -> current.setSpeed(targetSpeed)
+                    }
                     appliedRate = targetSpeed
                 }
                 val projectedOutput = count / targetSpeed

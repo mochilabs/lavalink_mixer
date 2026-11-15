@@ -63,10 +63,15 @@ from an old session does not remove a mixer attached to a newer player.
 | --- | --- |
 | `MixerPlugin` | Stores mixers by guild ID and resolves encoded tracks or source identifiers. |
 | `MixerEvents` | Attaches new Lavalink players and removes a mixer when its attached main player is destroyed. |
-| `GuildMixer` | Owns main-player binding, secondary playback, next-track slots, gains, transitions, and overlay slots. |
+| `GuildMixer` | Owns main-player binding, next-track slots, normalization gains, the poll decision, and the gapless advance. It owns both locks and composes the components below. |
+| `MixerSettings` | Holds a guild's runtime-adjustable settings as volatile fields shared by every component. |
+| `SubDeck` | Owns the single secondary player, its siphon and tempo factory, and the main/sub gain ramps. |
+| `CrossfadeEngine` | Prepares and starts an overlap on the deck, drives the fade gains, and performs the handoff or abort. |
+| `OverlayController` | Owns the announcement queue, the sequential overlay on the deck, and parallel overlay slots. |
+| `FeederElection` | Elects the `MixerFilter` instance that feeds the mixer and watches the filter heartbeat. |
 | `ProtocolController` | Owns protocol state, armed-track metadata, JIT requests, and the ordered action executor. |
 | `EpochGate` | Tracks the current epoch, reset grace window, and recent request fingerprints. |
-| `AnalysisCoordinator` | Schedules each guild's analysis scans one at a time, defers warmups and retries, and writes results to `AnalysisCaches`. It shares `GuildMixer.lock` through `AnalysisHost`. |
+| `AnalysisCoordinator` | Schedules each guild's analysis scans one at a time, defers warmups and retries, and writes results to `AnalysisCaches`. |
 | `TrackAnalysisService` | Owns a separate analysis player and capture filter for each guild. |
 | `AnalysisCaches` | Shares identifier-keyed measurements across guilds. |
 
@@ -79,6 +84,10 @@ for ordered actions and delayed JIT notifications.
 Audio filter callbacks and player event callbacks also access mixer state.
 The system is not confined to the protocol executor. `GuildMixer.lock` guards
 compound state transitions, with volatile fields and atomics for selected values.
+`CrossfadeEngine`, `OverlayController`, and `AnalysisCoordinator` hold no lock of
+their own. Each receives `GuildMixer.lock` through its host interface
+(`CrossfadeHost`, `OverlayHost`, `AnalysisHost`), and a member named `...Locked`
+must be called with that lock held, whichever class declares it.
 The outer `playerMutationLock` serializes main-player mutations across handoff,
 gapless advance, and override. Acquiring it while holding `lock` violates the
 documented lock order.
@@ -196,7 +205,7 @@ incoming track at full gain, mixed past the handoff point. `startTrack` stops
 that executor, and the clone needs as long as its source takes to open and seek
 before it produces a frame. On a remote source that time was heard as a gap.
 `HandoffBridge` covers it. The plugin wraps Lavaplayer's frame-buffer factory;
-without a pending bridge the wrapper only delegates. `doHandoff` freezes a
+without a pending bridge the wrapper only delegates. `CrossfadeEngine.doHandoff` freezes a
 per-chunk map from main chain samples to consumed incoming source position
 (`HandoffSourceMap`) before it changes any gains, then starts the clone with the
 outgoing buffer armed on a thread-local. Inside `startTrack`, the wrapped factory

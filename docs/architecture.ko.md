@@ -14,6 +14,7 @@
 | --- | --- | --- |
 | 필터 확장 | `MixerFilterExtension`, `MixerFilter` | 길드 메인 플레이어의 PCM 필터 체인에 믹싱 포인트 삽입 (`pluginFilters.mixer`) |
 | 플러그인 코어 & 스케줄러 | `MixerPlugin`, `GuildMixer` | 길드별 믹서 수명주기 관리, ~50Hz 2차 디코더 펌프 및 ~10Hz 크로스페이드 폴링 |
+| 길드 믹서 구성 요소 | `MixerSettings`, `SubDeck`, `CrossfadeEngine`, `OverlayController`, `FeederElection` | 런타임 설정, 2차 덱과 게인, 오버랩 크로스페이드와 핸드오프, 공지 큐와 오버레이, 피더 선출을 각각 담당. 모두 `GuildMixer`의 락을 공유 |
 | HTTP / WebSocket 제어 평면 | `MixerRestHandler`, `MixerEvents`, `ProtocolController` | `/mixer/*` REST API 처리 및 `{op: "mixer"}` WebSocket 이벤트 송신 |
 | 오프라인 분석 | `AnalysisCoordinator`, `TrackAnalysisService`, `AnalysisCaches`, `SiphonQueue` | 실시간 재생과 격리된 전용 디코더로 무음·음량·BPM·조성·전환 특성 추출 |
 
@@ -53,6 +54,7 @@ flowchart LR
 ### 플레이어 변경 락 순서 (Lock Order Invariant)
 
 - `GuildMixer`는 내부 상태 보호용 `lock`과 메인 플레이어 조작 직렬화용 `playerMutationLock`을 구분합니다.
+- `CrossfadeEngine`, `OverlayController`, `AnalysisCoordinator`는 자체 락이 없습니다. 각자의 Host 인터페이스(`CrossfadeHost`, `OverlayHost`, `AnalysisHost`)로 `GuildMixer.lock`을 받아 쓰며, 이름이 `...Locked`로 끝나는 멤버는 어느 클래스에 있든 이 락을 잡은 상태에서 호출해야 합니다.
 - **불변식**: `playerMutationLock`은 항상 외곽 락(outer lock)이며, **`lock`을 보유한 상태에서는 절대 `playerMutationLock`을 획득하지 않습니다.**
 - `main.playTrack` / `main.stopTrack` 호출(핸드오프, `advanceNext`, `override`)은 반드시 `lock`을 해제한 뒤 `playerMutationLock` 안에서 실행합니다.
 - Lavaplayer 이벤트 콜백(`onTrackStart`, `onTrackEnd`)은 Lavaplayer 내부 `trackSwitchLock`을 잡고 호출되므로, 상태 변경·후속 재생·복구 액션은 `actionQueue` 또는 별도 스레드로 오프로드해 교착 상태를 방지합니다.

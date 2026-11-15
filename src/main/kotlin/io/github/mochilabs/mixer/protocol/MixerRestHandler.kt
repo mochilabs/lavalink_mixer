@@ -305,6 +305,7 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
             is ArmResult.Duplicate -> ResponseEntity.ok(mapOf("duplicate" to true))
             is ArmResult.BadRequest -> ResponseEntity.badRequest().body(mapOf("error" to res.message))
             is ArmResult.Stale -> ResponseEntity.status(HttpStatus.CONFLICT).body(ConflictErrorResponse("STALE_EPOCH", res.lastKnown))
+            is ArmResult.Superseded -> ResponseEntity.status(HttpStatus.CONFLICT).body(ConflictErrorResponse("SUPERSEDED", res.lastKnownEpoch))
             is ArmResult.PreResetArrival -> ResponseEntity.status(HttpStatus.CONFLICT).body(
                 mapOf(
                     "error" to "PRE_RESET_ARRIVAL",

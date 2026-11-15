@@ -12,6 +12,7 @@ sealed class ArmResult {
     data class Success(val state: PlaybackState, val epoch: Long) : ArmResult()
     object Duplicate : ArmResult()
     data class Stale(val lastKnown: Long) : ArmResult()
+    data class Superseded(val lastKnownEpoch: Long) : ArmResult()
     data class PreResetArrival(val windowOpenAt: Long, val lastKnownEpoch: Long) : ArmResult()
     object PayloadMismatch : ArmResult()
     data class BadRequest(val message: String) : ArmResult()

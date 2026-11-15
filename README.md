@@ -202,7 +202,7 @@ Use a new key for each logical operation and reuse that key when retrying the sa
 
 If the queue head changes, send `/mixer/queue/invalidate` with a higher epoch and a new key. This clears the armed slot and can request the next track again within the prefetch window. Explicit skips and stops use `/mixer/queue/override` with `PLAY_NOW` or `STOP`. Player mutation runs on an ordered executor. Confirm execution through `MixerOverriddenEvent`.
 
-On bot startup or session resume, call `/mixer/reset` to synchronize epochs. Reset keeps the greater of the existing and supplied epochs and opens a 1500 ms grace window by default. Handle HTTP 409 using `lastKnownEpoch` and, for `PRE_RESET_ARRIVAL`, `windowOpenAt`.
+On bot startup or session resume, call `/mixer/reset` to synchronize epochs. Reset keeps the greater of the existing and supplied epochs and opens a 1500 ms grace window by default. Handle HTTP 409 (`STALE_EPOCH`, `PRE_RESET_ARRIVAL`, `SUPERSEDED`) using `lastKnownEpoch` and, for `PRE_RESET_ARRIVAL`, `windowOpenAt`.
 
 ### Preserve transitions and skip track boundaries
 

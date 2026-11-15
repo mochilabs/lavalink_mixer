@@ -230,6 +230,54 @@ class GuildMixerProtocolTest {
         assertEquals(PlaybackState.ARMED, mixer.playbackState)
     }
 
+    @Test
+    fun `arm overtaken by same-epoch invalidate during xfade abort returns Superseded and keeps idempotency key`() {
+        val track = loadTrack(testFile)
+        var xfadeActive = true
+        val core = object : MixerCore {
+            override val guildId = 77L
+            override val lock = Any()
+            override val playerMutationLock = Any()
+            override val playerManager = manager
+            override val mainPlayer = null
+            override val playingTrack: AudioTrack = track
+            override val crossfadeMs = 3_000L
+            override val prefetchLeadMs = 7_000L
+            override val isXfadeActive: Boolean get() = xfadeActive
+            override val isOverlayActive = false
+            override fun safePosition(track: AudioTrack) = 1_000L
+            override fun clearNextLocked() = Unit
+            override fun preloadArmedTrackLocked(track: AudioTrack) = Unit
+            override fun scheduleArmedAnalysis(track: AudioTrack) = Unit
+            override fun clearMaskingLocked() = Unit
+            override fun restoreUnityGainAfterStopLocked() = Unit
+            override fun syncPlayingStateOnResetLocked(playing: AudioTrack?) = Unit
+            override fun abortXfadeOutsideLock(reason: String) {
+                xfadeActive = false
+            }
+            override fun cancelOverlayOutsideLock() = false
+            override fun notifyEvent(type: String, body: kotlinx.serialization.json.JsonObjectBuilder.() -> Unit) = Unit
+        }
+        val controller = ProtocolController(core)
+        try {
+            controller.playbackState = PlaybackState.PLAYING
+            controller.afterArmAbortForTest = {
+                val inv = controller.invalidate(10L, "inv-during-abort")
+                assertIs<InvalidateResult.Success>(inv)
+            }
+            val res = controller.arm(10L, "arm-overtaken", track, false)
+            val superseded = assertIs<ArmResult.Superseded>(res)
+            assertEquals(10L, superseded.lastKnownEpoch)
+            assertEquals(PlaybackState.PLAYING, controller.playbackState)
+            kotlin.test.assertNull(controller.armedTrack)
+
+            val retry = controller.arm(10L, "arm-overtaken", track, false)
+            assertIs<ArmResult.Duplicate>(retry)
+        } finally {
+            controller.shutdown()
+        }
+    }
+
     private fun loadTrack(file: File): AudioTrack {
         val future = CompletableFuture<AudioTrack>()
         manager.loadItemOrdered(file.absolutePath, file.absolutePath, object : com.sedmelluq.discord.lavaplayer.player.AudioLoadResultHandler {

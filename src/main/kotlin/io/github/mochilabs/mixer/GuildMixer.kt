@@ -627,10 +627,11 @@ class GuildMixer(
         }
     }
 
-    fun attachMain(player: IPlayer) {
+    fun attachMain(player: IPlayer): Boolean {
         synchronized(playerMutationLock) {
             val newAudioPlayer = player.audioPlayer
             val (previousPlayers, addListener) = synchronized(lock) {
+                if (destroyed) return false
                 val previous = attachedPlayers.filter { it !== newAudioPlayer }
                 attachedPlayers.removeAll(previous.toSet())
                 main = player
@@ -648,6 +649,7 @@ class GuildMixer(
                     log.debug("stopping replaced session player failed on guild {}: {}", guildId, e.toString())
                 }
             }
+            return true
         }
     }
 
@@ -1282,6 +1284,13 @@ class GuildMixer(
     fun destroy() {
         destroyWhen { true }
     }
+
+    /**
+     * Tears the mixer down once if [player] is still the attached main player.
+     * Both [main] and [destroyed] are checked under [lock], making this atomic
+     * with [attachMain].
+     */
+    fun destroyIfMain(player: IPlayer): Boolean = destroyWhen { main === player }
 
     /** Test seam: whether [destroy] ran. */
     fun isDestroyedForTest(): Boolean = synchronized(lock) { destroyed }

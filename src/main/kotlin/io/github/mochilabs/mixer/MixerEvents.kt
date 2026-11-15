@@ -14,13 +14,12 @@ import org.springframework.stereotype.Service
 @Service
 class MixerEvents(private val plugin: MixerPlugin) : PluginEventHandler() {
     override fun onNewPlayer(context: ISocketContext, player: IPlayer) {
-        val mixer = plugin.getOrCreate(player.guildId)
+        val mixer = plugin.attach(player)
         log.info(
             "player created for guild {} -> mixer {} (filter build logs the same identity, " +
                 "so mismatched hashes mean the filter is bound to a different instance)",
             player.guildId, MixerFilterExtension.describe(mixer),
         )
-        mixer.attachMain(player)
     }
 
     override fun onDestroyPlayer(context: ISocketContext, player: IPlayer) {
@@ -34,7 +33,7 @@ class MixerEvents(private val plugin: MixerPlugin) : PluginEventHandler() {
         // here would kill the survivor's crossfade state, and the surviving
         // player's chain would lose its GuildMixer entirely. Only the mixer
         // whose main (attached) player is being destroyed goes with it.
-        if (!mixer.isMain(player)) {
+        if (!plugin.removeIfMain(player.guildId, player)) {
             log.info(
                 "player destroyed for guild {} but mixer {} is attached to a different player; mixer kept",
                 player.guildId, MixerFilterExtension.describe(mixer),
@@ -45,7 +44,6 @@ class MixerEvents(private val plugin: MixerPlugin) : PluginEventHandler() {
             "player destroyed for guild {} (mixer {})",
             player.guildId, MixerFilterExtension.describe(mixer),
         )
-        plugin.remove(player.guildId)
     }
 
     companion object {

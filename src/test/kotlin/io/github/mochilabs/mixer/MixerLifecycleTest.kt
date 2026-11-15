@@ -8,6 +8,8 @@ import com.sedmelluq.discord.lavaplayer.source.local.LocalAudioSourceManager
 import com.sedmelluq.discord.lavaplayer.tools.FriendlyException
 import com.sedmelluq.discord.lavaplayer.track.AudioPlaylist
 import com.sedmelluq.discord.lavaplayer.track.AudioTrack
+import dev.arbjerg.lavalink.api.IPlayer
+import dev.arbjerg.lavalink.api.ISocketContext
 import java.io.DataOutputStream
 import java.io.File
 import java.io.FileOutputStream
@@ -22,7 +24,11 @@ import kotlin.math.sin
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertNotSame
 import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 /**
@@ -113,6 +119,88 @@ class MixerLifecycleTest {
             file.delete()
         }
     }
+
+    @Test
+    fun `destroy racing between getOrCreate and attachMain replaces the destroyed mixer with a live one`() {
+        val manager = manager()
+        val plugin = MixerPlugin(manager, MixerConfig())
+        try {
+            val events = MixerEvents(plugin)
+            val socket = proxySocket()
+            val guildId = 10L
+            val oldPlayer = proxyPlayer(guildId, manager.createPlayer())
+            val newPlayer = proxyPlayer(guildId, manager.createPlayer())
+
+            events.onNewPlayer(socket, oldPlayer)
+            val oldMixer = assertNotNull(plugin.find(guildId))
+            assertTrue(oldMixer.isMain(oldPlayer))
+
+            val hookRan = AtomicBoolean(false)
+            plugin.beforeAttachForTest = {
+                if (hookRan.compareAndSet(false, true)) {
+                    events.onDestroyPlayer(socket, oldPlayer)
+                }
+            }
+            events.onNewPlayer(socket, newPlayer)
+            plugin.beforeAttachForTest = null
+
+            assertTrue(hookRan.get(), "beforeAttachForTest hook did not run")
+            assertTrue(oldMixer.isDestroyedForTest(), "old mixer must be destroyed when oldPlayer is destroyed")
+            assertFalse(oldMixer.isMain(newPlayer), "destroyed old mixer must not accept newPlayer")
+
+            val liveMixer = assertNotNull(plugin.find(guildId), "registry must keep a live mixer for newPlayer")
+            assertNotSame(oldMixer, liveMixer)
+            assertFalse(liveMixer.isDestroyedForTest(), "replacement mixer must be live")
+            assertTrue(liveMixer.isMain(newPlayer), "replacement mixer must be attached to newPlayer")
+        } finally {
+            plugin.destroy()
+            manager.shutdown()
+        }
+    }
+
+    @Test
+    fun `destroy of old player after new player attached keeps the mixer attached to new player`() {
+        val manager = manager()
+        val plugin = MixerPlugin(manager, MixerConfig())
+        try {
+            val events = MixerEvents(plugin)
+            val socket = proxySocket()
+            val guildId = 11L
+            val oldPlayer = proxyPlayer(guildId, manager.createPlayer())
+            val newPlayer = proxyPlayer(guildId, manager.createPlayer())
+
+            events.onNewPlayer(socket, oldPlayer)
+            val mixer = assertNotNull(plugin.find(guildId))
+            events.onNewPlayer(socket, newPlayer)
+            assertSame(mixer, plugin.find(guildId))
+            assertTrue(mixer.isMain(newPlayer))
+
+            events.onDestroyPlayer(socket, oldPlayer)
+            val surviving = assertNotNull(plugin.find(guildId), "destroying oldPlayer must not remove newPlayer's mixer")
+            assertSame(mixer, surviving)
+            assertFalse(surviving.isDestroyedForTest(), "destroying oldPlayer must not destroy newPlayer's mixer")
+            assertTrue(surviving.isMain(newPlayer))
+        } finally {
+            plugin.destroy()
+            manager.shutdown()
+        }
+    }
+
+    private fun proxySocket(): ISocketContext = Proxy.newProxyInstance(
+        javaClass.classLoader,
+        arrayOf(ISocketContext::class.java),
+    ) { _, _, _ -> null } as ISocketContext
+
+    private fun proxyPlayer(guildId: Long, ap: AudioPlayer): IPlayer = Proxy.newProxyInstance(
+        javaClass.classLoader,
+        arrayOf(IPlayer::class.java),
+    ) { _, method, _ ->
+        when (method.name) {
+            "getAudioPlayer" -> ap
+            "getGuildId" -> guildId
+            else -> null
+        }
+    } as IPlayer
 
     private fun loadTrack(manager: DefaultAudioPlayerManager, file: File): AudioTrack {
         val future = CompletableFuture<AudioTrack>()

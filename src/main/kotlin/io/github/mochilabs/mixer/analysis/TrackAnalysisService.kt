@@ -1281,13 +1281,22 @@ internal class TrackAnalysisService(
         }
     }
 
-    private fun msToSamples(ms: Long): Int = ((ms.coerceAtLeast(0) * SAMPLE_RATE) / 1000).toInt().coerceAtLeast(1)
+    private fun msToSamples(ms: Long): Int = sampleCountFor(ms)
 
     private fun msToSamplesLong(ms: Long): Long = (ms.coerceAtLeast(0) * SAMPLE_RATE) / 1000L
 
     companion object {
         private val log = LoggerFactory.getLogger(TrackAnalysisService::class.java)
         private const val SAMPLE_RATE = 48000
+
+        /**
+         * Sample count for [ms] at 48 kHz, at least 1. Saturates at [Int.MAX_VALUE]:
+         * a plain toInt() wrapped past about 12.4 hours (an unclamped silence scan
+         * length in the startup config) into a negative or tiny count.
+         */
+        internal fun sampleCountFor(ms: Long): Int =
+            ((ms.coerceIn(0L, Long.MAX_VALUE / SAMPLE_RATE) * SAMPLE_RATE) / 1000L)
+                .coerceAtMost(Int.MAX_VALUE.toLong()).toInt().coerceAtLeast(1)
         /** Tracks up to 10 minutes run a single sequential pass (1 InnerTube + 1 CDN GET). */
         const val SEQUENTIAL_MAX_MS = 10 * 60_000L
         /** Container metadata duration vs decoded PCM EOF slack when EOF was cleanly reached. */

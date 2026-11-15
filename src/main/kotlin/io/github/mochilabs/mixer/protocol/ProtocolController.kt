@@ -82,6 +82,8 @@ internal class ProtocolController(
     /** Last advanceSeq whose MixerNeedNextTrackEvent was actually dispatched (dedup). */
     @Volatile private var needNextDispatchedAtSeq: Long = -1L
     private var needNextRequestGeneration: Long = 0L
+    private var controlSeq: Long = 0L
+    @Volatile internal var afterArmAbortForTest: (() -> Unit)? = null
 
     // Order-sensitive submissions (override STOP/PLAY_NOW, invalidate refires,
     // JIT delayed fires): a single-thread scheduled executor preserves FIFO order
@@ -180,6 +182,7 @@ internal class ProtocolController(
         val fp = "arm|${canonicalEncoded ?: "empty"}|preserve=$preserveTransition|start=$startMs|end=${outgoingEndPositionMs ?: 0L}"
 
         val abortNeeded: Boolean
+        val myControlSeq: Long
         synchronized(core.lock) {
             when (val g = gate.checkAndRecord(epoch, idemKey, fp)) {
                 is GateResult.Duplicate -> return ArmResult.Duplicate
@@ -188,6 +191,7 @@ internal class ProtocolController(
                 is GateResult.PayloadMismatch -> return ArmResult.PayloadMismatch
                 else -> {}
             }
+            myControlSeq = ++controlSeq
             abortNeeded = core.isXfadeActive
         }
         // Tear down an active overlap outside the lock BEFORE arming/analyzing the
@@ -195,12 +199,13 @@ internal class ProtocolController(
         // does not see xfadeActive=true.
         if (abortNeeded) {
             core.abortXfadeOutsideLock("re-armed by client")
+            afterArmAbortForTest?.invoke()
         }
 
         return synchronized(core.lock) {
-            if (gate.lastKnownEpoch != epoch) {
-                // A newer control command superseded us while abortXfade was running.
-                return@synchronized ArmResult.Success(playbackState, gate.lastKnownEpoch)
+            if (controlSeq != myControlSeq) {
+                // Another control command superseded us while abortXfade was running.
+                return@synchronized ArmResult.Superseded(gate.lastKnownEpoch)
             }
             if (isEmpty || track == null) {
                 core.clearNextLocked()
@@ -240,6 +245,7 @@ internal class ProtocolController(
                 is GateResult.PayloadMismatch -> return InvalidateResult.PayloadMismatch
                 else -> {}
             }
+            ++controlSeq
 
             core.clearNextLocked()
             clearArmedLocked()
@@ -317,6 +323,7 @@ internal class ProtocolController(
                 is GateResult.PayloadMismatch -> return OverrideResult.PayloadMismatch
                 else -> {}
             }
+            ++controlSeq
 
             core.clearNextLocked()
             clearArmedLocked()
@@ -389,6 +396,7 @@ internal class ProtocolController(
                 is ResetResult.PayloadMismatch -> return res
                 is ResetResult.Success -> {}
             }
+            ++controlSeq
             core.clearNextLocked()
             clearArmedLocked()
             core.clearMaskingLocked()

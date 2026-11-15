@@ -120,11 +120,11 @@ components:
       properties:
         error:
           type: string
-          enum: [STALE_EPOCH, PRE_RESET_ARRIVAL]
+          enum: [STALE_EPOCH, PRE_RESET_ARRIVAL, SUPERSEDED]
         lastKnownEpoch:
           type: integer
           format: int64
-          description: The newest epoch the server has accepted. Present for both conflict kinds.
+          description: The newest epoch the server has accepted. Present for all conflict kinds.
         windowOpenAt:
           type: integer
           format: int64
@@ -679,7 +679,7 @@ paths:
                   - { $ref: '#/components/schemas/DuplicateResponse' }
         '400': { description: "Bad request, missing Idempotency-Key, etc." }
         '409':
-          description: Epoch mismatch or arrival too early post-reset
+          description: Epoch mismatch, arrival too early post-reset, or arm superseded while aborting an active overlap
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ConflictError' }

@@ -197,7 +197,7 @@ internal class OverlayController(
             return track
         }
         val (sub, gen) = synchronized(host.lock) {
-            if (overlayActive || host.transitionBusyLocked) throw MixerBusyException("secondary player busy on guild $host.guildId")
+            if (overlayActive || host.transitionBusyLocked) throw MixerBusyException("secondary player busy on guild ${host.guildId}")
             val s = deck.ensureLocked(host.subListener)
             deck.factory?.resetSpeed()
             announceToken++
@@ -233,7 +233,7 @@ internal class OverlayController(
             if (synchronized(host.lock) { overlayActive && deck.track === track }) {
                 finishOverlay()
             }
-            throw MixerBusyException("overlay cancelled during start on guild $host.guildId")
+            throw MixerBusyException("overlay cancelled during start on guild ${host.guildId}")
         }
         log.info("overlay '{}' started on guild {}", track.info.title, host.guildId)
         host.notifyMixerEvent("announceStart") {
@@ -259,7 +259,7 @@ internal class OverlayController(
     ) {
         val slot = synchronized(host.lock) {
             if (parallelOverlays.size >= settings.maxParallelOverlays) {
-                throw MixerBusyException("parallel overlay limit ($settings.maxParallelOverlays) reached on guild $host.guildId")
+                throw MixerBusyException("parallel overlay limit (${settings.maxParallelOverlays}) reached on guild ${host.guildId}")
             }
             val id = announcementId ?: announcementQueue.nextId()
             val player = playerManager.createPlayer()

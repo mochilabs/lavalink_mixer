@@ -371,22 +371,14 @@ class GuildMixer(
     private var lastEndedMain: AudioTrack? = null
     private var lastEndedMainAt: Long = 0L
 
-    /** Ticks once per mixer-filter chunk; see [checkFilterHeartbeatLocked]. */
-    private val filterRunCount = AtomicLong(0L)
 
     // ---- voice-thread feed arbitration ----
 
-    private val electedFeeder = AtomicLong(0L)
-    private val electedSeenAtMs = AtomicLong(0L)
-    private val rivalWarnAtMs = AtomicLong(0L)
+    private val feeder = FeederElection(guildId)
     /** Test seam; production budget is ~50 voice-thread chunks of silence. */
-    @Volatile var feederStaleMs: Long = 1000L
+    var feederStaleMs: Long by feeder::staleMs
 
     private val chainPos = AtomicLong(0L)
-    private var filterRunBaseline = 0L
-    private var filterBaselinePos = 0L
-    @Volatile private var filterMissing: Boolean = false
-    private var filterMissingWarned: Boolean = false
     private val underrunLogAt = AtomicLong(0L)
     private var xfadeLogMs: Long = 0L
 
@@ -647,7 +639,7 @@ class GuildMixer(
                 attachedPlayers.removeAll(previous.toSet())
                 main = player
                 val added = attachedPlayers.add(newAudioPlayer)
-                if (previous.isNotEmpty()) electedFeeder.set(0L)
+                if (previous.isNotEmpty()) feeder.reset()
                 previous to added
             }
             // Listener registration also takes Lavaplayer's trackSwitchLock.
@@ -758,7 +750,7 @@ class GuildMixer(
 
     /** Advances ramps by [samples] and returns the gains to mix with. */
     fun advance(samples: Int, feederId: Long): Gains {
-        if (!claimFeeder(feederId)) {
+        if (!feeder.claim(feederId)) {
             // Rival chain: snapshot only — mutating ramps/chainPos here would
             // double every fade and run the chain counter at 2x.
             return Gains(deck.mainGain.current * mainNorm.current, deck.subGain.current * subNorm.current)
@@ -829,50 +821,11 @@ class GuildMixer(
         return read.outputSamples
     }
 
-    /** Whether [feederId] currently owns the feed; settle [claimFeeder] (via [advance]) before reading. */
-    fun isFeeder(feederId: Long): Boolean = electedFeeder.get() == feederId
+    /** Whether [feederId] currently owns the feed; settle the claim (via [advance]) before reading. */
+    fun isFeeder(feederId: Long): Boolean = feeder.isFeeder(feederId)
 
     /** Called by [MixerFilter.close] when Lavaplayer tears its chain down (hot-swap, track end). */
-    fun retireFeeder(feederId: Long) {
-        electedFeeder.compareAndSet(feederId, 0L)
-    }
-
-    private fun claimFeeder(feederId: Long): Boolean {
-        while (true) {
-            val elected = electedFeeder.get()
-            if (elected == feederId) {
-                electedSeenAtMs.set(System.currentTimeMillis())
-                return true
-            }
-            if (elected != 0L) {
-                val silentMs = System.currentTimeMillis() - electedSeenAtMs.get()
-                if (silentMs < feederStaleMs) {
-                    warnRivalFeeder(feederId, elected)
-                    return false
-                }
-                log.info(
-                    "mixer feeder takeover on guild {}: incumbent filter #{} silent for {}ms, filter #{} takes over",
-                    guildId, elected, silentMs, feederId,
-                )
-            }
-            if (electedFeeder.compareAndSet(elected, feederId)) {
-                electedSeenAtMs.set(System.currentTimeMillis())
-                return true
-            }
-        }
-    }
-
-    private fun warnRivalFeeder(feederId: Long, elected: Long) {
-        val now = System.currentTimeMillis()
-        val last = rivalWarnAtMs.get()
-        if (now - last < 60_000 || !rivalWarnAtMs.compareAndSet(last, now)) return
-        log.warn(
-            "second mixer filter (#{} on guild {}) is feeding a mixer owned by filter #{} — two players exist " +
-                "for this guild (stale session vs fresh restore?). Only the incumbent advances the chain; " +
-                "check for duplicate session players.",
-            feederId, guildId, elected,
-        )
-    }
+    fun retireFeeder(feederId: Long) = feeder.retire(feederId)
 
     fun advanceParallelOverlays(samples: Int, feederId: Long): List<OverlaySlot> =
         overlays.advanceParallel(samples, feederId)
@@ -884,9 +837,7 @@ class GuildMixer(
     }
 
     /** Heartbeat from the voice path: the mixer filter processed a chunk. */
-    fun noteFilterRun() {
-        filterRunCount.incrementAndGet()
-    }
+    fun noteFilterRun() = feeder.noteFilterRun()
 
     /** Re-bases the decode-side position after a track start or a seek. */
     fun syncChainPos(positionMs: Long) {
@@ -1019,13 +970,13 @@ class GuildMixer(
     internal fun isXfadeBeatMatchedForTest(): Boolean = xfadeBeatMatched
     internal fun currentSubEffectiveSpeedForTest(): Double = deck.factory?.effectiveSpeed ?: 1.0
 
-    internal fun filterRunsForTest(): Long = filterRunCount.get()
+    internal fun filterRunsForTest(): Long = feeder.filterRuns
 
-    internal fun filterMissingForTest(): Boolean = filterMissing
+    internal fun filterMissingForTest(): Boolean = feeder.filterMissing
 
     /** Advances the heartbeat baseline as if a fresh main track just started. */
     internal fun resetFilterHeartbeatForTest(position: Long = 0L) {
-        synchronized(lock) { resetFilterHeartbeatLocked(position) }
+        synchronized(lock) { feeder.resetHeartbeatLocked(position) }
     }
 
     internal fun trimForTest(identifier: String): TrimPoints? =
@@ -1136,7 +1087,7 @@ class GuildMixer(
             siphon.droppedFrames,
             subOutMs * 1000L / SAMPLE_RATE,
             subPos,
-            filterRunCount.get(),
+            feeder.filterRuns,
         )
     }
 
@@ -1151,7 +1102,7 @@ class GuildMixer(
         if (track !== lastMainTrack) {
             lastMainTrack = track
             lastPosition = safePosition(track)
-            resetFilterHeartbeatLocked(lastPosition)
+            feeder.resetHeartbeatLocked(lastPosition)
             // TrackStart should already have torn down an armed overlap; this
             // covers event ordering/loss so a zombie fade never hands off on
             // a track it was not armed on.
@@ -1162,18 +1113,18 @@ class GuildMixer(
         if (pos < lastPosition - 1500) {
             // User seeked backwards: any armed overlap is stale.
             tailCutter.reset()
-            resetFilterHeartbeatLocked(pos)
+            feeder.resetHeartbeatLocked(pos)
             syncChainPos(pos)
             if (xfadeActive) return PollAction.AbortXfade("seek during crossfade")
         } else if (pos > lastPosition + 2500 && pos * SAMPLE_RATE / 1000 > chainPos.get() + SAMPLE_RATE) {
             // Forward seek (e.g. fresh session restore seeking to saved position):
             // re-base chainPos if track.position jumped ahead of the decoded chain.
             tailCutter.reset()
-            resetFilterHeartbeatLocked(pos)
+            feeder.resetHeartbeatLocked(pos)
             syncChainPos(pos)
         }
         lastPosition = pos
-        checkFilterHeartbeatLocked(audioPlayer, pos)
+        feeder.checkHeartbeatLocked(main != null, audioPlayer, pos)
         // Opportunistic promotion: analysis may have finished since queue.
         promoteIfPendingLocked()
         tailWatch = silenceSkipEnabled && !protocol.preserveTransition
@@ -1346,37 +1297,6 @@ class GuildMixer(
         )
     }
 
-    private fun resetFilterHeartbeatLocked(position: Long) {
-        filterRunBaseline = filterRunCount.get()
-        filterBaselinePos = position
-        filterMissing = false
-        filterMissingWarned = false
-    }
-
-    private fun checkFilterHeartbeatLocked(audioPlayer: AudioPlayer, pos: Long) {
-        val runs = filterRunCount.get()
-        if (runs != filterRunBaseline) {
-            if (filterMissing) {
-                filterMissing = false
-                log.info("mixer filter is live on guild {} ({} chunks since track start)", guildId, runs - filterRunBaseline)
-            }
-            return
-        }
-        if (filterMissingWarned || main == null || audioPlayer.isPaused) return
-        val played = pos - filterBaselinePos
-        if (played < 1000) return
-        filterMissingWarned = true
-        filterMissing = true
-        log.warn(
-            "mixer filter is NOT in the running track's chain on guild {}: {}ms decoded, " +
-                "0 mixer filter calls. Send the `filters` op with pluginFilters.mixer BEFORE " +
-                "`play` (or re-send `filters` and seek) — Lavalink does not rebuild the chain " +
-                "of a track that is already playing.",
-            guildId, played,
-        )
-    }
-
-
     // ---- control-plane entry points (REST) ----
 
     fun queueNext(future: CompletableFuture<AudioTrack>) {
@@ -1487,7 +1407,7 @@ class GuildMixer(
     }
 
     /** False once the heartbeat probe proved the mixer filter never entered the running track's chain. */
-    fun mixerFilterActive(): Boolean = synchronized(lock) { !filterMissing }
+    fun mixerFilterActive(): Boolean = synchronized(lock) { !feeder.filterMissing }
 
     /** Milliseconds until an armed overlap hands off; null when no crossfade is running. */
     fun crossfadeHandoffInMs(): Long? = synchronized(lock) {

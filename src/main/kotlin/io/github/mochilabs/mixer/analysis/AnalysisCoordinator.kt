@@ -11,20 +11,8 @@ internal interface AnalysisHost {
     /** The guild state lock; every `...Locked` member here must be called while holding it. */
     val lock: Any
 
-    val normalizationEnabled: Boolean
+    /** Test-only loudness anchor; 0 in production. */
     val normGainBaseline: Float
-    val silenceSkipEnabled: Boolean
-    val silenceThresholdDb: Float
-    val silenceMinSoundMs: Long
-    val silenceHeadScanMs: Long
-    val silenceTailScanMs: Long
-    val bpmDetectionEnabled: Boolean
-    val bpmScanMs: Long
-    val beatmatchEnabled: Boolean
-    val beatmatchMinConfidence: Float
-    val keyDetectionEnabled: Boolean
-    val keyScanMs: Long
-
     val playingTrack: AudioTrack?
     /** Pending slot first, then ready. */
     fun queuedTracksLocked(): List<AudioTrack>
@@ -42,6 +30,7 @@ internal interface AnalysisHost {
  */
 internal class AnalysisCoordinator(
     private val host: AnalysisHost,
+    private val settings: MixerSettings,
     playerManager: AudioPlayerManager,
     private val analysisExecutor: Executor,
 ) {
@@ -111,15 +100,15 @@ internal class AnalysisCoordinator(
             if (queued) return null
             val mainPlaying = host.playingTrack
             val candidates = host.queuedTracksLocked() + listOfNotNull(
-                if (host.bpmDetectionEnabled || host.keyDetectionEnabled || host.silenceSkipEnabled) mainPlaying else null,
+                if (settings.bpmDetectionEnabled || settings.keyDetectionEnabled || settings.silenceSkipEnabled) mainPlaying else null,
             )
             val pending = candidates.firstOrNull { candidate ->
                 if (!candidate.isSeekable || candidate.duration <= 0) return@firstOrNull false
                 val id = idOf(candidate) ?: return@firstOrNull false
-                val needSilence = host.silenceSkipEnabled && !AnalysisCaches.trim.contains(id)
-                val needNorm = candidate !== mainPlaying && host.normalizationEnabled && !AnalysisCaches.norm.contains(id)
-                val needBpm = host.bpmDetectionEnabled && needsBpmAnalysisLocked(id)
-                val needKey = host.keyDetectionEnabled && !AnalysisCaches.key.contains(id)
+                val needSilence = settings.silenceSkipEnabled && !AnalysisCaches.trim.contains(id)
+                val needNorm = candidate !== mainPlaying && settings.normalizationEnabled && !AnalysisCaches.norm.contains(id)
+                val needBpm = settings.bpmDetectionEnabled && needsBpmAnalysisLocked(id)
+                val needKey = settings.keyDetectionEnabled && !AnalysisCaches.key.contains(id)
                 (needSilence || needNorm || needBpm || needKey) && state.canRetryLocked(id, now)
             } ?: return null
             log.debug("retrying deferred analysis for '{}' on guild {}", titleOf(pending), host.guildId)
@@ -133,7 +122,7 @@ internal class AnalysisCoordinator(
     }
 
     fun shouldWarmNormFor(track: AudioTrack): Boolean {
-        if (!host.normalizationEnabled || (!host.silenceSkipEnabled && !host.bpmDetectionEnabled)) return false
+        if (!settings.normalizationEnabled || (!settings.silenceSkipEnabled && !settings.bpmDetectionEnabled)) return false
         val duration = try {
             track.duration
         } catch (_: Exception) {
@@ -153,13 +142,13 @@ internal class AnalysisCoordinator(
         includeNormalization: Boolean = shouldWarmNormFor(track),
     ): Boolean {
         val id = idOf(track) ?: return false
-        val includeSilence = host.silenceSkipEnabled
-        val warmNorm = includeNormalization && host.normalizationEnabled && host.normGainBaseline == 0f
+        val includeSilence = settings.silenceSkipEnabled
+        val warmNorm = includeNormalization && settings.normalizationEnabled && host.normGainBaseline == 0f
         synchronized(host.lock) {
             val needSilence = includeSilence && !AnalysisCaches.trim.contains(id)
             val needNorm = warmNorm && !AnalysisCaches.norm.contains(id)
-            val needBpm = host.bpmDetectionEnabled && needsBpmAnalysisLocked(id)
-            val needKey = host.keyDetectionEnabled && !AnalysisCaches.key.contains(id)
+            val needBpm = settings.bpmDetectionEnabled && needsBpmAnalysisLocked(id)
+            val needKey = settings.keyDetectionEnabled && !AnalysisCaches.key.contains(id)
             if ((!needSilence && !needNorm && !needBpm && !needKey) || !track.isSeekable || track.duration <= 0) return false
             if (queued || state.active) {
                 deferredWarmup = DeferredWarmup(track, warmNorm)
@@ -178,7 +167,7 @@ internal class AnalysisCoordinator(
                     analyzeBlocking(
                         track,
                         cacheOnly = true,
-                        includeSilence = host.silenceSkipEnabled,
+                        includeSilence = settings.silenceSkipEnabled,
                         includeNormalization = includeNormalization,
                     )
                 }
@@ -218,7 +207,7 @@ internal class AnalysisCoordinator(
      * `missing_features`.
      */
     fun incomingFeaturesReadyLocked(track: AudioTrack): Boolean {
-        if (!host.beatmatchEnabled || !host.bpmDetectionEnabled) return true
+        if (!settings.beatmatchEnabled || !settings.bpmDetectionEnabled) return true
         val id = idOf(track) ?: return true
         return !needsBpmAnalysisLocked(id)
     }
@@ -230,10 +219,10 @@ internal class AnalysisCoordinator(
         includeSilence: Boolean = !cacheOnly,
         includeNormalization: Boolean = !cacheOnly,
     ) {
-        val doSilence = host.silenceSkipEnabled && includeSilence
-        val doNorm = host.normalizationEnabled && includeNormalization
-        val doBpm = host.bpmDetectionEnabled
-        val doKey = host.keyDetectionEnabled && track.isSeekable && track.duration in 1 until Long.MAX_VALUE / 2
+        val doSilence = settings.silenceSkipEnabled && includeSilence
+        val doNorm = settings.normalizationEnabled && includeNormalization
+        val doBpm = settings.bpmDetectionEnabled
+        val doKey = settings.keyDetectionEnabled && track.isSeekable && track.duration in 1 until Long.MAX_VALUE / 2
         if (!doSilence && !doNorm && !doBpm && !doKey) {
             if (!cacheOnly) synchronized(host.lock) { host.promoteIfPendingLocked() }
             return
@@ -278,14 +267,14 @@ internal class AnalysisCoordinator(
                     silence = hasSilence,
                     normalization = hasNorm,
                     bpm = needBpm,
-                    silenceThresholdDb = host.silenceThresholdDb,
-                    silenceMinSoundMs = host.silenceMinSoundMs,
-                    silenceHeadScanMs = host.silenceHeadScanMs,
-                    silenceTailScanMs = host.silenceTailScanMs,
-                    bpmScanMs = host.bpmScanMs,
+                    silenceThresholdDb = settings.silenceThresholdDb,
+                    silenceMinSoundMs = settings.silenceMinSoundMs,
+                    silenceHeadScanMs = settings.silenceHeadScanMs,
+                    silenceTailScanMs = settings.silenceTailScanMs,
+                    bpmScanMs = settings.bpmScanMs,
                     key = needKey,
-                    keyScanMs = host.keyScanMs,
-                    bpmMinConfidence = host.beatmatchMinConfidence,
+                    keyScanMs = settings.keyScanMs,
+                    bpmMinConfidence = settings.beatmatchMinConfidence,
                 ),
             )
             if (result.aborted || result.featuresHead?.unknownReason == "incomplete_window" ||
@@ -321,7 +310,7 @@ internal class AnalysisCoordinator(
             }
             // The playing track's loudness is backfilled even by cache-only warmups: a busy
             // slot can drop its own deferred baseline scan when a later warmup replaces it.
-            backfillPlayingTrack(identifier, doSilence, host.normalizationEnabled, doBpm, doKey)
+            backfillPlayingTrack(identifier, doSilence, settings.normalizationEnabled, doBpm, doKey)
             synchronized(host.lock) {
                 if (needBpm) state.completedBpmIdentifier = identifier
                 if (hasSilence) {
@@ -376,14 +365,14 @@ internal class AnalysisCoordinator(
                 silence = needPlayingSilence,
                 normalization = needPlayingNorm,
                 bpm = needPlayingBpm,
-                silenceThresholdDb = host.silenceThresholdDb,
-                silenceMinSoundMs = host.silenceMinSoundMs,
-                silenceHeadScanMs = host.silenceHeadScanMs,
-                silenceTailScanMs = host.silenceTailScanMs,
-                bpmScanMs = host.bpmScanMs,
+                silenceThresholdDb = settings.silenceThresholdDb,
+                silenceMinSoundMs = settings.silenceMinSoundMs,
+                silenceHeadScanMs = settings.silenceHeadScanMs,
+                silenceTailScanMs = settings.silenceTailScanMs,
+                bpmScanMs = settings.bpmScanMs,
                 key = needPlayingKey,
-                keyScanMs = host.keyScanMs,
-                bpmMinConfidence = host.beatmatchMinConfidence,
+                keyScanMs = settings.keyScanMs,
+                bpmMinConfidence = settings.beatmatchMinConfidence,
             ),
             onLoudnessEstimate = if (needPlayingNorm) { lufs -> noteProvisionalLoudness(playingId, lufs) } else null,
         )

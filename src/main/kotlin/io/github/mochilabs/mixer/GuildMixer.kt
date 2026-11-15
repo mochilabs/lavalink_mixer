@@ -44,23 +44,24 @@ class GuildMixer(
     config: MixerConfig,
     private val analysisExecutor: Executor,
 ) {
+    private val settings = MixerSettings(config)
     private val lock = Any()
     /** Outer lock serializing main.play/main.stop across doHandoff, advanceNext, and override. Never acquired while holding [lock]. */
     private val playerMutationLock = Any()
     @Volatile var main: IPlayer? = null
         private set
 
-    @Volatile var crossfadeEnabled: Boolean = config.crossfadeEnabled
-    @Volatile var crossfadeMs: Long = config.crossfadeMs
-    @Volatile var fadeInMs: Long = config.fadeInMs
-    @Volatile var duckLevel: Float = config.duckLevel
-    @Volatile var duckFadeMs: Long = config.duckFadeMs
-    @Volatile var maskMs: Long = config.maskMs
-    @Volatile var handoffBridgeMs: Long = config.handoffBridgeMs
-    @Volatile var maxParallelOverlays: Int = config.maxParallelOverlays.coerceIn(1, 16)
+    var crossfadeEnabled: Boolean by settings::crossfadeEnabled
+    var crossfadeMs: Long by settings::crossfadeMs
+    var fadeInMs: Long by settings::fadeInMs
+    var duckLevel: Float by settings::duckLevel
+    var duckFadeMs: Long by settings::duckFadeMs
+    var maskMs: Long by settings::maskMs
+    var handoffBridgeMs: Long by settings::handoffBridgeMs
+    var maxParallelOverlays: Int by settings::maxParallelOverlays
 
-    @Volatile var normalizationEnabled: Boolean = config.normalizationEnabled
-    @Volatile var targetLufs: Float = config.targetLufs
+    var normalizationEnabled: Boolean by settings::normalizationEnabled
+    var targetLufs: Float by settings::targetLufs
 
     fun updateNormalization(enabled: Boolean, newTargetLufs: Float? = null) {
         var needsBaselineTrack: AudioTrack? = null
@@ -150,23 +151,23 @@ class GuildMixer(
         }
     }
 
-    @Volatile var silenceSkipEnabled: Boolean = config.silenceSkipEnabled
-    @Volatile var silenceThresholdDb: Float = config.silenceThresholdDb
-    @Volatile var silenceMinSoundMs: Long = config.silenceMinSoundMs
-    @Volatile var silenceHeadScanMs: Long = config.silenceHeadScanMs
-    @Volatile var silenceTailScanMs: Long = config.silenceTailScanMs
+    var silenceSkipEnabled: Boolean by settings::silenceSkipEnabled
+    var silenceThresholdDb: Float by settings::silenceThresholdDb
+    var silenceMinSoundMs: Long by settings::silenceMinSoundMs
+    var silenceHeadScanMs: Long by settings::silenceHeadScanMs
+    var silenceTailScanMs: Long by settings::silenceTailScanMs
     /** Sustained realtime silence needed before an early cut. */
-    @Volatile var tailConfirmMs: Long = config.tailConfirmMs
+    var tailConfirmMs: Long by settings::tailConfirmMs
     /** Set by poll(): realtime tail watch armed (cheap per-chunk check reads this). */
     @Volatile var tailWatch: Boolean = config.silenceSkipEnabled
     /** Tempo (BPM) detection is opt-in; each preloaded track decodes one head window for onset analysis. */
-    @Volatile var bpmDetectionEnabled: Boolean = config.bpmDetectionEnabled
-    @Volatile var bpmScanMs: Long = config.bpmScanMs.coerceIn(5000, 60000)
-    @Volatile var keyDetectionEnabled: Boolean = config.keyDetectionEnabled
-    @Volatile var keyScanMs: Long = config.keyScanMs.coerceIn(5000, 60000)
-    @Volatile var beatmatchEnabled: Boolean = config.beatmatchEnabled
-    @Volatile var maxTempoChange: Float = config.maxTempoChange.coerceIn(0f, 0.12f)
-    @Volatile var beatmatchMinConfidence: Float = config.beatmatchMinConfidence.coerceIn(0f, 1f)
+    var bpmDetectionEnabled: Boolean by settings::bpmDetectionEnabled
+    var bpmScanMs: Long by settings::bpmScanMs
+    var keyDetectionEnabled: Boolean by settings::keyDetectionEnabled
+    var keyScanMs: Long by settings::keyScanMs
+    var beatmatchEnabled: Boolean by settings::beatmatchEnabled
+    var maxTempoChange: Float by settings::maxTempoChange
+    var beatmatchMinConfidence: Float by settings::beatmatchMinConfidence
 
     // ---- Protocol State ----
     private val protocol = ProtocolController(object : MixerCore {
@@ -278,19 +279,7 @@ class GuildMixer(
     private val analysis = AnalysisCoordinator(object : AnalysisHost {
         override val guildId: Long get() = this@GuildMixer.guildId
         override val lock: Any get() = this@GuildMixer.lock
-        override val normalizationEnabled: Boolean get() = this@GuildMixer.normalizationEnabled
         override val normGainBaseline: Float get() = this@GuildMixer.normGainBaseline
-        override val silenceSkipEnabled: Boolean get() = this@GuildMixer.silenceSkipEnabled
-        override val silenceThresholdDb: Float get() = this@GuildMixer.silenceThresholdDb
-        override val silenceMinSoundMs: Long get() = this@GuildMixer.silenceMinSoundMs
-        override val silenceHeadScanMs: Long get() = this@GuildMixer.silenceHeadScanMs
-        override val silenceTailScanMs: Long get() = this@GuildMixer.silenceTailScanMs
-        override val bpmDetectionEnabled: Boolean get() = this@GuildMixer.bpmDetectionEnabled
-        override val bpmScanMs: Long get() = this@GuildMixer.bpmScanMs
-        override val beatmatchEnabled: Boolean get() = this@GuildMixer.beatmatchEnabled
-        override val beatmatchMinConfidence: Float get() = this@GuildMixer.beatmatchMinConfidence
-        override val keyDetectionEnabled: Boolean get() = this@GuildMixer.keyDetectionEnabled
-        override val keyScanMs: Long get() = this@GuildMixer.keyScanMs
         override val playingTrack: AudioTrack? get() = mainTrack()
 
         override fun queuedTracksLocked(): List<AudioTrack> = listOfNotNull(pendingNextTrack, readyNextTrack)
@@ -300,7 +289,7 @@ class GuildMixer(
 
         override fun applyAnalyzedNormGain(identifier: String) =
             this@GuildMixer.applyAnalyzedNormGain(identifier)
-    }, playerManager, analysisExecutor)
+    }, settings, playerManager, analysisExecutor)
     private var subTrack: AudioTrack? = null
     private var subStartMs: Long = 0L
     /** Active parallel (`mode=parallel`) overlays: each owns its decoder + siphon + fade ramp. */

@@ -24,11 +24,14 @@ The `audio/`, `analysis/`, and `protocol/` directories all use the same Kotlin
 package, `io.github.mochilabs.mixer`. Preserve that convention when adding files.
 
 - `MixerPlugin.kt`: guild registry, shared scheduler, analysis executor, track loading.
-- `GuildMixer.kt`: player ownership, queue slots, crossfade lifecycle, gains, overlays.
+- `GuildMixer.kt`: player ownership, queue slots, poll decision, gapless advance, both locks.
+- `CrossfadeEngine.kt`: overlap start, fade gains, handoff, and abort.
+- `OverlayController.kt`: announcement queue, sequential and parallel overlays.
+- `MixerSettings.kt`: runtime-adjustable guild settings shared by the components.
 - `MixerEvents.kt`: Lavalink player lifecycle and WebSocket event dispatch.
 - `protocol/`: REST requests, epoch checks, idempotency, and ordered control actions.
-- `audio/`: PCM mixing, queues, gain ramps, and tempo stretching.
-- `analysis/`: isolated analysis decoding, caches, silence, loudness, and beat grids.
+- `audio/`: PCM mixing, queues, gain ramps, tempo stretching, the secondary deck, and feeder election.
+- `analysis/`: analysis scheduling, isolated decoding, caches, silence, loudness, and beat grids.
 - `MixerConfig.kt`: startup defaults bound under `mixer:` in Lavalink configuration.
 - `src/test/kotlin/io/github/mochilabs/mixer/`: unit and local audio integration tests.
 

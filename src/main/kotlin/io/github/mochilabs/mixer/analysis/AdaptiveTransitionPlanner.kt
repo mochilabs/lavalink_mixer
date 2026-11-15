@@ -270,7 +270,9 @@ object AdaptiveTransitionPlanner {
         recoverySamples: Long,
     ): TransitionRecipe {
         val isBassSwap = strategy == TransitionStrategy.PHRASE_MATCHED_BASS_SWAP || strategy == TransitionStrategy.SHORT_BASS_SWAP
-        val maxFadeMs = (requestedCrossfadeMs - recoveryMs).coerceAtLeast(0L)
+        // The fade plus recovery must end by the outgoing content end, or syncWindow's
+        // handoff clamp has an empty range on short tracks.
+        val maxFadeMs = (minOf(requestedCrossfadeMs, contentEndMs) - recoveryMs).coerceAtLeast(0L)
         // Longest bar-multiple fade that fits the requested window.
         val beatOptions = when (strategy) {
             TransitionStrategy.PHRASE_MATCHED_BASS_SWAP -> listOf(32, 16, 8, 4, 2)

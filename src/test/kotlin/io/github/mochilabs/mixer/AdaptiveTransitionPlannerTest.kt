@@ -138,6 +138,24 @@ class AdaptiveTransitionPlannerTest {
     }
 
     @Test
+    fun `short outgoing content with confident grids plans inside the content instead of throwing`() {
+        // contentEndMs shorter than the requested fade used to give syncWindow an empty coerceIn range.
+        for (inBpm in listOf(128f, 124f, 120f)) {
+            val outGrid = ExtendedBeatGrid(bpm = 128f, phaseSample = 0L, bpmConfidence = 0.9f, downbeatConfidence = 0.8f, phraseConfidence = 0.7f)
+            val inGrid = ExtendedBeatGrid(bpm = inBpm, phaseSample = 0L, bpmConfidence = 0.9f, downbeatConfidence = 0.8f, phraseConfidence = 0.7f)
+            for (contentEndMs in 250L..8000L step 250L) {
+                val recipe = planWith(8000L, contentEndMs = contentEndMs, out = outGrid, inc = inGrid)
+                if (recipe.sync.enabled && recipe.strategy != TransitionStrategy.BEATMATCHED_BLEND) {
+                    assertTrue(
+                        recipe.sync.handoffSample <= contentEndMs * 48,
+                        "inBpm=$inBpm contentEndMs=$contentEndMs handoff=${recipe.sync.handoffSample} ${recipe.strategy}",
+                    )
+                }
+            }
+        }
+    }
+
+    @Test
     fun `uses a plain crossfade when no beat count fits the configured window`() {
         val g = ExtendedBeatGrid(bpm = 70f, phaseSample = 0L, bpmConfidence = 0.9f, downbeatConfidence = 0.8f)
         val recipe = planWith(1500L, out = g, inc = g)

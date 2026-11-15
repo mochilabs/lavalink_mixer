@@ -186,6 +186,38 @@ class MixerLifecycleTest {
         }
     }
 
+    @Test
+    fun `plugin destroy refuses getOrCreate and cleans up racing mixer creation`() {
+        val manager = manager()
+        val plugin = MixerPlugin(manager, MixerConfig())
+        try {
+            val existing = plugin.getOrCreate(10L)
+            var racingMixer: GuildMixer? = null
+            plugin.afterCreateForTest = {
+                racingMixer = plugin.find(11L)
+                plugin.destroy()
+            }
+
+            assertFailsWith<MixerDestroyedException> {
+                plugin.getOrCreate(11L)
+            }
+            assertTrue(existing.isDestroyedForTest(), "existing mixer must be destroyed by plugin.destroy()")
+            assertNotNull(racingMixer, "computeIfAbsent should have created the racing mixer before the hook")
+            assertTrue(racingMixer!!.isDestroyedForTest(), "racing mixer created during shutdown must be destroyed")
+            assertNull(plugin.find(10L))
+            assertNull(plugin.find(11L))
+
+            plugin.afterCreateForTest = null
+            assertFailsWith<MixerDestroyedException> {
+                plugin.getOrCreate(12L)
+            }
+            assertNull(plugin.find(12L))
+        } finally {
+            plugin.destroy()
+            manager.shutdown()
+        }
+    }
+
     private fun proxySocket(): ISocketContext = Proxy.newProxyInstance(
         javaClass.classLoader,
         arrayOf(ISocketContext::class.java),
@@ -201,6 +233,7 @@ class MixerLifecycleTest {
             else -> null
         }
     } as IPlayer
+
 
     private fun loadTrack(manager: DefaultAudioPlayerManager, file: File): AudioTrack {
         val future = CompletableFuture<AudioTrack>()

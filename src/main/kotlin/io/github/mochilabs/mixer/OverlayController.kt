@@ -56,6 +56,45 @@ internal class OverlayController(
 
     private var announceToken: Long = 0L
 
+    /**
+     * Pairs `announceStart` and `announceEnd` for one overlay. Events are sent
+     * outside [OverlayHost.lock], so an overlay that ends while its start is
+     * being sent defers its end to the starting thread, keeping the order.
+     * An overlay that never sent its start sends no end either.
+     */
+    private class AnnounceEvents {
+        var sending = false
+        var started = false
+        var endDeferred = false
+    }
+
+    private var sequentialEvents: AnnounceEvents? = null
+    private val parallelEvents = HashMap<Long, AnnounceEvents>()
+
+    /** Called when the overlay finishes; true if this thread must send `announceEnd` now. */
+    private fun endEventLocked(events: AnnounceEvents?): Boolean = when {
+        events == null -> false
+        events.sending -> {
+            events.endDeferred = true
+            false
+        }
+        else -> events.started
+    }
+
+    /** Called after `announceStart` was sent; true if an end arrived meanwhile and must be sent now. */
+    private fun startSentLocked(events: AnnounceEvents): Boolean {
+        events.sending = false
+        events.started = true
+        val deferred = events.endDeferred
+        events.endDeferred = false
+        return deferred
+    }
+
+    /** Test seam: runs after the overlay's playTrack, before the start is confirmed. */
+    @Volatile internal var afterOverlayPlayForTest: ((AudioPlayer) -> Unit)? = null
+    /** Test seam: runs after the start is confirmed, before `announceStart` is sent. */
+    @Volatile internal var beforeAnnounceStartForTest: ((AudioPlayer) -> Unit)? = null
+
     val hasParallelLocked: Boolean get() = parallelOverlays.isNotEmpty()
     val queueHasWorkLocked: Boolean get() = announcementQueue.hasWork
 
@@ -66,6 +105,8 @@ internal class OverlayController(
     /** Releases the deck flag and every parallel slot; the caller destroys the returned players. */
     fun destroyLocked(): List<OverlaySlot> {
         overlayActive = false
+        sequentialEvents = null
+        parallelEvents.clear()
         val p = parallelOverlays.values.toList()
         parallelOverlays.clear()
         publishParallelOverlaysLocked()
@@ -208,6 +249,7 @@ internal class OverlayController(
             announceToken++
             deck.track = track
             overlayActive = true
+            sequentialEvents = AnnounceEvents()
             sequentialOverlayId = announcementId
             sequentialChannel = channel
             deck.startMs = System.currentTimeMillis()
@@ -227,8 +269,12 @@ internal class OverlayController(
             finishOverlay()
             throw e
         }
-        val stillCurrent = synchronized(host.lock) { deck.gen == gen && overlayActive && deck.track === track }
-        if (!stillCurrent) {
+        afterOverlayPlayForTest?.invoke(sub)
+        val events = synchronized(host.lock) {
+            val ev = sequentialEvents
+            if (deck.gen == gen && overlayActive && deck.track === track && ev != null) ev.also { it.sending = true } else null
+        }
+        if (events == null) {
             try {
                 sub.stopTrack()
             } catch (e: Exception) {
@@ -240,11 +286,13 @@ internal class OverlayController(
             }
             throw OverlayStartAbortedException("overlay ended or was cancelled during start on guild ${host.guildId}")
         }
+        beforeAnnounceStartForTest?.invoke(sub)
         log.info("overlay '{}' started on guild {}", track.info.title, host.guildId)
         host.notifyMixerEvent("announceStart") {
             if (announcementId != null) put("announcementId", announcementId)
             putTrack(track)
         }
+        if (synchronized(host.lock) { startSentLocked(events) }) host.notifyMixerEvent("announceEnd") {}
         return track
     }
 
@@ -274,6 +322,7 @@ internal class OverlayController(
             player.addListener(parallelOverlayListener(id))
             val s = OverlaySlot(id, player, siphon, channel)
             parallelOverlays[id] = s
+            parallelEvents[id] = AnnounceEvents()
             s.track = track
             s.active = true
             s.ramp.setNow(0f)
@@ -297,11 +346,22 @@ internal class OverlayController(
             runCatching { slot.player.destroy() }
             throw MixerDestroyedException("mixer destroyed while starting a parallel overlay on guild ${host.guildId}")
         }
+        afterOverlayPlayForTest?.invoke(slot.player)
+        // If the slot already finished (its track ended or failed at once), it
+        // never started: like a sequential overlay, it sends neither event.
+        val events = synchronized(host.lock) {
+            val ev = parallelEvents[slot.id]
+            if (parallelOverlays[slot.id] === slot && ev != null) ev.also { it.sending = true } else null
+        } ?: throw OverlayStartAbortedException("parallel overlay ended during start on guild ${host.guildId}")
+        beforeAnnounceStartForTest?.invoke(slot.player)
         log.info("parallel overlay '{}' (id {}) started on guild {}", track.info.title, slot.id, host.guildId)
         host.notifyMixerEvent("announceStart") {
             put("announcementId", slot.id)
             put("mode", "parallel")
             putTrack(track)
+        }
+        if (synchronized(host.lock) { startSentLocked(events) }) {
+            host.notifyMixerEvent("announceEnd") { put("announcementId", slot.id) }
         }
     }
 
@@ -320,9 +380,11 @@ internal class OverlayController(
     }
 
     fun finishOverlay() {
-        val sub = synchronized(host.lock) {
+        val (sub, sendEnd) = synchronized(host.lock) {
             if (!overlayActive) return
             overlayActive = false
+            val sendEnd = endEventLocked(sequentialEvents)
+            sequentialEvents = null
             deck.track = null
             sequentialOverlayId = null
             sequentialChannel = AnnounceChannel.BOTH
@@ -334,10 +396,10 @@ internal class OverlayController(
                 deck.mainGain.rampTo(1f, GuildMixer.msToSamples(settings.duckFadeMs))
             }
             deck.subGain.setNow(0f)
-            deck.player
+            deck.player to sendEnd
         }
         log.info("overlay finished on guild {}", host.guildId)
-        host.notifyMixerEvent("announceEnd") {}
+        if (sendEnd) host.notifyMixerEvent("announceEnd") {}
         try {
             sub?.stopTrack()
         } catch (e: Exception) {
@@ -347,14 +409,14 @@ internal class OverlayController(
 
     /** Tears down a `mode=parallel` overlay slot and releases the duck if it was the last. */
     private fun finishParallelOverlay(id: Long) {
-        val slot = synchronized(host.lock) {
+        val (slot, sendEnd) = synchronized(host.lock) {
             val removed = parallelOverlays.remove(id) ?: return
             removed.active = false
             publishParallelOverlaysLocked()
-            removed
+            removed to endEventLocked(parallelEvents.remove(id))
         }
         log.info("parallel overlay (id {}) finished on guild {}", id, host.guildId)
-        host.notifyMixerEvent("announceEnd") { put("announcementId", id) }
+        if (sendEnd) host.notifyMixerEvent("announceEnd") { put("announcementId", id) }
         try {
             slot.player.stopTrack()
         } catch (e: Exception) {

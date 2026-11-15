@@ -38,6 +38,8 @@ class MixerPlugin(
         Thread(r, "mixer-analysis").apply { isDaemon = true }
     }
     private var tick: Long = 0
+    @Volatile private var shuttingDown = false
+    @Volatile internal var afterCreateForTest: (() -> Unit)? = null
 
     @Volatile
     internal var beforeAttachForTest: (() -> Unit)? = null
@@ -53,8 +55,17 @@ class MixerPlugin(
         scheduler.scheduleAtFixedRate(::loop, 0, 20, TimeUnit.MILLISECONDS)
     }
 
-    fun getOrCreate(guildId: Long): GuildMixer =
-        guilds.computeIfAbsent(guildId) { GuildMixer(it, playerManager, config, analysisExecutor) }
+    fun getOrCreate(guildId: Long): GuildMixer {
+        if (shuttingDown) throw MixerDestroyedException("mixer plugin is shut down")
+        val mixer = guilds.computeIfAbsent(guildId) { GuildMixer(it, playerManager, config, analysisExecutor) }
+        afterCreateForTest?.invoke()
+        if (shuttingDown) {
+            guilds.remove(guildId, mixer)
+            mixer.destroy()
+            throw MixerDestroyedException("mixer plugin is shut down")
+        }
+        return mixer
+    }
 
     fun attach(player: IPlayer): GuildMixer {
         while (true) {
@@ -250,16 +261,16 @@ class MixerPlugin(
     }
 
     override fun destroy() {
+        shuttingDown = true
         scheduler.shutdownNow()
         analysisExecutor.shutdownNow()
-        guilds.values.forEach {
+        for (key in guilds.keys.toList()) {
             try {
-                it.destroy()
+                guilds.remove(key)?.destroy()
             } catch (e: Exception) {
                 log.warn("mixer destroy failed", e)
             }
         }
-        guilds.clear()
     }
 
     companion object {

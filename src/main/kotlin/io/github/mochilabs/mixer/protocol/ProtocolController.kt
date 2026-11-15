@@ -11,6 +11,7 @@ import java.io.ByteArrayOutputStream
 import java.util.Base64
 import java.util.UUID
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
@@ -93,7 +94,15 @@ internal class ProtocolController(
     fun executeAction(action: () -> Unit) {
         try {
             actionQueue.execute(action)
-        } catch (e: java.util.concurrent.RejectedExecutionException) {
+        } catch (e: RejectedExecutionException) {
+            if (!actionQueue.isShutdown) throw e
+        }
+    }
+
+    private fun scheduleAction(delayMs: Long, action: () -> Unit) {
+        try {
+            actionQueue.schedule(action, delayMs, TimeUnit.MILLISECONDS)
+        } catch (e: RejectedExecutionException) {
             if (!actionQueue.isShutdown) throw e
         }
     }
@@ -254,7 +263,7 @@ internal class ProtocolController(
                         needNextFiredAtSeq = refireSeq
                         val now = System.currentTimeMillis()
                         val delayMs = maxOf(50L, if (now < gate.windowOpenAt) gate.windowOpenAt - now + 20L else 50L)
-                        actionQueue.schedule({
+                        scheduleAction(delayMs) {
                             val still = synchronized(core.lock) {
                                 if (playbackState == PlaybackState.PLAYING &&
                                     core.playingTrack === playing &&
@@ -271,7 +280,7 @@ internal class ProtocolController(
                             if (still) {
                                 sendNeedNext(dur - core.safePosition(playing), playing)
                             }
-                        }, delayMs, TimeUnit.MILLISECONDS)
+                        }
                     }
                 }
             }
@@ -331,14 +340,14 @@ internal class ProtocolController(
         }
         if (cancelOverlayNeeded) core.cancelOverlayOutsideLock()
 
-        actionQueue.execute {
+        executeAction {
             synchronized(core.playerMutationLock) {
                 val superseded = synchronized(core.lock) {
                     gate.lastKnownEpoch > epoch && advanceSeq.get() != overrideSeq
                 }
                 if (superseded) {
                     log.warn("override ({}, epoch={}) superseded before execution on guild {}", action, epoch, core.guildId)
-                    return@execute
+                    return@executeAction
                 }
                 var success = false
                 try {
@@ -420,7 +429,7 @@ internal class ProtocolController(
             }
             val baseDelayMs = if (duration <= tWindow) 500L else 0L
             val delayMs = maxOf(baseDelayMs, waitForWindowMs)
-            val fireTask = Runnable {
+            val fireTask: () -> Unit = {
                 val still = synchronized(core.lock) {
                     if (playbackState == PlaybackState.PLAYING &&
                         core.playingTrack === playing &&
@@ -439,9 +448,9 @@ internal class ProtocolController(
                 }
             }
             if (delayMs > 0) {
-                actionQueue.schedule(fireTask, delayMs, TimeUnit.MILLISECONDS)
+                scheduleAction(delayMs, fireTask)
             } else {
-                actionQueue.execute(fireTask)
+                executeAction(fireTask)
             }
         }
     }

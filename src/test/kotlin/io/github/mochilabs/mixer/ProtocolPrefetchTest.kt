@@ -75,4 +75,24 @@ class ProtocolPrefetchTest {
             assertTrue(f.secondEvent.await(1, TimeUnit.SECONDS), "the refire must dispatch after the first event")
         }
     }
+
+    @Test
+    fun `actionQueue submissions after shutdown do not throw RejectedExecutionException`() {
+        Fixture().use { f ->
+            f.controller.shutdown()
+
+            f.controller.checkJitWindow()
+
+            val invalidated = assertIs<InvalidateResult.Success>(f.controller.invalidate(1, "inv-after-shutdown"))
+            assertTrue(invalidated.refiredNeedNext)
+
+            assertIs<OverrideResult.Success>(f.controller.override(2, "stop-after-shutdown", "STOP", null))
+            assertIs<OverrideResult.Success>(
+                f.controller.override(3, "play-after-shutdown", "PLAY_NOW", f.track, "encoded"),
+            )
+
+            assertIs<ResetResult.Success>(f.controller.reset(4, "reset-for-delayed-jit", windowOpenGraceMs = 1500L))
+            f.controller.checkJitWindow()
+        }
+    }
 }

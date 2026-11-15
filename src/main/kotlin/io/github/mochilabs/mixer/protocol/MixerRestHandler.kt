@@ -1,9 +1,7 @@
 package io.github.mochilabs.mixer
 
-import com.sedmelluq.discord.lavaplayer.track.AudioTrack
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerialName
-import org.slf4j.LoggerFactory
 import org.springframework.http.HttpStatus
 import org.springframework.http.ResponseEntity
 import org.springframework.stereotype.Service
@@ -14,9 +12,6 @@ import org.springframework.web.bind.annotation.RequestBody
 import org.springframework.web.bind.annotation.RequestParam
 import org.springframework.web.bind.annotation.RestController
 import org.springframework.web.server.ResponseStatusException
-import java.util.concurrent.ExecutionException
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.TimeoutException
 import kotlin.math.log10
 
 @Serializable
@@ -57,26 +52,6 @@ data class OverrideRequest(
 data class ResetRequest(val guildId: String, val epoch: Long, val windowOpenGraceMs: Long = 1500L)
 @Serializable
 data class ConflictErrorResponse(val error: String, val lastKnownEpoch: Long)
-
-@Serializable
-data class V2StateResponse(
-    val guildId: String,
-    val protocolVersion: Int,
-    val state: String,
-    val lastKnownEpoch: Long,
-    val crossfadeEnabled: Boolean,
-    val crossfadeMs: Long,
-)
-
-@Serializable
-data class QueueRequest(
-    /** Snowflake as a string — JSON numbers lose precision past 2^53. */
-    val guildId: String,
-    /** Re-resolved via source managers. */
-    val identifier: String? = null,
-    /** Exact Lavalink base64 track — preferred, no re-resolution. At least one of the two is required. */
-    val encodedTrack: String? = null,
-)
 
 @Serializable
 data class CrossfadeRequest(val guildId: String, val enabled: Boolean, val durationMs: Long? = null)
@@ -184,18 +159,6 @@ data class BeatmatchRequest(
     val enabled: Boolean,
     val maxTempoChange: Float? = null,
     val minConfidence: Float? = null,
-)
-
-@Serializable
-data class TrackInfo(
-    val identifier: String,
-    val title: String,
-    val author: String,
-    val duration: Long,
-    val uri: String?,
-    val isStream: Boolean,
-    val isSeekable: Boolean,
-    val source: String,
 )
 
 @Serializable
@@ -561,50 +524,6 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
         return stateById(body.guildId, guildId)
     }
 
-    private fun await(future: java.util.concurrent.CompletableFuture<AudioTrack>, identifier: String): AudioTrack {
-        // preloadNext already attached queueing; this join only surfaces load errors.
-        return try {
-            awaitFuture(future, identifier)
-        } catch (e: ResponseStatusException) {
-            throw e
-        }
-    }
-
-    private fun awaitFuture(future: java.util.concurrent.CompletableFuture<AudioTrack>, identifier: String): AudioTrack {
-        return try {
-            future.get(LOAD_TIMEOUT_SEC, TimeUnit.SECONDS)
-        } catch (e: TimeoutException) {
-            throw ResponseStatusException(HttpStatus.ACCEPTED, "Still loading $identifier", e)
-        } catch (e: ExecutionException) {
-            val cause = e.cause
-            if (cause is NoMatchException) throw ResponseStatusException(HttpStatus.BAD_REQUEST, cause.message, cause)
-            if (cause is MixerBusyException) throw ResponseStatusException(HttpStatus.CONFLICT, cause.message, cause)
-            log.warn("track load failed", cause ?: e)
-            throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Load failed: ${cause?.message}", cause ?: e)
-        } catch (e: InterruptedException) {
-            Thread.currentThread().interrupt()
-            throw ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Interrupted", e)
-        }
-    }
-
-    private fun AudioTrack.toInfo(): TrackInfo {
-        val info = this.info
-        return TrackInfo(
-            identifier = info.identifier,
-            title = info.title,
-            author = info.author,
-            duration = info.length,
-            uri = info.uri,
-            isStream = info.isStream,
-            isSeekable = this.isSeekable,
-            source = try {
-                this.sourceManager.javaClass.simpleName
-            } catch (e: Exception) {
-                "unknown"
-            },
-        )
-    }
-
     private fun notFound(guildId: Long) =
         ResponseStatusException(HttpStatus.NOT_FOUND, "No mixer state for guild $guildId (player never seen?)")
 
@@ -618,8 +537,6 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
     }
 
     companion object {
-        private val log = LoggerFactory.getLogger(MixerRestHandler::class.java)
-        private const val LOAD_TIMEOUT_SEC = 20L
         private const val MIN_REPORTED_GAIN = 1e-6f
     }
 }

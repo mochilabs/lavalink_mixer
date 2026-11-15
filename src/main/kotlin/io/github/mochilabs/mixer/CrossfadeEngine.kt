@@ -162,8 +162,6 @@ internal class CrossfadeEngine(
     @Volatile var xfadeEndSample: Long = -1L
         private set
     @Volatile private var xfadeFadeEndSample: Long = -1L
-    @Volatile private var xfadeTransitionKind: String = "crossfade"
-    @Volatile private var xfadeDecisionReason: String? = null
 
     /** Sets the main and sub gains for the chunk ending at [endOfChunk]; voice thread, lock-free. */
     fun applyFadeGains(endOfChunk: Long, samples: Int) {
@@ -426,8 +424,12 @@ internal class CrossfadeEngine(
                 xfadeFallbackReason = if (plan.beatMatched && nativeFailed) "timescale_native_failed" else plan.fallbackReason
 
                 deck.track = next
-                xfadeTransitionKind = if (nativeFailed) "crossfade" else plan.transitionKind
-                xfadeDecisionReason = if (nativeFailed) "timescale_native_failed" else plan.reason
+                // The started kind, not the planned one, is what overlapStart, overlapEnd,
+                // and MixerAdvancedEvent report (notifyMixerEvent adds it to each).
+                host.setTransitionStatusLocked(
+                    if (nativeFailed) "crossfade" else plan.transitionKind,
+                    if (nativeFailed) "timescale_native_failed" else plan.reason,
+                )
                 xfadeHandoffMs = plan.handoffMs
                 xfadeMainTrack = host.playingTrack
                 subOutputSamples.set(0L)
@@ -514,8 +516,6 @@ internal class CrossfadeEngine(
             put("crossfadeMs", plan.durationMs)
             put("overlapMs", plan.overlapMs)
             put("recoveryMs", plan.recoveryMs)
-            put("transitionKind", xfadeTransitionKind)
-            xfadeDecisionReason?.let { put("decisionReason", it) }
             put("handoffInMs", (plan.handoffMs - mainPosMs).coerceAtLeast(0L))
             put("incomingStartMs", incomingStartPosition)
             put("beatMatched", xfadeBeatMatched)

@@ -8,8 +8,16 @@ import org.slf4j.LoggerFactory
 import java.util.concurrent.CopyOnWriteArrayList
 
 internal class TransitionLogCapture(private val guildId: Long, debug: Boolean = false) : AutoCloseable {
-    private val logger = LoggerFactory.getLogger(GuildMixer::class.java) as Logger
-    private val previousLevel = logger.level
+    // GuildMixer's transition logs are split across the classes extracted from it.
+    private val loggers = listOf(
+        GuildMixer::class.java,
+        CrossfadeEngine::class.java,
+        OverlayController::class.java,
+        SubDeck::class.java,
+        FeederElection::class.java,
+        AnalysisCoordinator::class.java,
+    ).map { LoggerFactory.getLogger(it) as Logger }
+    private val previousLevels = loggers.map { it.level }
     val messages = CopyOnWriteArrayList<Pair<Level, String>>()
     private val appender = object : AppenderBase<ILoggingEvent>() {
         override fun append(event: ILoggingEvent) {
@@ -21,17 +29,19 @@ internal class TransitionLogCapture(private val guildId: Long, debug: Boolean = 
     }
 
     init {
-        logger.level = if (debug) Level.DEBUG else Level.INFO
-        appender.context = logger.loggerContext
+        appender.context = loggers.first().loggerContext
         appender.start()
-        logger.addAppender(appender)
+        for (logger in loggers) {
+            logger.level = if (debug) Level.DEBUG else Level.INFO
+            logger.addAppender(appender)
+        }
     }
 
     fun infoLines(): List<String> = messages.filter { it.first == Level.INFO && it.second.startsWith("crossfade") }.map { it.second }
 
     override fun close() {
-        logger.detachAppender(appender)
+        for (logger in loggers) logger.detachAppender(appender)
         appender.stop()
-        logger.level = previousLevel
+        loggers.forEachIndexed { i, logger -> logger.level = previousLevels[i] }
     }
 }

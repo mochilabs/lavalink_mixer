@@ -122,8 +122,7 @@ class OverlapPreparationTest {
         val mixer = GuildMixer(776L, manager, MixerConfig(), java.util.concurrent.Executor { })
         try {
             mixer.beginXfadeForTest(48000)
-            GuildMixer::class.java.getDeclaredField("xfadeStartSample").apply { isAccessible = true }.setLong(mixer, 500L)
-            GuildMixer::class.java.getDeclaredField("xfadeEndSample").apply { isAccessible = true }.setLong(mixer, 48000L)
+            mixer.setXfadeWindowForTest(500L, 48000L)
             mixer.siphon.push(Array(2) { FloatArray(960) { 0.2f } }, 0, 960)
             mixer.advance(960, 1L)
             val out = Array(2) { FloatArray(960) }

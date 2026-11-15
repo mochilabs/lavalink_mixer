@@ -52,7 +52,7 @@ class OverlapPreparationTest {
             when (method.name) { "getAudioPlayer" -> main; "getGuildId" -> 773L; else -> null }
         } as IPlayer
         mixer.attachMain(host)
-        GuildMixer::class.java.getDeclaredField("subPlayer").apply { isAccessible = true }.set(mixer, sub)
+        mixer.installSubPlayerForTest(sub)
         try {
             mixer.queueNext(CompletableFuture.completedFuture(incoming))
             mixer.syncChainPos(7000)
@@ -105,7 +105,7 @@ class OverlapPreparationTest {
                 else -> null
             }
         } as AudioPlayer
-        GuildMixer::class.java.getDeclaredField("subPlayer").apply { isAccessible = true }.set(mixer, sub)
+        mixer.installSubPlayerForTest(sub)
         try {
             mixer.siphon.push(Array(2) { FloatArray(48000) }, 0, 48000)
             repeat(20) { mixer.drain() }

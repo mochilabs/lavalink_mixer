@@ -21,6 +21,11 @@ internal class EpochGate(
         override fun removeEldestEntry(e: MutableMap.MutableEntry<String, String>) = size > 64
     }
 
+    fun peek(idemKey: String, fingerprint: String): GateResult? {
+        val prev = recentRequestIds[idemKey] ?: return null
+        return if (prev == fingerprint) GateResult.Duplicate else GateResult.PayloadMismatch
+    }
+
     fun checkAndRecord(epoch: Long, idemKey: String, fingerprint: String): GateResult {
         val prev = recentRequestIds[idemKey]
         if (prev != null) {

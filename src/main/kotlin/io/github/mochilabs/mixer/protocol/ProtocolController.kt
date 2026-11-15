@@ -171,19 +171,25 @@ internal class ProtocolController(
                 return ArmResult.BadRequest("startPositionMs must precede the track end by at least 500ms")
             }
         }
-        val outgoing = if (outgoingEndPositionMs != null) core.playingTrack else null
-        if (outgoingEndPositionMs != null) {
-            if (outgoing == null || !outgoing.isSeekable ||
-                outgoingEndPositionMs <= 500L || outgoingEndPositionMs >= outgoing.duration - 500L) {
-                return ArmResult.BadRequest("outgoingEndPositionMs must be inside the current seekable track")
-            }
-        }
         val canonicalEncoded = if (isEmpty) null else (rawEncodedTrack ?: track?.let { encodeTrackBase64(it) })
         val fp = "arm|${canonicalEncoded ?: "empty"}|preserve=$preserveTransition|start=$startMs|end=${outgoingEndPositionMs ?: 0L}"
 
+        val outgoing: AudioTrack?
         val abortNeeded: Boolean
         val myControlSeq: Long
         synchronized(core.lock) {
+            when (gate.peek(idemKey, fp)) {
+                is GateResult.Duplicate -> return ArmResult.Duplicate
+                is GateResult.PayloadMismatch -> return ArmResult.PayloadMismatch
+                else -> {}
+            }
+            outgoing = if (outgoingEndPositionMs != null) core.playingTrack else null
+            if (outgoingEndPositionMs != null) {
+                if (outgoing == null || !outgoing.isSeekable ||
+                    outgoingEndPositionMs <= 500L || outgoingEndPositionMs >= outgoing.duration - 500L) {
+                    return ArmResult.BadRequest("outgoingEndPositionMs must be inside the current seekable track")
+                }
+            }
             when (val g = gate.checkAndRecord(epoch, idemKey, fp)) {
                 is GateResult.Duplicate -> return ArmResult.Duplicate
                 is GateResult.Stale -> return ArmResult.Stale(g.lastKnown)

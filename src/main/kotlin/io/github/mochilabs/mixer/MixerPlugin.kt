@@ -6,6 +6,7 @@ import com.sedmelluq.discord.lavaplayer.tools.FriendlyException
 import com.sedmelluq.discord.lavaplayer.tools.io.MessageInput
 import com.sedmelluq.discord.lavaplayer.track.AudioPlaylist
 import com.sedmelluq.discord.lavaplayer.track.AudioTrack
+import dev.arbjerg.lavalink.api.IPlayer
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.DisposableBean
 import org.springframework.stereotype.Service
@@ -38,6 +39,9 @@ class MixerPlugin(
     }
     private var tick: Long = 0
 
+    @Volatile
+    internal var beforeAttachForTest: (() -> Unit)? = null
+
     init {
         log.info(
             "mixer-plugin loaded: version={} protocolVersion={}",
@@ -52,10 +56,26 @@ class MixerPlugin(
     fun getOrCreate(guildId: Long): GuildMixer =
         guilds.computeIfAbsent(guildId) { GuildMixer(it, playerManager, config, analysisExecutor) }
 
+    fun attach(player: IPlayer): GuildMixer {
+        while (true) {
+            val mixer = getOrCreate(player.guildId)
+            beforeAttachForTest?.invoke()
+            if (mixer.attachMain(player)) return mixer
+            guilds.remove(player.guildId, mixer)
+        }
+    }
+
     fun find(guildId: Long): GuildMixer? = guilds[guildId]
 
     fun remove(guildId: Long) {
         guilds.remove(guildId)?.destroy()
+    }
+
+    fun removeIfMain(guildId: Long, player: IPlayer): Boolean {
+        val mixer = guilds[guildId] ?: return false
+        if (!mixer.destroyIfMain(player)) return false
+        guilds.remove(guildId, mixer)
+        return true
     }
 
     /**

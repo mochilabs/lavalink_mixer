@@ -59,10 +59,11 @@ flowchart LR
 - `main.playTrack` / `main.stopTrack` 호출(핸드오프, `advanceNext`, `override`)은 반드시 `lock`을 해제한 뒤 `playerMutationLock` 안에서 실행합니다.
 - Lavaplayer 이벤트 콜백(`onTrackStart`, `onTrackEnd`)은 Lavaplayer 내부 `trackSwitchLock`을 잡고 호출되므로, 상태 변경·후속 재생·복구 액션은 `actionQueue` 또는 별도 스레드로 오프로드해 교착 상태를 방지합니다.
 
-### 재연결 및 중복 필터 중재
+### 재연결, 수명주기 및 중복 필터 중재
 
 - WebSocket 세션 재개(resume) 중 동일 길드에 플레이어 2개가 잠시 공존할 수 있습니다.
-- `MixerEvents.onDestroyPlayer`는 `!mixer.isMain(player)`인 구형/보조 플레이어 소멸 시 믹서를 파기하지 않습니다.
+- `MixerEvents.onNewPlayer()`는 `MixerPlugin.attach(player)`를 통해 플레이어를 연결하고, `MixerEvents.onDestroyPlayer()`는 `MixerPlugin.removeIfMain(guildId, player)`를 통해 `GuildMixer.lock` 아래에서 원자적으로 메인 플레이어 일치 여부를 확인한 뒤 파기·제거합니다. `attachMain` 실행 시점에 이미 파기된(`destroyed`) 믹서가 감지되면 `attach`는 해당 엔트리를 제거하고 새 믹서를 생성합니다.
+- `GuildMixer.destroy()`는 `lock` 아래에서 `destroyed` 플래그를 설정합니다. 파기된 이후에는 2차/병렬 오버레이 생성, 오버랩 시작, `TrackAnalysisService`가 새 플레이어 생성을 거부하며, 진행 중이던 분석 스캔도 결과를 캐시하지 않고 즉시 중단됩니다. `MixerPlugin.destroy()`는 종료 플래그를 설정해 동시 `getOrCreate` 호출을 거부합니다.
 - `MixerFilterExtension.build`는 믹서 인스턴스를 정적으로 캡처하지 않고 청크마다 `plugin.find(guildId)`로 조회하며, `MixerFilter.feederId` 기반 피더 중재로 단 하나의 체인만 믹서 상태를 전진시킵니다.
 
 ---
@@ -90,7 +91,7 @@ flowchart LR
 | 항목 | 구현 상세 |
 | --- | --- |
 | 상태 머신 (`PlaybackState`) | `IDLE`, `PLAYING`, `ARMED`, `NO_NEXT` |
-| 멱등성 & 에포크 게이트 (`EpochGate`) | 최근 64개 `Idempotency-Key` 지문을 `LinkedHashMap`에 유지 (`Duplicate` vs `PayloadMismatch` → HTTP 422); 구 에포크 거부(`Stale` → HTTP 409 `STALE_EPOCH`); `reset` 직후 `windowOpenGraceMs` 동안 `PreResetArrival` 반환 |
+| 멱등성 & 에포크 게이트 (`EpochGate`) | 최근 64개 `Idempotency-Key` 지문을 `LinkedHashMap`에 유지 (`Duplicate` vs `PayloadMismatch` → HTTP 422); 구 에포크 거부(`Stale` → HTTP 409 `STALE_EPOCH`); `reset` 직후 `windowOpenGraceMs` 동안 `PreResetArrival` 반환. `arm`은 현재 재생 트랙을 기준으로 `outgoingEndPositionMs`를 검증하기 전에 `EpochGate.peek`으로 기등록 키를 먼저 확인하며, 활성 크로스페이드 중단을 위해 `lock`을 잠시 해제했다가 재진입할 때 제어 명령 시퀀스 번호를 재확인해 그사이 다른 제어 명령이 실행되었으면(멱등성 키는 기록된 채로 유지하고) HTTP 409 `SUPERSEDED`를 반환 |
 | REST 엔드포인트 (`MixerRestHandler`) | `/mixer/info`, `/mixer/state`, `/mixer/analyze`, `/mixer/reset`, `/mixer/queue/{arm,invalidate,override}`, `/mixer/{crossfade,fade-in,normalization,silence,bpm,key,beatmatch}`, `/mixer/announce`, `/mixer/announce/{queue,cancel}` |
 | WebSocket 이벤트 (`{op: "mixer"}`) | `MixerNeedNextTrackEvent`, `MixerAdvancedEvent`, `MixerOverriddenEvent`, `overlapStart`, `overlapEnd`, `announceStart`, `announceEnd` |
 

@@ -46,6 +46,9 @@ package, `io.github.mochilabs.mixer`. Preserve that convention when adding files
   and mixer-error paths. Lavaplayer dispatches lifecycle callbacks itself.
 - Resolve the guild mixer lazily in the filter. A reconnect can replace the
   mixer after the filter chain was built.
+- Check the mixer and analysis `destroyed` flags before creating secondary,
+  parallel-overlay, or analysis players, and keep `attach`/`removeIfMain`
+  atomic under `lock`.
 - Preserve feeder election. Only the elected filter may advance gains,
   consume shared secondary PCM, or update the realtime silence detector.
 - Keep siphon capacity in samples. Decoder chunk sizes differ by source.

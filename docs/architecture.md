@@ -48,21 +48,30 @@ normal player API. Later server-driven advancement consumes the armed slot.
 `MixerAdvancedEvent` tells the bot to update its local queue.
 
 The main player belongs to Lavalink. `MixerEvents.onNewPlayer()` attaches it to
-the guild mixer. The secondary and analysis players are created as needed and
-do not own Discord voice connections. Each parallel announcement has its own
-player. A crossfade handoff clones the incoming track into the existing main
-player. It does not replace the Lavalink player with the secondary player.
+the guild mixer via `MixerPlugin.attach(player)`, and `MixerEvents.onDestroyPlayer()`
+removes it via `MixerPlugin.removeIfMain(guildId, player)` atomically under
+`GuildMixer.lock`. If a mixer is already destroyed when `attachMain` runs,
+`attach` removes the stale registry entry and creates a fresh mixer. The secondary
+and analysis players are created as needed and do not own Discord voice
+connections. Each parallel announcement has its own player. A crossfade handoff
+clones the incoming track into the existing main player. It does not replace the
+Lavalink player with the secondary player.
 
 The registry is process-wide, while player state and protocol state are per
 guild. Analysis caches are shared across guilds. Destroying an obsolete player
 from an old session does not remove a mixer attached to a newer player.
+`GuildMixer.destroy()` sets a `destroyed` flag under `lock`; secondary and
+parallel overlay creation, overlap start, and `TrackAnalysisService` refuse to
+create new players once destroyed, and an in-flight analysis scan aborts without
+caching results. `MixerPlugin.destroy()` sets a shutdown flag that rejects
+concurrent `getOrCreate` calls.
 
 ## Ownership and execution
 
 | Component | Responsibility |
 | --- | --- |
-| `MixerPlugin` | Stores mixers by guild ID and resolves encoded tracks or source identifiers. |
-| `MixerEvents` | Attaches new Lavalink players and removes a mixer when its attached main player is destroyed. |
+| `MixerPlugin` | Stores mixers by guild ID, guards shutdown against concurrent `getOrCreate` calls, and resolves encoded tracks or source identifiers. |
+| `MixerEvents` | Attaches new Lavalink players via `MixerPlugin.attach` and atomically removes a mixer via `MixerPlugin.removeIfMain` when its attached main player is destroyed. |
 | `GuildMixer` | Owns main-player binding, next-track slots, normalization gains, the poll decision, and the gapless advance. It owns both locks and composes the components below. |
 | `MixerSettings` | Holds a guild's runtime-adjustable settings as volatile fields shared by every component. |
 | `SubDeck` | Owns the single secondary player, its siphon and tempo factory, and the main/sub gain ramps. |
@@ -387,9 +396,17 @@ cutoff is ignored. `/mixer/info` advertises this capability separately.
 
 `EpochGate` retains up to 64 recent request fingerprints per guild. It checks
 existing keys before checking the reset window and epoch. A matching fingerprint
-is a duplicate; a different fingerprint is a payload mismatch. A new request
-with an epoch below `lastKnownEpoch` is stale. Equal epochs are accepted.
-Fingerprints are operation-specific strings, not hashes of the full JSON body.
+is a duplicate; a different fingerprint is a payload mismatch. `arm` checks
+`EpochGate.peek` for already-recorded keys before validating `outgoingEndPositionMs`
+against the live playing track, so retrying an already-accepted arm returns
+`Duplicate` (or `PayloadMismatch`) even after the outgoing track has ended or
+changed. When an `arm` must release `GuildMixer.lock` to abort an active
+crossfade, it captures a control-command sequence number under `lock` and
+rechecks it on re-entry; if another control command (`arm`, `invalidate`,
+`override`, or `reset`) ran in the meantime, `arm` returns HTTP 409 `SUPERSEDED`
+while leaving its idempotency key recorded. A new request with an epoch below
+`lastKnownEpoch` is stale. Equal epochs are accepted. Fingerprints are
+operation-specific strings, not hashes of the full JSON body.
 
 Reset keeps the maximum of the previous and supplied epochs, clears prior
 request keys, records its own key, and opens an optional grace window.

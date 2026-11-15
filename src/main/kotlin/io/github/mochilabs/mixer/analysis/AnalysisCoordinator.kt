@@ -69,28 +69,36 @@ internal class AnalysisCoordinator(
             state.active = true
             service.beginScan()
         }
-        analysisExecutor.execute {
-            val clone = try {
-                track.makeClone()
-            } catch (e: Exception) {
-                synchronized(host.lock) { state.active = false }
-                drainDeferredWarmup()
-                return@execute
+        try {
+            analysisExecutor.execute { runBaselineAnalysis(track) }
+        } catch (e: java.util.concurrent.RejectedExecutionException) {
+            // Left set, state.active would block every later scan on this guild.
+            synchronized(host.lock) { state.active = false }
+            log.warn("analysis executor rejected baseline scan on guild {}", host.guildId, e)
+        }
+    }
+
+    private fun runBaselineAnalysis(track: AudioTrack) {
+        val clone = try {
+            track.makeClone()
+        } catch (e: Exception) {
+            synchronized(host.lock) { state.active = false }
+            drainDeferredWarmup()
+            return
+        }
+        try {
+            val trackId = idOf(track) ?: track.identifier
+            val loudness = service.measureBaseline(clone) { noteProvisionalLoudness(trackId, it) }
+            if (loudness != null) {
+                AnalysisCaches.norm[trackId] = loudness
+                host.applyAnalyzedNormGain(trackId)
+                log.info("normalization baseline guild {}: lufs={}", host.guildId, loudness)
             }
-            try {
-                val trackId = idOf(track) ?: track.identifier
-                val loudness = service.measureBaseline(clone) { noteProvisionalLoudness(trackId, it) }
-                if (loudness != null) {
-                    AnalysisCaches.norm[trackId] = loudness
-                    host.applyAnalyzedNormGain(trackId)
-                    log.info("normalization baseline guild {}: lufs={}", host.guildId, loudness)
-                }
-            } catch (e: Exception) {
-                log.warn("baseline loudness scan failed on guild {}", host.guildId, e)
-            } finally {
-                synchronized(host.lock) { state.active = false }
-                drainDeferredWarmup()
-            }
+        } catch (e: Exception) {
+            log.warn("baseline loudness scan failed on guild {}", host.guildId, e)
+        } finally {
+            synchronized(host.lock) { state.active = false }
+            drainDeferredWarmup()
         }
     }
 

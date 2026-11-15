@@ -278,6 +278,52 @@ class GuildMixerProtocolTest {
         }
     }
 
+    @Test
+    fun `retrying recorded arm with outgoingEndPositionMs after playingTrack ends returns Duplicate or PayloadMismatch`() {
+        val current = loadTrack(testFile)
+        val next = loadTrack(testFile)
+        var playing: AudioTrack? = current
+        val core = object : MixerCore {
+            override val guildId = 78L
+            override val lock = Any()
+            override val playerMutationLock = Any()
+            override val playerManager = manager
+            override val mainPlayer = null
+            override val playingTrack: AudioTrack? get() = playing
+            override val crossfadeMs = 3_000L
+            override val prefetchLeadMs = 7_000L
+            override val isXfadeActive = false
+            override val isOverlayActive = false
+            override fun safePosition(track: AudioTrack) = 1_000L
+            override fun clearNextLocked() = Unit
+            override fun preloadArmedTrackLocked(track: AudioTrack) = Unit
+            override fun scheduleArmedAnalysis(track: AudioTrack) = Unit
+            override fun clearMaskingLocked() = Unit
+            override fun restoreUnityGainAfterStopLocked() = Unit
+            override fun syncPlayingStateOnResetLocked(playing: AudioTrack?) = Unit
+            override fun abortXfadeOutsideLock(reason: String) = Unit
+            override fun cancelOverlayOutsideLock() = false
+            override fun notifyEvent(type: String, body: kotlinx.serialization.json.JsonObjectBuilder.() -> Unit) = Unit
+        }
+        val controller = ProtocolController(core)
+        try {
+            controller.playbackState = PlaybackState.PLAYING
+            val first = controller.arm(10L, "arm-with-outro", next, false, outgoingEndPositionMs = 3_000L)
+            assertIs<ArmResult.Success>(first)
+
+            // Outgoing track ends/clears before client retries the same arm request
+            playing = null
+
+            val duplicateRetry = controller.arm(10L, "arm-with-outro", next, false, outgoingEndPositionMs = 3_000L)
+            assertIs<ArmResult.Duplicate>(duplicateRetry)
+
+            val mismatchRetry = controller.arm(10L, "arm-with-outro", next, false, outgoingEndPositionMs = 3_500L)
+            assertIs<ArmResult.PayloadMismatch>(mismatchRetry)
+        } finally {
+            controller.shutdown()
+        }
+    }
+
     private fun loadTrack(file: File): AudioTrack {
         val future = CompletableFuture<AudioTrack>()
         manager.loadItemOrdered(file.absolutePath, file.absolutePath, object : com.sedmelluq.discord.lavaplayer.player.AudioLoadResultHandler {

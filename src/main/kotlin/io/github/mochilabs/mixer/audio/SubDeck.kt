@@ -33,6 +33,11 @@ internal class SubDeck(
     val mainGain = GainRamp(1f)
     val subGain = GainRamp(0f)
 
+    fun resetGainsLocked() {
+        mainGain.setNow(1f)
+        subGain.setNow(0f)
+    }
+
     val siphon = SiphonQueue.forFrameBuffer(frameBufferDurationMs())
     val drainFrame = MutableAudioFrame().apply {
         setBuffer(ByteBuffer.allocate(provideBufferSize()))

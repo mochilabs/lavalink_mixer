@@ -19,8 +19,8 @@ class AdaptiveAutomixEndToEndTest {
         val gridA = ExtendedBeatGrid(120f, 0L, 0.95f, 0L, 0.85f, 0.75f)
         val gridB = ExtendedBeatGrid(120f, 0L, 0.95f, 0L, 0.85f, 0.75f)
 
-        val featuresA = TransitionFeatures(0, 10000, emptyList(), 0.2f, 0.9f, KeyEstimate.Unknown("percussive"), emptyList())
-        val featuresB = TransitionFeatures(0, 10000, emptyList(), 0.2f, 0.9f, KeyEstimate.Unknown("percussive"), emptyList())
+        val featuresA = TransitionFeatures(0, 10000, 0.2f, 0.9f, KeyEstimate.Unknown("percussive"), emptyList())
+        val featuresB = TransitionFeatures(0, 10000, 0.2f, 0.9f, KeyEstimate.Unknown("percussive"), emptyList())
 
         // 1. Planner generates recipe
         val recipe = AdaptiveTransitionPlanner.plan(

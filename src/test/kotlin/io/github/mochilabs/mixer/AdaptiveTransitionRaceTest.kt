@@ -96,7 +96,7 @@ class AdaptiveTransitionRaceTest {
     private fun cacheTrimFeatures(outgoing: PositionedTrack, incoming: PositionedTrack) {
         AnalysisCaches.trim[outgoing.id] = TrimPoints.NONE
         AnalysisCaches.trim[incoming.id] = TrimPoints(400, 0)
-        val features = TransitionFeatures(0, 10000, emptyList(), 0.2f, 0.9f, KeyEstimate.Unknown("fixture"), emptyList())
+        val features = TransitionFeatures(0, 10000, 0.2f, 0.9f, KeyEstimate.Unknown("fixture"), emptyList())
         AnalysisCaches.featuresTail[outgoing.id] = features.copy(trailingSilenceMs = 800)
         AnalysisCaches.featuresHead[incoming.id] = features.copy(leadingSilenceMs = 800)
     }
@@ -108,7 +108,7 @@ class AdaptiveTransitionRaceTest {
             AnalysisCaches.bpm[track.id] = BpmDetector.BpmResult(120f, 0L, 1f)
             AnalysisCaches.bpmHead[track.id] = grid
             AnalysisCaches.bpmTail[track.id] = grid
-            val features = TransitionFeatures(0, 10000, emptyList(), 0.2f, 0.9f,
+            val features = TransitionFeatures(0, 10000, 0.2f, 0.9f,
                 KeyEstimate.Candidate(0, KeyMode.MAJOR, 0.6f), emptyList())
             AnalysisCaches.featuresHead[track.id] = features
             AnalysisCaches.featuresTail[track.id] = features

@@ -8,7 +8,6 @@ class AutomixBoundaryMatrixTest {
     private fun features(rms: Float = 0.2f, stability: Float = 0.9f) = TransitionFeatures(
         windowStartMs = 0L,
         windowEndMs = 10000L,
-        energyEnvelope = emptyList(),
         rms = rms,
         rhythmicStability = stability,
         key = KeyEstimate.Unknown("percussive"),

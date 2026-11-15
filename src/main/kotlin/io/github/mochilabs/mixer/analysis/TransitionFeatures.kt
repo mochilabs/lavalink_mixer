@@ -7,10 +7,14 @@ import kotlin.math.sqrt
 data class EnergyPoint(val positionMs: Long, val rms: Float)
 data class TransitionCandidate(val positionMs: Long, val energy: Float)
 
+/**
+ * Cached per track. The 20 ms energy envelope the analyzer builds is used only
+ * inside [TransitionFeatureAnalyzer.analyze] and is not kept: two feature caches
+ * of 1,000 entries each would otherwise hold millions of [EnergyPoint]s.
+ */
 data class TransitionFeatures(
     val windowStartMs: Long,
     val windowEndMs: Long,
-    val energyEnvelope: List<EnergyPoint>,
     val rms: Float,
     val rhythmicStability: Float?,
     val key: KeyEstimate,
@@ -31,7 +35,7 @@ object TransitionFeatureAnalyzer {
 
     fun analyze(frames: List<Array<FloatArray>>, windowStartMs: Long = 0L, grid: ExtendedBeatGrid? = null): TransitionFeatures {
         val count = frames.sumOf { it.firstOrNull()?.size?.toLong() ?: 0L }.coerceAtMost(MAX_SAMPLES.toLong()).toInt()
-        if (count == 0) return TransitionFeatures(windowStartMs, windowStartMs, emptyList(), 0f, null,
+        if (count == 0) return TransitionFeatures(windowStartMs, windowStartMs, 0f, null,
             KeyEstimate.Unknown("empty_audio"), emptyList(), unknownReason = "empty_audio")
         val mono = FloatArray((count + 3) / 4)
         val envelope = mutableListOf<EnergyPoint>()
@@ -86,7 +90,7 @@ object TransitionFeatureAnalyzer {
         }
         val (phraseConf, phraseBoundary) = detectPhrase(envelope, grid)
         return TransitionFeatures(
-            windowStartMs, end, envelope, rms, stability(envelope, grid),
+            windowStartMs, end, rms, stability(envelope, grid),
             if (rms <= SILENCE) KeyEstimate.Unknown("silence") else KeyDetector.estimate(mono),
             candidates.sortedBy { it.positionMs },
             if (leading >= 100) leading.coerceAtMost(end - windowStartMs) else 0L,

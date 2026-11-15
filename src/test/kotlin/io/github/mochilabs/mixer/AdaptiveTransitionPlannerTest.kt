@@ -5,7 +5,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class AdaptiveTransitionPlannerTest {
-    private fun features() = TransitionFeatures(0, 10000, emptyList(), 0.2f, 0.9f, KeyEstimate.Unknown("percussive"), emptyList())
+    private fun features() = TransitionFeatures(0, 10000, 0.2f, 0.9f, KeyEstimate.Unknown("percussive"), emptyList())
 
     private fun plan(out: ExtendedBeatGrid?, inc: ExtendedBeatGrid?, outF: TransitionFeatures? = features(), inF: TransitionFeatures? = features()) =
         AdaptiveTransitionPlanner.plan(
@@ -183,8 +183,8 @@ class AdaptiveTransitionPlannerTest {
         // Mirrors a soft intro: a weak half-time grid that octave-normalizes to a 3.6% stretch.
         val outGrid = ExtendedBeatGrid(bpm = 124f, phaseSample = 0L, bpmConfidence = 0.33f, downbeatConfidence = 0.24f, phraseConfidence = 0.99f)
         val inGrid = ExtendedBeatGrid(bpm = 64.34f, phaseSample = 0L, bpmConfidence = 0.28f, downbeatConfidence = 0.05f, phraseConfidence = 0.08f)
-        val outF = TransitionFeatures(0, 30000, emptyList(), 0.35f, 0.93f, KeyEstimate.Unknown("test"), emptyList())
-        val inF = TransitionFeatures(0, 30000, emptyList(), 0.28f, 0.23f, KeyEstimate.Unknown("test"), emptyList())
+        val outF = TransitionFeatures(0, 30000, 0.35f, 0.93f, KeyEstimate.Unknown("test"), emptyList())
+        val inF = TransitionFeatures(0, 30000, 0.28f, 0.23f, KeyEstimate.Unknown("test"), emptyList())
 
         val recipe = AdaptiveTransitionPlanner.plan(
             outgoingGridTail = outGrid,
@@ -230,7 +230,7 @@ class AdaptiveTransitionPlannerTest {
     @Test
     fun `unstable rhythm does not block a unity-tempo sync`() {
         val grid = ExtendedBeatGrid(bpm = 128f, phaseSample = 0L, bpmConfidence = 0.9f, downbeatConfidence = 0.8f, phraseConfidence = 0.7f)
-        val unstable = TransitionFeatures(0, 10000, emptyList(), 0.2f, 0.2f, KeyEstimate.Unknown("test"), emptyList())
+        val unstable = TransitionFeatures(0, 10000, 0.2f, 0.2f, KeyEstimate.Unknown("test"), emptyList())
         val recipe = plan(grid, grid, features(), unstable)
         assertTrue(recipe.sync.enabled, "no stretch is needed, so the weak rhythm gate must not apply: ${recipe.reason}")
         assertEquals(1.0f, recipe.sync.rateRatio)

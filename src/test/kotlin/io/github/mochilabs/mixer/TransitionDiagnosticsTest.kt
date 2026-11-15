@@ -35,9 +35,9 @@ class TransitionDiagnosticsTest {
         AnalysisCaches.bpmHead[outgoing] = ExtendedBeatGrid(90f, 100L * 48L, 0.2f)
         AnalysisCaches.bpmTail[outgoing] = ExtendedBeatGrid(120f, 2100L * 48L, 0.9f)
         AnalysisCaches.bpmHead[incoming] = ExtendedBeatGrid(125f, 50L * 48L, 0.8f)
-        AnalysisCaches.featuresTail[outgoing] = TransitionFeatures(2000, 8000, emptyList(), 0.2f, 0.95f,
+        AnalysisCaches.featuresTail[outgoing] = TransitionFeatures(2000, 8000, 0.2f, 0.95f,
             KeyEstimate.Candidate(7, KeyMode.MINOR, 0.7f), emptyList())
-        AnalysisCaches.featuresHead[incoming] = TransitionFeatures(0, 4000, emptyList(), 0.1f, 0.85f,
+        AnalysisCaches.featuresHead[incoming] = TransitionFeatures(0, 4000, 0.1f, 0.85f,
             KeyEstimate.Candidate(0, KeyMode.MAJOR, 0.6f), emptyList())
         val log = transitionAnalysisLog(outgoing, incoming)
         assertTrue(log.contains("bpmMethod=onset_acf_wls keyMethod=chroma_profile"))

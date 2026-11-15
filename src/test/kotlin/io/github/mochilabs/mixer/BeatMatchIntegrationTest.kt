@@ -97,7 +97,7 @@ class BeatMatchIntegrationTest {
             mixer.queueNext(CompletableFuture.completedFuture(trackB))
             mixer.analyzeBlocking(trackB)
             for (track in listOf(trackA, trackB)) {
-                val features = TransitionFeatures(0, track.duration, emptyList(), 0.2f, 1f,
+                val features = TransitionFeatures(0, track.duration, 0.2f, 1f,
                     KeyEstimate.Unknown("synthetic_fixture"), emptyList())
                 AnalysisCaches.featuresHead[track.identifier] = features
                 AnalysisCaches.featuresTail[track.identifier] = features
@@ -190,7 +190,7 @@ class BeatMatchIntegrationTest {
             mixer.queueNext(CompletableFuture.completedFuture(trackB))
             mixer.analyzeBlocking(trackB)
             for (track in listOf(trackA, trackB)) {
-                val features = TransitionFeatures(0, track.duration, emptyList(), 0.2f, 1f,
+                val features = TransitionFeatures(0, track.duration, 0.2f, 1f,
                     KeyEstimate.Unknown("synthetic_fixture"), emptyList())
                 AnalysisCaches.featuresHead[track.identifier] = features
                 AnalysisCaches.featuresTail[track.identifier] = features

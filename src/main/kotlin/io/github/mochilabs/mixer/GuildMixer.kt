@@ -884,6 +884,7 @@ class GuildMixer(
         synchronized(lock) { AnalysisCaches.trim[identifier] }
 
     /** Test seam: count currently active parallel overlay slots. */
+    internal val overlaysForTest: OverlayController get() = overlays
     internal fun parallelOverlayCountForTest(): Int = overlays.parallelCountForTest()
     internal fun installParallelOverlayForTest(slot: OverlaySlot) = overlays.installParallelForTest(slot)
     internal fun overlayForTest(active: Boolean, channel: AnnounceChannel = AnnounceChannel.BOTH) =

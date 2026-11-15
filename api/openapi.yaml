@@ -93,6 +93,8 @@ info:
     - `{"op":"mixer","type":"announceEnd","guildId":"<id>"}`
       - the overlay ended (natural end, cancel, or sub failure).
         Parallel end events include announcementId; sequential ends omit it.
+        announceEnd is sent only after the same overlay's announceStart. An
+        announcement whose track ends or fails before it starts sends neither.
     WebSocket payload schemas are listed under components.schemas.MixerEvent.
     These are messages on the existing Lavalink socket, not HTTP webhook routes.
 servers:

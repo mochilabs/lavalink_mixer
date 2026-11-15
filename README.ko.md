@@ -275,7 +275,7 @@ Content-Type: application/json
 { "op": "mixer", "type": "announceEnd", "guildId": "123", "announcementId": 1 }
 ```
 
-`handoffId`는 크로스페이드 전환에 사용됩니다. 중단된 겹침은 `reason: "aborted"`를 보냅니다. `overlapStart` 이후 네이티브 템포 조절이 실패하면 `overlapEnd`는 `beatMatched: false`, `fallbackReason: "timescale_native_failed"`를 보낼 수 있습니다. 순차 공지의 `announceEnd`에는 `announcementId`가 없습니다.
+`handoffId`는 크로스페이드 전환에 사용됩니다. 중단된 겹침은 `reason: "aborted"`를 보냅니다. `overlapStart` 이후 네이티브 템포 조절이 실패하면 `overlapEnd`는 `beatMatched: false`, `fallbackReason: "timescale_native_failed"`를 보낼 수 있습니다. 순차 공지의 `announceEnd`에는 `announcementId`가 없습니다. `announceEnd`는 항상 같은 공지의 `announceStart` 뒤에 옵니다. 시작 전에 트랙이 끝나거나 실패한 공지는 두 이벤트를 모두 보내지 않습니다.
 
 ## 재생 상태 확인
 

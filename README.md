@@ -275,7 +275,7 @@ Consume these custom messages on the existing Lavalink WebSocket connection:
 { "op": "mixer", "type": "announceEnd", "guildId": "123", "announcementId": 1 }
 ```
 
-`handoffId` applies to crossfade advancement. Aborted overlaps use `reason: "aborted"`. A native tempo-stretch failure after `overlapStart` can make `overlapEnd` report `beatMatched: false` with `fallbackReason: "timescale_native_failed"`. Sequential `announceEnd` events omit `announcementId`.
+`handoffId` applies to crossfade advancement. Aborted overlaps use `reason: "aborted"`. A native tempo-stretch failure after `overlapStart` can make `overlapEnd` report `beatMatched: false` with `fallbackReason: "timescale_native_failed"`. Sequential `announceEnd` events omit `announcementId`. `announceEnd` always follows the same overlay's `announceStart`; an announcement whose track ends or fails before it starts sends neither event.
 
 ## Inspect playback
 

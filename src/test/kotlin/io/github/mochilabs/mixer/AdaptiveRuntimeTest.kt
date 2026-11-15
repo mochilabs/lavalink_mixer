@@ -109,7 +109,7 @@ class AdaptiveRuntimeTest {
             assertEquals(next.identifier, f.mixer.nextTrackIdentifier())
             // Complete through the cached path without invoking a decoder: this exercises
             // the same cache-only completion guard used by an already-warmed request.
-            val features = TransitionFeatures(0, 10000, emptyList(), 0.2f, 1f,
+            val features = TransitionFeatures(0, 10000, 0.2f, 1f,
                 KeyEstimate.Unknown("fixture"), emptyList())
             AnalysisCaches.bpm[warmup.identifier] = BpmDetector.BpmResult(120f, 0, 1f)
             AnalysisCaches.bpmHead[warmup.identifier] = ExtendedBeatGrid(120f, 0L, 1f)

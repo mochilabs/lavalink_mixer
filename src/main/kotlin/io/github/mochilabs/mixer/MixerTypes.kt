@@ -27,3 +27,6 @@ class OverlaySlot(
 }
 
 class MixerBusyException(message: String) : RuntimeException(message)
+
+/** The overlay ended, failed, or was cancelled between playTrack and its start check; retrying would replay it. */
+class OverlayStartAbortedException(message: String) : RuntimeException(message)

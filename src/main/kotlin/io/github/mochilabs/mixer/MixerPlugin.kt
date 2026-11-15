@@ -198,7 +198,8 @@ class MixerPlugin(
     /**
      * Starts the next queued announcement when the secondary player is free.
      * The track is resolved at start time so queued TTS URLs stay fresh; a
-     * busy-sub race during resolution re-queues the item at the head.
+     * busy-sub race during resolution re-queues the item at the head. Any
+     * other start failure drops the item.
      */
     private fun maybeStartAnnouncement(mixer: GuildMixer) {
         val item = mixer.takeNextAnnouncement() ?: return
@@ -217,8 +218,13 @@ class MixerPlugin(
             try {
                 mixer.startOverlay(track, item.duckLevel, item.id, item.mode, item.channel, item.gain)
                 mixer.onAnnouncementStarted(item)
-            } catch (e: Exception) {
+            } catch (e: MixerBusyException) {
+                // The secondary player was taken before playTrack; the queue's busy gate retries it once free.
                 mixer.requeueAnnouncement(item, e)
+            } catch (e: Exception) {
+                // playTrack failed, or the overlay ended or was cancelled while starting. Requeueing these
+                // replayed the same item at the queue head every 20 ms.
+                mixer.onAnnouncementFailed(item, e)
             }
         }
     }

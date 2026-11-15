@@ -233,7 +233,7 @@ internal class OverlayController(
             if (synchronized(host.lock) { overlayActive && deck.track === track }) {
                 finishOverlay()
             }
-            throw MixerBusyException("overlay cancelled during start on guild ${host.guildId}")
+            throw OverlayStartAbortedException("overlay ended or was cancelled during start on guild ${host.guildId}")
         }
         log.info("overlay '{}' started on guild {}", track.info.title, host.guildId)
         host.notifyMixerEvent("announceStart") {

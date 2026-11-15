@@ -17,6 +17,8 @@ internal interface OverlayHost {
     val lock: Any
     /** A crossfade is running or being prepared on the deck. */
     val transitionBusyLocked: Boolean
+    /** [GuildMixer.destroy] ran; no new players may be created. */
+    val destroyedLocked: Boolean
     /** Listener installed on the deck's player when it is first created. */
     val subListener: AudioEventListener
 
@@ -199,6 +201,7 @@ internal class OverlayController(
             return track
         }
         val (sub, gen) = synchronized(host.lock) {
+            if (host.destroyedLocked) throw MixerDestroyedException("mixer destroyed on guild ${host.guildId}")
             if (overlayActive || host.transitionBusyLocked) throw MixerBusyException("secondary player busy on guild ${host.guildId}")
             val s = deck.ensureLocked(host.subListener)
             deck.factory?.resetSpeed()
@@ -260,6 +263,7 @@ internal class OverlayController(
         level: Float = 1f,
     ) {
         val slot = synchronized(host.lock) {
+            if (host.destroyedLocked) throw MixerDestroyedException("mixer destroyed on guild ${host.guildId}")
             if (parallelOverlays.size >= settings.maxParallelOverlays) {
                 throw MixerBusyException("parallel overlay limit (${settings.maxParallelOverlays}) reached on guild ${host.guildId}")
             }
@@ -286,6 +290,12 @@ internal class OverlayController(
             log.warn("parallel overlay play failed on guild {}", host.guildId, e)
             finishParallelOverlay(slot.id)
             throw e
+        }
+        // destroy() between the slot's creation and playTrack already destroyed this player;
+        // playTrack would have restarted it with nobody left to stop it.
+        if (synchronized(host.lock) { host.destroyedLocked }) {
+            runCatching { slot.player.destroy() }
+            throw MixerDestroyedException("mixer destroyed while starting a parallel overlay on guild ${host.guildId}")
         }
         log.info("parallel overlay '{}' (id {}) started on guild {}", track.info.title, slot.id, host.guildId)
         host.notifyMixerEvent("announceStart") {

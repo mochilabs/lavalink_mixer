@@ -28,5 +28,8 @@ class OverlaySlot(
 
 class MixerBusyException(message: String) : RuntimeException(message)
 
+/** The guild mixer was destroyed; nothing may create players on it any more. */
+class MixerDestroyedException(message: String) : RuntimeException(message)
+
 /** The overlay ended, failed, or was cancelled between playTrack and its start check; retrying would replay it. */
 class OverlayStartAbortedException(message: String) : RuntimeException(message)

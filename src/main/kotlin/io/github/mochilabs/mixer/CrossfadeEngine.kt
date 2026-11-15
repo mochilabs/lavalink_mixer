@@ -29,6 +29,8 @@ internal interface CrossfadeHost {
     val playingTrack: AudioTrack?
     /** A sequential overlay holds the deck. */
     val overlayActive: Boolean
+    /** [GuildMixer.destroy] ran; no new players may be created. */
+    val destroyedLocked: Boolean
     /** Decode-side position of the main chain, in samples. */
     val chainPosSamples: Long
     val slotRevision: Long
@@ -363,7 +365,7 @@ internal class CrossfadeEngine(
         data class StartedOverlap(val generation: Long, val startSample: Long, val beatMatched: Boolean, val fallbackReason: String?)
         // Keep the original queued until PCM is ready, so natural track end can still advance it.
         val (queued, epochAtStart, seqAtStart, revisionAtStart, requestedStartMs) = synchronized(host.lock) {
-            if (!settings.crossfadeEnabled || protocol.preserveTransition) return
+            if (host.destroyedLocked || !settings.crossfadeEnabled || protocol.preserveTransition) return
             if (!host.matchesFenceLocked(expected)) return
             val n = host.nextQueuedLocked() ?: return
             OverlapSetup(n, protocol.gate.lastKnownEpoch, protocol.advanceSeq.get(), host.slotRevision, protocol.armedStartPositionMs)
@@ -388,6 +390,7 @@ internal class CrossfadeEngine(
         // playTrack starts decoding asynchronously. Wait for captured PCM on the
         // action worker, keeping the shared scheduler and main PCM path running.
         val sub = synchronized(host.lock) {
+            if (host.destroyedLocked) return
             val s = deck.ensureLocked(host.subListener)
             deck.siphon.clear()
             if (plan.beatMatched) {

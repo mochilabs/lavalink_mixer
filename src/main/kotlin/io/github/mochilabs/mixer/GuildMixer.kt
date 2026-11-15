@@ -1593,8 +1593,6 @@ class GuildMixer(
         /** Max time past the window opening to wait for incoming-track analysis before overlapping anyway. */
         private const val FEATURE_WAIT_MS = 2000L
 
-        /** Lavaplayer's default frame buffer; used when the manager can't say. */
-
         /**
          * How long a FINISHED/LOAD_FAILED main track counts as "the armed track,
          * just ended" for the handoff guard; see [lastEndedMain].

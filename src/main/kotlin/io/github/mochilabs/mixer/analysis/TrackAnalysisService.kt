@@ -139,8 +139,13 @@ internal class TrackAnalysisService(
     @Volatile
     private var finishedScanTrack: AudioTrack? = null
 
+    /** Set once by [destroy] under [playerLock]; a destroyed service never creates a player again. */
+    @Volatile
+    private var destroyed = false
+
     fun beginScan() {
-        analysisBroken = false
+        // A destroyed service keeps its running scan broken so it ends without results.
+        if (!destroyed) analysisBroken = false
     }
 
     /**
@@ -273,7 +278,7 @@ internal class TrackAnalysisService(
                 key = false,
             ),
             onLoudnessEstimate = onLoudnessEstimate,
-        ).loudnessRms
+        ).takeIf { !it.aborted }?.loudnessRms
 
     data class TailAnalysis(val grid: ExtendedBeatGrid?, val features: TransitionFeatures)
 
@@ -1110,8 +1115,15 @@ internal class TrackAnalysisService(
         return if (features.windowEndMs < expectedEndMs - 250) features.copy(unknownReason = "incomplete_window") else features
     }
 
+    /**
+     * Destroys the analysis player without waiting. A scan still running sees
+     * [analysisBroken], stops collecting, and returns an aborted result, which
+     * callers never cache; later scans throw [MixerDestroyedException].
+     */
     fun destroy() {
         val player = synchronized(playerLock) {
+            destroyed = true
+            analysisBroken = true
             analysisFactory = null
             analysisPlayer.also { analysisPlayer = null }
         }
@@ -1123,6 +1135,7 @@ internal class TrackAnalysisService(
     }
 
     private fun ensureAnalysisPlayer(): Pair<AudioPlayer, SiphonFactory> = synchronized(playerLock) {
+        if (destroyed) throw MixerDestroyedException("analysis service destroyed on guild $guildId")
         val currentPlayer = analysisPlayer
         val currentFactory = analysisFactory
         if (currentPlayer != null && currentFactory != null) {

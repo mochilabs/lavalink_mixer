@@ -14,6 +14,7 @@ import java.util.Base64
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
 
 class NoMatchException(identifier: String) : RuntimeException("No matches for identifier: $identifier")
@@ -164,7 +165,12 @@ class MixerPlugin(
             } catch (e: Exception) {
                 log.warn("idle carrier maintenance failed on guild {}", mixer.guildId, e)
             }
-            maybeStartAnnouncement(mixer)
+            // An escaped exception would cancel scheduleAtFixedRate for every guild.
+            try {
+                maybeStartAnnouncement(mixer)
+            } catch (e: Exception) {
+                log.warn("announcement start failed on guild {}", mixer.guildId, e)
+            }
         }
     }
 
@@ -176,12 +182,16 @@ class MixerPlugin(
             log.warn("analysis retry check failed on guild {}", mixer.guildId, e)
             return
         } ?: return
-        analysisExecutor.execute {
-            try {
-                mixer.analyzeBlocking(clone)
-            } catch (e: Exception) {
-                log.warn("silence analysis retry failed on guild {}", mixer.guildId, e)
+        try {
+            analysisExecutor.execute {
+                try {
+                    mixer.analyzeBlocking(clone)
+                } catch (e: Exception) {
+                    log.warn("silence analysis retry failed on guild {}", mixer.guildId, e)
+                }
             }
+        } catch (e: RejectedExecutionException) {
+            log.warn("analysis executor rejected retry on guild {}", mixer.guildId, e)
         }
     }
 
@@ -192,7 +202,14 @@ class MixerPlugin(
      */
     private fun maybeStartAnnouncement(mixer: GuildMixer) {
         val item = mixer.takeNextAnnouncement() ?: return
-        resolveTrack(mixer.guildId, item.identifier, item.encodedTrack).whenComplete { track, err ->
+        val resolving = try {
+            resolveTrack(mixer.guildId, item.identifier, item.encodedTrack)
+        } catch (e: Exception) {
+            // takeNextAnnouncement marked the queue as resolving; release it or the queue stalls.
+            mixer.onAnnouncementFailed(item, e)
+            return
+        }
+        resolving.whenComplete { track, err ->
             if (err != null || track == null) {
                 mixer.onAnnouncementFailed(item, err ?: IllegalArgumentException("announcement track resolved to nothing"))
                 return@whenComplete

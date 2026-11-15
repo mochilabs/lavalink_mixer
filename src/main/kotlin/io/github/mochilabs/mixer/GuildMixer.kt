@@ -195,12 +195,17 @@ class GuildMixer(
 
         override fun scheduleArmedAnalysis(track: AudioTrack) {
             val cloneForAnalysis = runCatching { track.makeClone() }.getOrNull() ?: return
-            analysisExecutor.execute {
-                try {
-                    analyzeBlocking(cloneForAnalysis)
-                } catch (e: Exception) {
-                    log.warn("silence analysis failed on guild {}", this@GuildMixer.guildId, e)
+            // Called from arm() after ARMED is committed; a rejection must not fail the request.
+            try {
+                analysisExecutor.execute {
+                    try {
+                        analyzeBlocking(cloneForAnalysis)
+                    } catch (e: Exception) {
+                        log.warn("silence analysis failed on guild {}", this@GuildMixer.guildId, e)
+                    }
                 }
+            } catch (e: java.util.concurrent.RejectedExecutionException) {
+                log.warn("analysis executor rejected armed-track scan on guild {}", this@GuildMixer.guildId, e)
             }
         }
 

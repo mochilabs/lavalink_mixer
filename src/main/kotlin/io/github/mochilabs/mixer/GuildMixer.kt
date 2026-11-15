@@ -4,6 +4,7 @@ import com.sedmelluq.discord.lavaplayer.format.StandardAudioDataFormats
 import com.sedmelluq.discord.lavaplayer.player.AudioPlayer
 import com.sedmelluq.discord.lavaplayer.player.AudioPlayerManager
 import com.sedmelluq.discord.lavaplayer.player.event.AudioEventAdapter
+import com.sedmelluq.discord.lavaplayer.player.event.AudioEventListener
 import com.sedmelluq.discord.lavaplayer.track.AudioTrack
 import com.sedmelluq.discord.lavaplayer.track.AudioTrackEndReason
 import com.sedmelluq.discord.lavaplayer.format.AudioDataFormat
@@ -183,7 +184,7 @@ class GuildMixer(
             (bpmScanMs * 2 + 7000L).coerceAtMost(120_000L)
         } else 7000L
         override val isXfadeActive: Boolean get() = xfadeActive
-        override val isOverlayActive: Boolean get() = overlayActive
+        override val isOverlayActive: Boolean get() = overlays.overlayActive
 
         override fun safePosition(track: AudioTrack): Long = this@GuildMixer.safePosition(track)
 
@@ -289,19 +290,18 @@ class GuildMixer(
         override fun applyAnalyzedNormGain(identifier: String) =
             this@GuildMixer.applyAnalyzedNormGain(identifier)
     }, settings, playerManager, analysisExecutor)
-    private var subStartMs: Long = 0L
-    /** Active parallel (`mode=parallel`) overlays: each owns its decoder + siphon + fade ramp. */
-    private val parallelOverlays = LinkedHashMap<Long, OverlaySlot>()
-    @Volatile private var parallelOverlaySnapshot: List<OverlaySlot> = emptyList()
+    private val overlays: OverlayController = OverlayController(object : OverlayHost {
+        override val guildId: Long get() = this@GuildMixer.guildId
+        override val lock: Any get() = this@GuildMixer.lock
+        override val transitionBusyLocked: Boolean get() = xfadeActive || overlapPreparation != null
+        override val subListener: AudioEventListener get() = this@GuildMixer.subListener
 
-    private fun publishParallelOverlaysLocked() {
-        parallelOverlaySnapshot = parallelOverlays.values.toList()
-    }
-    /** Sequential (single-sub) overlay is still active; mutually exclusive with parallel overlays. */
-    private var sequentialOverlayId: Long? = null
-    @Volatile private var sequentialOverlayChannel: AnnounceChannel = AnnounceChannel.BOTH
-    /** Voice thread reads these without taking [lock]; races only shift a fade by a chunk. */
-    @Volatile private var overlayActive: Boolean = false
+        override fun resetSubNormLocked() = subNorm.setNow(1f)
+        override fun isFeeder(feederId: Long): Boolean = this@GuildMixer.isFeeder(feederId)
+        override fun notifyMixerEvent(type: String, body: JsonObjectBuilder.() -> Unit) =
+            this@GuildMixer.notifyMixerEvent(type, body)
+    }, settings, deck, playerManager)
+    /** Voice thread reads this without taking [lock]; races only shift a fade by a chunk. */
     @Volatile private var xfadeActive: Boolean = false
     @Volatile var activeRecipe: TransitionRecipe? = null
         private set
@@ -353,7 +353,6 @@ class GuildMixer(
     @Volatile private var xfadeBeatMatched: Boolean = false
     @Volatile private var xfadeFallbackReason: String? = null
     private var subStartPositionMs: Long = 0L
-    private var announceToken: Long = 0L
     private var masking: Boolean = false
     private var maskingTrack: AudioTrack? = null
     private var overlapPreparation: TransitionFence? = null
@@ -450,7 +449,7 @@ class GuildMixer(
                     }
                     val preserveStart = preservedStartTrack === track
                     preservedStartTrack = null
-                    val targetGain = if (overlayActive || parallelOverlays.isNotEmpty()) duckLevel.coerceIn(0f, 1f) else 1f
+                    val targetGain = if (overlays.overlayActive || overlays.hasParallelLocked) duckLevel.coerceIn(0f, 1f) else 1f
                     StartSnap(
                         xfadeActive,
                         if (silenceSkipEnabled && !preserveStart) leadForLocked(track) else -1L,
@@ -600,11 +599,11 @@ class GuildMixer(
         fallbackAdvanceOrIdle()
     }
 
-    private val subListener = object : AudioEventAdapter() {
+    private val subListener: AudioEventListener = object : AudioEventAdapter() {
         override fun onTrackEnd(player: AudioPlayer, track: AudioTrack, endReason: AudioTrackEndReason) {
-            val overlay = synchronized(lock) { overlayActive }
+            val overlay = synchronized(lock) { overlays.overlayActive }
             if (overlay) {
-                finishOverlay()
+                overlays.finishOverlay()
                 return
             }
             val abort = synchronized(lock) {
@@ -628,32 +627,15 @@ class GuildMixer(
         private fun subFailed() {
             val action = synchronized(lock) {
                 when {
-                    overlayActive -> 1
+                    overlays.overlayActive -> 1
                     xfadeActive -> 2
                     else -> 0
                 }
             }
             when (action) {
-                1 -> finishOverlay()
+                1 -> overlays.finishOverlay()
                 2 -> abortXfade("sub track stuck/failed")
             }
-        }
-    }
-
-    /** Listener for a single `mode=parallel` overlay slot; self-finishes on end/failure. */
-    private fun parallelOverlayListener(id: Long): AudioEventAdapter = object : AudioEventAdapter() {
-        override fun onTrackEnd(player: AudioPlayer, track: AudioTrack, endReason: AudioTrackEndReason) {
-            finishParallelOverlay(id)
-        }
-
-        override fun onTrackException(player: AudioPlayer, track: AudioTrack, exception: com.sedmelluq.discord.lavaplayer.tools.FriendlyException) {
-            log.warn("parallel overlay '{}' failed on guild {}: {}", titleOf(track), guildId, exception.toString())
-            finishParallelOverlay(id)
-        }
-
-        override fun onTrackStuck(player: AudioPlayer, track: AudioTrack, thresholdMs: Long) {
-            log.warn("parallel overlay '{}' stuck on guild {} ({}ms)", titleOf(track), guildId, thresholdMs)
-            finishParallelOverlay(id)
         }
     }
 
@@ -713,7 +695,7 @@ class GuildMixer(
         val action = synchronized(lock) {
             val player = main?.audioPlayer ?: return
             val playing = player.playingTrack
-            val needed = overlayActive || parallelOverlays.isNotEmpty() || announcementQueue.hasWork
+            val needed = overlays.overlayActive || overlays.hasParallelLocked || overlays.queueHasWorkLocked
             when {
                 needed -> {
                     idleCarrierIdleSinceMs = 0L
@@ -892,18 +874,8 @@ class GuildMixer(
         )
     }
 
-    /**
-     * Advances the per-slot fade ramps and returns the currently active
-     * parallel overlays (player + siphon + ramp) for the mixer to sum in.
-     * Called on the voice thread each chunk; slots are read lock-free via
-     * volatile/immutable handles, and only the ramp advances here.
-     */
-    fun advanceParallelOverlays(samples: Int, feederId: Long): List<OverlaySlot> {
-        if (!isFeeder(feederId)) return emptyList()
-        val active = parallelOverlaySnapshot.filter { it.active }
-        for (slot in active) slot.ramp.advance(samples)
-        return active
-    }
+    fun advanceParallelOverlays(samples: Int, feederId: Long): List<OverlaySlot> =
+        overlays.advanceParallel(samples, feederId)
 
     /** Counts only PCM that is actually mixed into the Discord output. */
     fun noteSubOutput(samples: Int) {
@@ -1060,30 +1032,13 @@ class GuildMixer(
         synchronized(lock) { AnalysisCaches.trim[identifier] }
 
     /** Test seam: count currently active parallel overlay slots. */
-    internal fun parallelOverlayCountForTest(): Int = synchronized(lock) { parallelOverlays.size }
-    internal fun installParallelOverlayForTest(slot: OverlaySlot) {
-        synchronized(lock) {
-            parallelOverlays[slot.id] = slot
-            publishParallelOverlaysLocked()
-        }
-    }
-    internal fun overlayForTest(active: Boolean, channel: AnnounceChannel = AnnounceChannel.BOTH) {
-        synchronized(lock) {
-            overlayActive = active
-            sequentialOverlayChannel = channel
-        }
-    }
+    internal fun parallelOverlayCountForTest(): Int = overlays.parallelCountForTest()
+    internal fun installParallelOverlayForTest(slot: OverlaySlot) = overlays.installParallelForTest(slot)
+    internal fun overlayForTest(active: Boolean, channel: AnnounceChannel = AnnounceChannel.BOTH) =
+        overlays.overlayForTest(active, channel)
 
     /** Test seam: simulate [count] active parallel slots without players (for the limit check). */
-    internal fun armParallelForTest(count: Int) {
-        synchronized(lock) {
-            parallelOverlays.clear()
-            repeat(count) { i ->
-                parallelOverlays[i.toLong()] = OverlaySlot(i.toLong(), playerManager.createPlayer(), SiphonQueue.forFrameBuffer(deck.frameBufferDurationMs())).apply { active = true }
-            }
-            publishParallelOverlaysLocked()
-        }
-    }
+    internal fun armParallelForTest(count: Int) = overlays.armParallelForTest(count)
 
     // ---- scheduler entry points ----
 
@@ -1092,7 +1047,7 @@ class GuildMixer(
         val sub = synchronized(lock) { deck.player?.takeIf { it.playingTrack != null } }
         // Providing frees the decoder's frame buffer and lets it produce more PCM.
         // Keep prewarmed audio bounded while the main decoder has not reached the fade.
-        if (sub != null && (overlayActive || siphon.pendingSamples < SAMPLE_RATE)) {
+        if (sub != null && (overlays.overlayActive || siphon.pendingSamples < SAMPLE_RATE)) {
             try {
                 sub.provide(deck.drainFrame)
             } catch (e: Exception) {
@@ -1102,7 +1057,7 @@ class GuildMixer(
         // Drive every active parallel overlay decoder too; each has its own
         // player and siphon, and none of them are drained anywhere else.
         val parallels = synchronized(lock) {
-            parallelOverlays.values.filter { it.active && it.player.playingTrack != null }
+            overlays.drainableParallelsLocked()
         }
         for (slot in parallels) {
             try {
@@ -1459,25 +1414,12 @@ class GuildMixer(
 
     fun hasNext(): Boolean = synchronized(lock) { pendingNextTrack != null || readyNextTrack != null }
 
-    fun isOverlayActive(): Boolean = overlayActive
-    fun currentOverlayChannel(): AnnounceChannel = sequentialOverlayChannel
+    fun isOverlayActive(): Boolean = overlays.overlayActive
+    fun currentOverlayChannel(): AnnounceChannel = overlays.sequentialChannel
     fun isXfadeActive(): Boolean = synchronized(lock) { xfadeActive }
-    fun isSubBusy(): Boolean = synchronized(lock) { overlayActive || xfadeActive || overlapPreparation != null || analysis.activeLocked || parallelOverlays.isNotEmpty() }
+    fun isSubBusy(): Boolean = synchronized(lock) { overlays.overlayActive || xfadeActive || overlapPreparation != null || analysis.activeLocked || overlays.hasParallelLocked }
 
-    // ---- announcement queue ----
-    //
-    // TTS/announcements are talk-over overlays: they duck the music rather than
-    // becoming a track in the playback order. One overlay at a time is a hard
-    // limit (there is a single secondary decoder), so successive announcements
-    // wait here and play back to back as the secondary player frees up.
-
-
-    private val announcementQueue = AnnouncementQueue(
-        guildId = guildId,
-        activeParallelCount = { parallelOverlays.size },
-        maxParallelOverlays = { maxParallelOverlays },
-        isSequentialBusy = { overlayActive || xfadeActive || overlapPreparation != null },
-    )
+    // ---- announcements and overlays ----
 
     /** Queues an announcement; returns its id and 1-based position among queued announcements. */
     fun enqueueAnnouncement(
@@ -1487,39 +1429,33 @@ class GuildMixer(
         mode: AnnounceMode = AnnounceMode.SEQUENTIAL,
         channel: AnnounceChannel = AnnounceChannel.BOTH,
         gain: Float = 1f,
-    ): Pair<Long, Int> =
-        synchronized(lock) {
-            announcementQueue.enqueue(identifier, encodedTrack, duckLevel, mode, channel, sanitizeAnnounceGain(gain))
-        }
+    ): Pair<Long, Int> = overlays.enqueueAnnouncement(identifier, encodedTrack, duckLevel, mode, channel, gain)
 
-    fun takeNextAnnouncement(): AnnouncementItem? = synchronized(lock) {
-        announcementQueue.takeNext()
-    }
+    fun takeNextAnnouncement(): AnnouncementItem? = overlays.takeNextAnnouncement()
 
     /** Puts an item back at the head after a busy race or transient failure. */
-    fun requeueAnnouncement(item: AnnouncementItem, cause: Throwable?) {
-        synchronized(lock) {
-            announcementQueue.requeue(item)
-        }
-        log.warn("announcement {} re-queued on guild {}: {}", item.id, guildId, cause?.toString() ?: "secondary player busy")
-    }
+    fun requeueAnnouncement(item: AnnouncementItem, cause: Throwable?) = overlays.requeueAnnouncement(item, cause)
 
     /** Drops an item whose track could not be resolved/started. */
-    fun onAnnouncementFailed(item: AnnouncementItem, cause: Throwable?) {
-        synchronized(lock) { announcementQueue.markFinishedResolution() }
-        log.warn("announcement {} on guild {} dropped: {}", item.id, guildId, cause?.toString() ?: "unknown")
-    }
+    fun onAnnouncementFailed(item: AnnouncementItem, cause: Throwable?) = overlays.onAnnouncementFailed(item, cause)
 
-    fun onAnnouncementStarted(item: AnnouncementItem) {
-        synchronized(lock) { announcementQueue.markFinishedResolution() }
-    }
+    fun onAnnouncementStarted(item: AnnouncementItem) = overlays.onAnnouncementStarted(item)
 
-    fun announcementQueueSize(): Int = synchronized(lock) { announcementQueue.size }
+    fun announcementQueueSize(): Int = overlays.announcementQueueSize()
 
     /** Removes all queued (not active) announcements; returns how many were dropped. */
-    fun clearAnnouncements(): Int = synchronized(lock) {
-        announcementQueue.clear()
-    }
+    fun clearAnnouncements(): Int = overlays.clearAnnouncements()
+
+    fun startOverlay(
+        track: AudioTrack,
+        duck: Float,
+        announcementId: Long? = null,
+        mode: AnnounceMode = AnnounceMode.SEQUENTIAL,
+        channel: AnnounceChannel = AnnounceChannel.BOTH,
+        gain: Float = 1f,
+    ): AudioTrack = overlays.startOverlay(track, duck, announcementId, mode, channel, gain)
+
+    fun cancelOverlay(): Boolean = overlays.cancelOverlay()
 
     /**
      * Normalization gain the main track is playing at or ramping toward (1 while
@@ -1560,130 +1496,6 @@ class GuildMixer(
         (xfadeHandoffMs - pos).coerceAtLeast(0)
     }
 
-    fun startOverlay(
-        track: AudioTrack,
-        duck: Float,
-        announcementId: Long? = null,
-        mode: AnnounceMode = AnnounceMode.SEQUENTIAL,
-        channel: AnnounceChannel = AnnounceChannel.BOTH,
-        gain: Float = 1f,
-    ): AudioTrack {
-        val level = sanitizeAnnounceGain(gain)
-        if (mode == AnnounceMode.PARALLEL) {
-            startParallelOverlay(track, duck, announcementId, channel, level)
-            return track
-        }
-        val (sub, gen) = synchronized(lock) {
-            if (overlayActive || xfadeActive || overlapPreparation != null) throw MixerBusyException("secondary player busy on guild $guildId")
-            val s = deck.ensureLocked(subListener)
-            deck.factory?.resetSpeed()
-            announceToken++
-            deck.track = track
-            overlayActive = true
-            sequentialOverlayId = announcementId
-            sequentialOverlayChannel = channel
-            subStartMs = System.currentTimeMillis()
-            siphon.clear()
-            // Overlays are announcements: they use their original level, not
-            // the outgoing crossfade track's normalization gain.
-            subNorm.setNow(1f)
-            deck.mainGain.rampTo(duck.coerceIn(0f, 1f), msToSamples(duckFadeMs))
-            deck.subGain.setNow(0f)
-            deck.subGain.rampTo(level, msToSamples(150))
-            s to ++deck.gen
-        }
-        try {
-            sub.playTrack(track)
-        } catch (e: Exception) {
-            log.warn("overlay play failed on guild {}", guildId, e)
-            finishOverlay()
-            throw e
-        }
-        val stillCurrent = synchronized(lock) { deck.gen == gen && overlayActive && deck.track === track }
-        if (!stillCurrent) {
-            try {
-                sub.stopTrack()
-            } catch (e: Exception) {
-                log.warn("superseded overlay stop failed on guild {}", guildId, e)
-            }
-            siphon.clear()
-            if (synchronized(lock) { overlayActive && deck.track === track }) {
-                finishOverlay()
-            }
-            throw MixerBusyException("overlay cancelled during start on guild $guildId")
-        }
-        log.info("overlay '{}' started on guild {}", track.info.title, guildId)
-        notifyMixerEvent("announceStart") {
-            if (announcementId != null) put("announcementId", announcementId)
-            putTrack(track)
-        }
-        return track
-    }
-
-    /**
-     * Starts a `mode=parallel` overlay on its own secondary player, mixed
-     * into the main chain alongside (but independent of) the crossfade sub.
-     * Up to [maxParallelOverlays] run at once; music ducking is handled by
-     * the shared [SubDeck.mainGain], so the first parallel overlay ducks and the
-     * last one to finish releases it.
-     */
-    private fun startParallelOverlay(
-        track: AudioTrack,
-        duck: Float,
-        announcementId: Long?,
-        channel: AnnounceChannel = AnnounceChannel.BOTH,
-        level: Float = 1f,
-    ) {
-        val slot = synchronized(lock) {
-            if (parallelOverlays.size >= maxParallelOverlays) {
-                throw MixerBusyException("parallel overlay limit ($maxParallelOverlays) reached on guild $guildId")
-            }
-            val id = announcementId ?: announcementQueue.nextId()
-            val player = playerManager.createPlayer()
-            val siphon = SiphonQueue.forFrameBuffer(deck.frameBufferDurationMs())
-            player.setFilterFactory(SiphonFactory(siphon))
-            player.addListener(parallelOverlayListener(id))
-            val s = OverlaySlot(id, player, siphon, channel)
-            parallelOverlays[id] = s
-            s.track = track
-            s.active = true
-            s.ramp.setNow(0f)
-            s.ramp.rampTo(level, msToSamples(150))
-            publishParallelOverlaysLocked()
-            // First parallel overlay (or a parallel overlay while music is
-            // not otherwise ducked) ducks the music.
-            deck.mainGain.rampTo(duck.coerceIn(0f, 1f), msToSamples(duckFadeMs))
-            s
-        }
-        try {
-            slot.player.playTrack(track)
-        } catch (e: Exception) {
-            log.warn("parallel overlay play failed on guild {}", guildId, e)
-            finishParallelOverlay(slot.id)
-            throw e
-        }
-        log.info("parallel overlay '{}' (id {}) started on guild {}", track.info.title, slot.id, guildId)
-        notifyMixerEvent("announceStart") {
-            put("announcementId", slot.id)
-            put("mode", "parallel")
-            putTrack(track)
-        }
-    }
-
-    fun cancelOverlay(): Boolean {
-        val sub = synchronized(lock) {
-            if (!overlayActive) return false
-            deck.gen++
-            deck.player
-        }
-        try {
-            sub?.stopTrack()
-        } finally {
-            finishOverlay()
-        }
-        return true
-    }
-
     fun destroy() {
         val (sub, parallels) = synchronized(lock) {
             pendingNextTrack = null
@@ -1693,12 +1505,9 @@ class GuildMixer(
             deck.track = null
             xfadeActive = false
             activeRecipe = null
-            overlayActive = false
             analysis.resetLocked()
             deck.factory?.resetSpeed()
-            val p = parallelOverlays.values.toList()
-            parallelOverlays.clear()
-            publishParallelOverlaysLocked()
+            val p = overlays.destroyLocked()
             deck.player.also { deck.player = null } to p
         }
         try {
@@ -1723,7 +1532,7 @@ class GuildMixer(
 
     private fun prepareOverlap(plan: CrossfadePlan, fence: TransitionFence, analysisLog: String) {
         synchronized(lock) {
-            if (overlapPreparation != null || overlayActive || xfadeActive || !matchesFenceLocked(fence)) return
+            if (overlapPreparation != null || overlays.overlayActive || xfadeActive || !matchesFenceLocked(fence)) return
             overlapPreparation = fence
         }
         protocol.executeAction {
@@ -1782,11 +1591,11 @@ class GuildMixer(
             log.warn("overlap pre-start play failed on guild {}", guildId, e)
         }
         val ready = deck.prefill(sub) {
-            synchronized(lock) { crossfadeEnabled && !protocol.preserveTransition && matchesFenceLocked(expected) && !overlayActive && !xfadeActive }
+            synchronized(lock) { crossfadeEnabled && !protocol.preserveTransition && matchesFenceLocked(expected) && !overlays.overlayActive && !xfadeActive }
         }
         val started = synchronized(lock) {
             val startSample = maxOf(plan.startMs * SAMPLE_RATE / 1000, chainPos.get())
-            if (!ready || !crossfadeEnabled || protocol.preserveTransition || overlayActive || xfadeActive ||
+            if (!ready || !crossfadeEnabled || protocol.preserveTransition || overlays.overlayActive || xfadeActive ||
                 startSample >= plan.handoffMs * SAMPLE_RATE / 1000 || !matchesFenceLocked(expected) ||
                 protocol.gate.lastKnownEpoch != epochAtStart || protocol.advanceSeq.get() != seqAtStart ||
                 slotRevision != revisionAtStart || protocol.playbackState != PlaybackState.ARMED) {
@@ -1803,7 +1612,6 @@ class GuildMixer(
                 xfadeFallbackReason = if (plan.beatMatched && nativeFailed) "timescale_native_failed" else plan.fallbackReason
 
                 deck.track = next
-                overlayActive = false
                 xfadeTransitionKind = if (nativeFailed) "crossfade" else plan.transitionKind
                 xfadeDecisionReason = if (nativeFailed) "timescale_native_failed" else plan.reason
                 xfadeHandoffMs = plan.handoffMs
@@ -1812,7 +1620,7 @@ class GuildMixer(
                 subSourceMilliSamples.set(0L)
                 handoffSourceMap.reset()
                 subStartPositionMs = incomingStartPosition
-                subStartMs = System.currentTimeMillis()
+                deck.startMs = System.currentTimeMillis()
                 xfadeTotal = msToSamples(plan.durationMs).coerceAtLeast(1)
                 xfadeLeft = xfadeTotal
                 xfadeStartSample = startSample
@@ -1839,7 +1647,7 @@ class GuildMixer(
             if (sub.playingTrack === next) {
                 runCatching { sub.stopTrack() }.onFailure { log.warn("superseded overlap stop failed on guild {}", guildId, it) }
             }
-            if (synchronized(lock) { !xfadeActive && !overlayActive }) siphon.clear()
+            if (synchronized(lock) { !xfadeActive && !overlays.overlayActive }) siphon.clear()
             return
         }
         // A control command (override/invalidate/reset/arm) that aborted the fade
@@ -1871,7 +1679,7 @@ class GuildMixer(
                     else log.warn("dropping superseded overlap on guild {}: slot busy", guildId)
                 }
             }
-            if (synchronized(lock) { !xfadeActive && !overlayActive }) siphon.clear()
+            if (synchronized(lock) { !xfadeActive && !overlays.overlayActive }) siphon.clear()
             return
         }
         val recipeStrategy = activeRecipe?.strategy?.name?.lowercase() ?: "crossfade"
@@ -2239,7 +2047,7 @@ class GuildMixer(
             xfadeFallbackReason = null
             val subPosMs = deck.track?.let { safePosition(it) } ?: -1L
             val subOutMs = subOutputSamples.get() * 1000L / SAMPLE_RATE
-            val elapsed = if (subStartMs > 0) System.currentTimeMillis() - subStartMs else -1L
+            val elapsed = if (deck.startMs > 0) System.currentTimeMillis() - deck.startMs else -1L
             val name = deck.track?.let { titleOf(it) } ?: "-"
             log.warn(
                 "crossfade aborted on guild {} after {}ms: {} " +
@@ -2276,60 +2084,6 @@ class GuildMixer(
             put("beatMatched", wasBeatMatched)
             fallbackReason?.let { put("fallbackReason", it) }
             putTrack(armedSub)
-        }
-    }
-
-    private fun finishOverlay() {
-        val sub = synchronized(lock) {
-            if (!overlayActive) return
-            overlayActive = false
-            deck.track = null
-            sequentialOverlayId = null
-            sequentialOverlayChannel = AnnounceChannel.BOTH
-            subNorm.setNow(1f)
-            siphon.clear()
-            // Release the music duck only if no parallel overlays are still
-            // holding it; otherwise the last parallel overlay will release it.
-            if (parallelOverlays.isEmpty()) {
-                deck.mainGain.rampTo(1f, msToSamples(duckFadeMs))
-            }
-            deck.subGain.setNow(0f)
-            deck.player
-        }
-        log.info("overlay finished on guild {}", guildId)
-        notifyMixerEvent("announceEnd") {}
-        try {
-            sub?.stopTrack()
-        } catch (e: Exception) {
-            log.warn("sub stop failed on guild {}", guildId, e)
-        }
-    }
-
-    /** Tears down a `mode=parallel` overlay slot and releases the duck if it was the last. */
-    private fun finishParallelOverlay(id: Long) {
-        val slot = synchronized(lock) {
-            val removed = parallelOverlays.remove(id) ?: return
-            removed.active = false
-            publishParallelOverlaysLocked()
-            removed
-        }
-        log.info("parallel overlay (id {}) finished on guild {}", id, guildId)
-        notifyMixerEvent("announceEnd") { put("announcementId", id) }
-        try {
-            slot.player.stopTrack()
-        } catch (e: Exception) {
-            log.warn("parallel overlay stop failed on guild {}", guildId, e)
-        }
-        synchronized(lock) {
-            // Release the duck once no overlay (sequential or parallel) holds it.
-            if (!overlayActive && parallelOverlays.isEmpty()) {
-                deck.mainGain.rampTo(1f, msToSamples(duckFadeMs))
-            }
-        }
-        try {
-            slot.player.destroy()
-        } catch (e: Exception) {
-            log.warn("parallel overlay player destroy failed on guild {}", guildId, e)
         }
     }
 

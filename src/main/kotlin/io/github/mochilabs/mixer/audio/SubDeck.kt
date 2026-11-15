@@ -25,6 +25,8 @@ internal class SubDeck(
     var factory: SiphonFactory? = null
         private set
     var track: AudioTrack? = null
+    /** Wall-clock time the deck was last armed; 0 before the first use. */
+    var startMs: Long = 0L
     /** Bumped on every sub arming/teardown; in-flight startOverlap/startOverlay re-check it. */
     var gen: Long = 0L
 

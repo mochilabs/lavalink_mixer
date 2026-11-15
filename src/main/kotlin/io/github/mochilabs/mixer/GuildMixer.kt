@@ -42,6 +42,8 @@ class GuildMixer(
     /** Outer lock serializing main.play/main.stop across doHandoff, advanceNext, and override. Never acquired while holding [lock]. */
     private val playerMutationLock = Any()
     @Volatile var main: IPlayer? = null
+    /** Set once by [destroy]; guarded by [lock]. */
+    private var destroyed = false
         private set
 
     var crossfadeEnabled: Boolean by settings::crossfadeEnabled
@@ -290,6 +292,7 @@ class GuildMixer(
         override val guildId: Long get() = this@GuildMixer.guildId
         override val lock: Any get() = this@GuildMixer.lock
         override val transitionBusyLocked: Boolean get() = crossfade.xfadeActive || crossfade.overlapPreparation != null
+        override val destroyedLocked: Boolean get() = destroyed
         override val subListener: AudioEventListener get() = this@GuildMixer.subListener
 
         override fun resetSubNormLocked() = subNorm.setNow(1f)
@@ -304,6 +307,7 @@ class GuildMixer(
         override val mainPlayer: IPlayer? get() = main
         override val playingTrack: AudioTrack? get() = mainTrack()
         override val overlayActive: Boolean get() = overlays.overlayActive
+        override val destroyedLocked: Boolean get() = destroyed
         override val chainPosSamples: Long get() = chainPos.get()
         override val slotRevision: Long get() = this@GuildMixer.slotRevision
         override val subListener: AudioEventListener get() = this@GuildMixer.subListener
@@ -1270,8 +1274,22 @@ class GuildMixer(
     /** Milliseconds until an armed overlap hands off; null when no crossfade is running. */
     fun crossfadeHandoffInMs(): Long? = crossfade.crossfadeHandoffInMs()
 
+    /**
+     * Tears the mixer down once. Afterwards [attachMain] returns false and the
+     * overlay and overlap paths refuse to create players, so late async work
+     * (announcement resolution, overlap preparation) cannot leak them.
+     */
     fun destroy() {
+        destroyWhen { true }
+    }
+
+    /** Test seam: whether [destroy] ran. */
+    fun isDestroyedForTest(): Boolean = synchronized(lock) { destroyed }
+
+    private inline fun destroyWhen(condition: () -> Boolean): Boolean {
         val (sub, parallels) = synchronized(lock) {
+            if (destroyed || !condition()) return false
+            destroyed = true
             pendingNextTrack = null
             readyNextTrack = null
             protocol.clearArmedLocked()
@@ -1298,6 +1316,7 @@ class GuildMixer(
         }
         stopIdleCarrier("mixer destroyed")
         protocol.shutdown()
+        return true
     }
 
     // ---- internals (all called under lock) ----

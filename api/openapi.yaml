@@ -576,7 +576,7 @@ components:
             overlapMs: { type: integer, format: int64, description: Duration of the two-track gain fade. }
             recoveryMs: { type: integer, format: int64, description: Incoming-only tempo recovery after the outgoing gain reaches zero. }
             beatMatched: { type: boolean }
-            fadeBeats: { type: integer, enum: [2, 4, 8], description: "Present when beatMatched is true." }
+            fadeBeats: { type: integer, enum: [2, 4, 8, 16, 32], description: "Present when beatMatched is true." }
             targetBpm: { type: number, description: "Outgoing tempo; present when beatMatched is true." }
             rateRatio:
               type: number

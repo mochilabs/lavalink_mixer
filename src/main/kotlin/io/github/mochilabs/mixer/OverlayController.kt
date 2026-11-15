@@ -95,7 +95,9 @@ internal class OverlayController(
      */
     fun advanceParallel(samples: Int, feederId: Long): List<OverlaySlot> {
         if (!host.isFeeder(feederId)) return emptyList()
-        val active = parallelOverlaySnapshot.filter { it.active }
+        val snapshot = parallelOverlaySnapshot
+        if (snapshot.isEmpty()) return emptyList()
+        val active = snapshot.filter { it.active }
         for (slot in active) slot.ramp.advance(samples)
         return active
     }

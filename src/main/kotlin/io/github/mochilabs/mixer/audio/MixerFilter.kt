@@ -169,7 +169,7 @@ class MixerFilter(
         if (subSamples < length) mixer.noteUnderrun(length - subSamples, length)
 
         if (input.size >= 2 && mixer.isOverlayActive()) {
-            val hasRight = sub.size > 1 && sub[1].any { it != 0f }
+            val hasRight = sub.size > 1 && hasSignal(sub[1], length)
             val srcR = if (hasRight) sub[1] else sub[0]
             when (mixer.currentOverlayChannel()) {
                 AnnounceChannel.LEFT -> {
@@ -200,7 +200,7 @@ class MixerFilter(
                 val g = slot.ramp.current
                 if (input.size >= 2) {
                     val srcL = buf[0]
-                    val hasRight = buf.size > 1 && buf[1].any { it != 0f }
+                    val hasRight = buf.size > 1 && hasSignal(buf[1], length)
                     val srcR = if (hasRight) buf[1] else buf[0]
                     when (slot.channel) {
                         AnnounceChannel.LEFT -> {
@@ -306,6 +306,12 @@ class MixerFilter(
                 channel[i] = softLimit(sum)
             }
         }
+    }
+
+    /** Scratch buffers are reused across chunk sizes, so only the first [length] samples are this chunk's. */
+    private fun hasSignal(channel: FloatArray, length: Int): Boolean {
+        for (i in 0 until minOf(length, channel.size)) if (channel[i] != 0f) return true
+        return false
     }
 
     private fun ensureScratch(buffer: Array<FloatArray>, channels: Int, samples: Int): Array<FloatArray> {

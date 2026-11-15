@@ -453,7 +453,8 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
     }
 
     /** Linear gain → dB (e.g. gain 0.5 = -6.0dB). */
-    private fun gainToDb(gain: Float): Float = 20f * log10(gain)
+    /** Floored at -120 dB: log10 of zero is -Infinity, which strict JSON cannot carry. */
+    private fun gainToDb(gain: Float): Float = 20f * log10(gain.coerceAtLeast(MIN_REPORTED_GAIN))
 
     @PostMapping("/mixer/crossfade")
     fun crossfade(@RequestBody body: CrossfadeRequest): ResponseEntity<MixerState> {
@@ -618,5 +619,6 @@ class MixerRestHandler(private val plugin: MixerPlugin) {
     companion object {
         private val log = LoggerFactory.getLogger(MixerRestHandler::class.java)
         private const val LOAD_TIMEOUT_SEC = 20L
+        private const val MIN_REPORTED_GAIN = 1e-6f
     }
 }

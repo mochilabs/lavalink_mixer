@@ -377,9 +377,8 @@ components:
           default: sequential
         channel:
           type: [string, 'null']
-          enum: [both, left, right]
           examples: [both, left, right]
-          description: "Target stereo channel for the announcement. Case-insensitive ('left'/'l', 'right'/'r', or 'both'/null). If omitted, plays on both channels."
+          description: "Target stereo channel for the announcement. Case-insensitive ('left'/'l', 'right'/'r', or 'both'/null). If omitted, plays on both channels. Unlike mode, any other value is accepted and also plays on both channels."
           default: both
     AnnounceQueuedResponse:
       type: object
@@ -492,7 +491,7 @@ components:
       required: [identifier, title]
       properties:
         identifier: { type: [string, 'null'] }
-        title: { type: string }
+        title: { type: [string, 'null'], description: "Null when the track's metadata cannot be read." }
     MixerEventBase:
       type: object
       required: [op, type, guildId]
